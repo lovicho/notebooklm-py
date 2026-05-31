@@ -81,9 +81,8 @@ def _load_sibling(module_name: str, file_name: str) -> Any:
     spec = importlib.util.spec_from_file_location(
         module_name, Path(__file__).resolve().parent / file_name
     )
-    assert spec is not None and spec.loader is not None, (
-        f"Could not load {file_name} next to vcr_config.py"
-    )
+    if spec is None or spec.loader is None:  # pragma: no cover - import wiring guard
+        raise ImportError(f"Could not load {file_name} next to vcr_config.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -118,7 +117,7 @@ def _is_vcr_record_mode() -> bool:
     module's VCR-instance config and ``tests/integration/conftest.py``
     consume this helper to avoid drift between the two checks.
     """
-    return os.environ.get("NOTEBOOKLM_VCR_RECORD", "").lower() in ("1", "true", "yes")
+    return os.environ.get("NOTEBOOKLM_VCR_RECORD", "").casefold() in ("1", "true", "yes")
 
 
 def get_error_injection_mode() -> str | None:
@@ -134,7 +133,10 @@ def get_error_injection_mode() -> str | None:
     same canonical set in :mod:`tests.cassette_patterns` so they cannot
     drift.
     """
-    raw = os.environ.get(ERROR_INJECT_ENV_VAR, "").strip().lower()
+    # ``.casefold()`` (not ``.lower()``) for parity with ``_is_vcr_record_mode``
+    # and the project's Unicode-aware case-insensitive rule — ASCII-identical
+    # for VALID_ERROR_MODES, so this is consistency hygiene (#1268).
+    raw = os.environ.get(ERROR_INJECT_ENV_VAR, "").strip().casefold()
     if not raw:
         return None
     return raw if raw in VALID_ERROR_MODES else None

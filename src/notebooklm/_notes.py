@@ -6,47 +6,25 @@ they are user-created content, not AI-generated.
 
 Note-row primitives live in :mod:`_note_service` and the
 mind-map-only facade lives in :mod:`_mind_map` as
-:class:`NoteBackedMindMapService`. Saved-from-chat note creation lives
-in :mod:`_chat` (``ChatAPI.save_answer_as_note``); ``NotesAPI`` calls
-into it via a constructor-injected :class:`SaveChatAnswerCallback`
-callback so this module does not import ``_chat`` (refactor-history.md Step 8,
-ADR-013).
+:class:`NoteBackedMindMapService`. Saving a chat answer as a
+citation-rich note lives on :class:`ChatAPI` as ``save_answer_as_note``
+(refactor-history.md Step 8, ADR-013); the former
+``NotesAPI.create_from_chat`` forwarder was removed in v0.7.0.
 """
 
 from __future__ import annotations
 
 import builtins
 import logging
-import warnings
-from typing import Any, Protocol
+from typing import Any
 
 from ._deprecation import warn_get_returns_none
 from ._mind_map import NoteBackedMindMapService
 from ._note_service import NoteRowKind, NoteService
 from ._row_adapters_notes import NoteRow
-from .types import AskResult, Note
+from .types import Note
 
 logger = logging.getLogger(__name__)
-
-
-class SaveChatAnswerCallback(Protocol):
-    """Async callback that persists a chat answer as a citation-rich note.
-
-    Defined as a ``Protocol`` (not a ``Callable`` alias) so mypy catches
-    keyword-only ``title=`` mismatches at the forwarder call site.
-    ``ChatAPI.save_answer_as_note`` structurally satisfies this
-    Protocol; ``NotesAPI`` receives the bound method via constructor
-    injection so it does not have to import ``ChatAPI``
-    (refactor-history.md §Saved Chat Answer As Note, ADR-013).
-    """
-
-    async def __call__(
-        self,
-        notebook_id: str,
-        ask_result: AskResult,
-        *,
-        title: str | None = None,
-    ) -> Note: ...
 
 
 class NotesAPI:
@@ -71,7 +49,6 @@ class NotesAPI:
         *,
         notes: NoteService,
         mind_maps: NoteBackedMindMapService,
-        save_chat_answer: SaveChatAnswerCallback,
     ):
         """Initialize the notes API.
 
@@ -82,15 +59,9 @@ class NotesAPI:
             mind_maps: Mind-map-only facade backed by ``notes``. Owns
                 the ``list_mind_maps`` / ``delete_mind_map`` paths the
                 public ``NotesAPI`` surface forwards through.
-            save_chat_answer: Required async callback that persists a
-                chat answer as a citation-rich note. Inject
-                ``ChatAPI.save_answer_as_note`` from the composition
-                root. No default — without it, ``create_from_chat``
-                cannot delegate.
         """
         self._notes = notes
         self._mind_maps = mind_maps
-        self._save_chat_answer = save_chat_answer
 
     async def list(self, notebook_id: str) -> list[Note]:
         """List all text notes in the notebook.
@@ -179,33 +150,6 @@ class NotesAPI:
             content=content,
         )
 
-    async def create_from_chat(
-        self,
-        notebook_id: str,
-        ask_result: AskResult,
-        *,
-        title: str | None = None,
-    ) -> Note:
-        """Deprecated forwarder — use ``client.chat.save_answer_as_note``.
-
-        Preserves the v0.4.1 signature exactly so existing callers do
-        not break, but emits a :class:`DeprecationWarning` and is a
-        pure delegate to the injected callback (which is
-        :meth:`ChatAPI.save_answer_as_note` when wired from the
-        composition root).
-
-        Empty-references handling and default-title derivation live on
-        ``ChatAPI.save_answer_as_note``; this method does no
-        preprocessing of its own to keep the deprecation contract
-        as a thin shim.
-        """
-        warnings.warn(
-            "NotesAPI.create_from_chat is deprecated; use ChatAPI.save_answer_as_note.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return await self._save_chat_answer(notebook_id, ask_result, title=title)
-
     async def update(
         self,
         notebook_id: str,
@@ -223,21 +167,27 @@ class NotesAPI:
         """
         await self._notes.update_note(notebook_id, note_id, content, title)
 
-    async def delete(self, notebook_id: str, note_id: str) -> bool:
+    async def delete(self, notebook_id: str, note_id: str) -> None:
         """Delete a note from the notebook.
 
         Note: This clears the note content/title rather than removing it
         from the list entirely. Google may garbage collect cleared notes later.
 
+        Idempotent: deleting an already-absent note succeeds (returns
+        ``None``) and never raises. Real failures (``403``/``5xx``/auth/
+        transport) still propagate.
+
         Args:
             notebook_id: The notebook ID.
             note_id: The note ID.
 
-        Returns:
-            True if deletion succeeded.
+        .. versionchanged:: 0.7.0
+            **Breaking change:** previously returned a hardcoded ``True``;
+            now returns ``None`` (issue #1211). ``if await notes.delete(...):``
+            no longer enters its block.
         """
         logger.debug("Deleting note %s from notebook %s", note_id, notebook_id)
-        return await self._notes.delete_note(notebook_id, note_id)
+        await self._notes.delete_note(notebook_id, note_id)
 
     async def list_mind_maps(self, notebook_id: str) -> builtins.list[Any]:
         """List all mind maps in the notebook.
@@ -258,17 +208,22 @@ class NotesAPI:
         """
         return await self._mind_maps.list_mind_maps(notebook_id)
 
-    async def delete_mind_map(self, notebook_id: str, mind_map_id: str) -> bool:
+    async def delete_mind_map(self, notebook_id: str, mind_map_id: str) -> None:
         """Delete a mind map from the notebook.
+
+        Idempotent: deleting an already-absent mind map succeeds (returns
+        ``None``) and never raises. Real failures (``403``/``5xx``/auth/
+        transport) still propagate.
 
         Args:
             notebook_id: The notebook ID.
             mind_map_id: The mind map ID.
 
-        Returns:
-            True if deletion succeeded.
+        .. versionchanged:: 0.7.0
+            **Breaking change:** previously returned a hardcoded ``True``;
+            now returns ``None`` (issue #1211).
         """
-        return await self._mind_maps.delete_mind_map(notebook_id, mind_map_id)
+        await self._mind_maps.delete_mind_map(notebook_id, mind_map_id)
 
     # =========================================================================
     # Private Helpers
