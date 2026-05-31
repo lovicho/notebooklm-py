@@ -155,14 +155,27 @@ def register_chat_commands(cli):
             "back to a plain-text note."
         ),
     )
-    @click.option("--note-title", default=None, help="Note title (use with --save-as-note)")
+    # ``-t`` consistently means "note title" across `note create`, `chat history`,
+    # and here, so the short flag carries the same meaning everywhere it appears.
     @click.option(
+        "-t",
+        "--note-title",
+        "note_title",
+        default=None,
+        help="Note title (use with --save-as-note)",
+    )
+    # ``--request-timeout`` is the self-documenting canonical name: this is the
+    # per-request HTTP socket timeout, NOT the poll/wait budget that other
+    # commands spell ``--timeout``. ``--timeout`` stays as a back-compat alias.
+    @click.option(
+        "--request-timeout",
         "--timeout",
+        "timeout",
         default=None,
         type=click.IntRange(min=1),
         help=(
             "HTTP request timeout in seconds (default: 30, from the library). "
-            "Increase for long or complex prompts."
+            "Increase for long or complex prompts. (--timeout is a back-compat alias.)"
         ),
     )
     @with_client
@@ -288,7 +301,7 @@ def register_chat_commands(cli):
                     set_current_conversation(result.conversation_id)
 
                 # Text-mode: original interactive layout (Answer first,
-                # save-as-note status after). JSON-mode (P1.T1 contract):
+                # save-as-note status after). In JSON mode:
                 # save-as-note runs first into a stderr-routed status path
                 # and its outcome is merged into the JSON envelope, which
                 # is emitted LAST as the terminal stdout output.
@@ -535,7 +548,7 @@ def register_chat_commands(cli):
                     pre_clear_count = client.chat.cache_size()
                     cleared = client.chat.clear_cache()
                     if json_output:
-                        # P1.T1 contract: stdout must be a single JSON
+                        # In JSON mode, stdout must be a single JSON
                         # document; no Rich/text output.
                         json_output_response(
                             {
@@ -569,7 +582,7 @@ def register_chat_commands(cli):
                     title = note_title or "Chat History"
                     note = await client.notes.create(nb_id_resolved, title, content)
                     if json_output:
-                        # P1.T1 contract: emit a single JSON envelope that
+                        # In JSON mode, emit a single JSON envelope that
                         # carries both the history payload and the
                         # note-save outcome. Status text routes to stderr.
                         emit_status(

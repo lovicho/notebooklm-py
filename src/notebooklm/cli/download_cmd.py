@@ -1,4 +1,4 @@
-"""Download content CLI commands (P3.T2 registry-driven).
+"""Download content CLI commands (registry-driven).
 
 Commands:
     audio            Download audio file
@@ -61,7 +61,7 @@ def _display_download_result(result: dict[str, Any], artifact_type: str) -> None
     """Render a download envelope to the console for text-mode output.
 
     Mirrors the legacy renderer byte-for-byte: keys off the *legacy* string
-    ``error`` shape for short-circuiting, so the typed-counts P1.T4 envelope
+    ``error`` shape for short-circuiting, so the typed-counts envelope
     falls through to the breakdown block.
     """
     if isinstance(result.get("error"), str):
@@ -161,7 +161,7 @@ def _run_artifact_download(ctx: click.Context, spec: DownloadTypeSpec, **kwargs:
     else:
         _display_download_result(result, spec.name)
 
-    # P1.T4: any top-level "error" key means non-zero exit, regardless of
+    # Any top-level "error" key means non-zero exit, regardless of
     # whether it's the legacy string shape or the typed-counts bool flag.
     if "error" in result:
         exit_with_code(1)
@@ -209,10 +209,17 @@ def register_download_command(group: click.Group, spec: DownloadTypeSpec) -> cli
 
     decorators.extend(
         [
-            click.option("--no-clobber", is_flag=True, help="Skip if file exists"),
+            click.option(
+                "--no-clobber",
+                is_flag=True,
+                # A single download fails if the file exists (matching
+                # ``source fulltext --no-clobber``); ``--all`` skips the
+                # conflicting files instead of aborting the whole batch.
+                help="Don't overwrite existing files (single download fails; --all skips them)",
+            ),
             click.option("--force", is_flag=True, help="Overwrite existing files"),
             click.option("--dry-run", is_flag=True, help="Preview without downloading"),
-            click.option("--json", "json_output", is_flag=True, help="Output JSON instead of text"),
+            click.option("--json", "json_output", is_flag=True, help="Output as JSON"),
             click.option(
                 "-a",
                 "--artifact",

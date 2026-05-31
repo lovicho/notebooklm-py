@@ -42,12 +42,12 @@ ALLOWED_CLICK_EXCEPTION_SITES: list[tuple[str, int, str]] = [
     ("src/notebooklm/cli/profile_cmd.py", 198, "profile path/name validation"),
     ("src/notebooklm/cli/profile_cmd.py", 202, "profile switch target validation"),
     ("src/notebooklm/cli/profile_cmd.py", 216, "profile config write validation"),
-    ("src/notebooklm/cli/profile_cmd.py", 237, "profile path/name validation"),
-    ("src/notebooklm/cli/profile_cmd.py", 243, "profile delete active/default validation"),
-    ("src/notebooklm/cli/profile_cmd.py", 249, "profile delete target validation"),
-    ("src/notebooklm/cli/profile_cmd.py", 276, "profile path/name validation"),
-    ("src/notebooklm/cli/profile_cmd.py", 279, "profile rename source validation"),
-    ("src/notebooklm/cli/profile_cmd.py", 281, "profile rename destination validation"),
+    ("src/notebooklm/cli/profile_cmd.py", 255, "profile path/name validation"),
+    ("src/notebooklm/cli/profile_cmd.py", 261, "profile delete active/default validation"),
+    ("src/notebooklm/cli/profile_cmd.py", 267, "profile delete target validation"),
+    ("src/notebooklm/cli/profile_cmd.py", 294, "profile path/name validation"),
+    ("src/notebooklm/cli/profile_cmd.py", 297, "profile rename source validation"),
+    ("src/notebooklm/cli/profile_cmd.py", 299, "profile rename destination validation"),
     ("src/notebooklm/cli/resolve.py", 58, "entity ID argument validation"),
     ("src/notebooklm/cli/session_cmd.py", 161, "login profile-name validation translation"),
     ("src/notebooklm/cli/session_cmd.py", 162, "login profile-name validation translation"),
@@ -289,7 +289,7 @@ def handle_errors(verbose: bool = False, json_output: bool = False) -> Generator
         # Let Click handle its own exceptions (--help, bad args, etc.)
         raise
     except Exception as e:
-        # P1-18: emit only the exception's primary message (``args[0]``) to
+        # Emit only the exception's primary message (``args[0]``) to
         # the user. ``str(e)`` would walk Python's default representation,
         # which for some third-party exceptions includes repr of every arg
         # — surfacing whatever the raise site put in (potentially full
