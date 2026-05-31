@@ -1,0 +1,50 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync fork default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          repo_json="$(gh api "repos/${REPOSITORY}")"
+          parent="$(jq -r '.parent.full_name // empty' <<<"${repo_json}")"
+          parent_branch="$(jq -r '.parent.default_branch // empty' <<<"${repo_json}")"
+
+          if [[ -z "${parent}" || -z "${parent_branch}" ]]; then
+            echo "Repository is not a fork; nothing to sync."
+            exit 0
+          fi
+
+          compare="$(gh api "repos/${parent}/compare/${parent_branch}...${REPOSITORY_OWNER}:${BRANCH}")"
+          status="$(jq -r '.status' <<<"${compare}")"
+          behind_by="$(jq -r '.behind_by' <<<"${compare}")"
+          ahead_by="$(jq -r '.ahead_by' <<<"${compare}")"
+
+          echo "Fork status: ${status}, behind_by=${behind_by}, ahead_by=${ahead_by}"
+          if [[ "${behind_by}" == "0" ]]; then
+            echo "Already up to date with upstream ${parent}:${parent_branch}."
+            exit 0
+          fi
+
+          gh api \
+            --method POST \
+            "repos/${REPOSITORY}/merge-upstream" \
+            -f branch="${BRANCH}"
