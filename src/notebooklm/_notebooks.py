@@ -1,9 +1,9 @@
 """Notebook operations API."""
 
 import logging
-import warnings
 from typing import Any
 
+from ._deprecation import warn_deprecated
 from ._idempotency import idempotent_create
 from ._notebook_metadata import (
     NotebookMetadataService,
@@ -510,7 +510,7 @@ class NotebooksAPI:
     async def get_or_none(self, notebook_id: str) -> Notebook | None:
         """Get notebook details, returning ``None`` when it does not exist.
 
-        The sanctioned ``None``-on-miss lookup (ADR-0019): a companion to
+        The sanctioned ``None``-on-miss lookup (ADR-019): a companion to
         :meth:`get`, which raises :class:`~notebooklm.exceptions.NotebookNotFoundError`
         on a miss. This catches *only* that genuine-absence signal and returns
         ``None``; transport, auth, and decode faults — including the broader
@@ -709,14 +709,16 @@ class NotebooksAPI:
         Returns:
             Dict with 'public' status, 'url', and 'artifact_id'.
         """
-        warnings.warn(
+        warn_deprecated(
             "NotebooksAPI.share() is deprecated; use client.sharing.set_public() "
             "for the canonical notebook-level public-sharing toggle (paired with "
             "client.sharing.add_user(), set_view_level(), get_status()). Return "
             "shape is unchanged in this release; the wrapper will be removed in "
             "a future major release.",
-            DeprecationWarning,
-            stacklevel=2,
+            # No pinned removal version yet (re-pin tracked by #1363); the
+            # message already says "a future major release".
+            removal=None,
+            stacklevel=3,
         )
         return await self._share_manager.share(notebook_id, public, artifact_id)
 

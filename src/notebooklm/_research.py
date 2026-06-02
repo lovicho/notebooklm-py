@@ -9,14 +9,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-import warnings
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
 from . import research as _research_pub
-from ._deprecation import deprecated_kwarg
+from ._deprecation import deprecated_kwarg, warn_deprecated
 from ._notebook_metadata import NotebookSourceLister, create_default_source_lister
 from ._research_task_parser import parse_research_task_models
 from ._runtime.contracts import RpcCaller
@@ -295,7 +294,7 @@ class ResearchAPI:
         if task_id is not None:
             return [task for task in parsed_tasks if task.task_id == task_id]
         if warn_on_ambiguous and len(parsed_tasks) > 1:
-            warnings.warn(
+            warn_deprecated(
                 (
                     f"ResearchAPI.poll(notebook_id={notebook_id!r}) returned "
                     f"{len(parsed_tasks)} in-flight tasks but no task_id "
@@ -306,8 +305,11 @@ class ResearchAPI:
                     f"explicitly. The None default will be removed in a "
                     f"future major release."
                 ),
-                DeprecationWarning,
-                stacklevel=3,
+                # No pinned removal version yet (re-pin tracked by #1363); the
+                # message already says "a future major release".
+                removal=None,
+                # caller -> poll -> _select_polled_tasks -> warn_deprecated.
+                stacklevel=4,
             )
         return parsed_tasks
 
@@ -445,7 +447,7 @@ class ResearchAPI:
             matches, the return is ``ResearchTask.not_found(task_id)`` — status
             ``NOT_FOUND``, carrying the requested ``task_id``, with empty
             ``tasks``. This is the *poll-observed absence* of that specific
-            task (a typed lifecycle sentinel, not a raise; ADR-0019 Rule 4),
+            task (a typed lifecycle sentinel, not a raise; ADR-019 Rule 4),
             distinct from the unfiltered empty-poll case (``task_id`` ``None``
             or empty) which stays ``NO_RESEARCH`` ("nothing in flight").
         """
@@ -469,7 +471,7 @@ class ResearchAPI:
         # carrying the requested id. A falsy ``task_id`` (``None`` for the
         # unfiltered poll, or the degenerate empty string) is not a meaningful
         # discriminator, so it stays ``NO_RESEARCH`` ("nothing in flight") and
-        # preserves the legacy empty-poll dict shape. See ADR-0019 Rule 4
+        # preserves the legacy empty-poll dict shape. See ADR-019 Rule 4
         # (#1346).
         if task_id:
             return ResearchTask.not_found(task_id)

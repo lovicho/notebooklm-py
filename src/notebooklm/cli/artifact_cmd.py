@@ -168,7 +168,7 @@ def artifact_get(ctx, artifact_id, notebook_id, json_output, client_auth):
             resolved_id = await resolve_artifact_id(
                 client, nb_id_resolved, artifact_id, json_output=json_output
             )
-            art = await client.artifacts._get_or_none(nb_id_resolved, resolved_id)
+            art = await client.artifacts.get_or_none(nb_id_resolved, resolved_id)
 
             # BREAKING: not-found exits 1 with a typed error instead of the
             # previous exit-0 ``found: false`` placeholder. See the matching
@@ -696,7 +696,7 @@ def artifact_retry(
                         # non-success for automation — exit non-zero so a
                         # provider-side retry failure is not reported as a
                         # successful command. Matches the JSON branch above and
-                        # ADR-0019's "report failures as failures" posture.
+                        # ADR-019's "report failures as failures" posture.
                         console.print(f"[yellow]Status:[/yellow] {final.status}")
                         exit_with_code(1)
 
