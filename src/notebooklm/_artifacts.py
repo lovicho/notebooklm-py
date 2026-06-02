@@ -31,6 +31,7 @@ from ._artifact.payloads import (
     build_mind_map_params,
     build_quiz_artifact_params,
     build_report_artifact_params,
+    build_retry_artifact_params,
     build_revise_slide_params,
     build_slide_deck_artifact_params,
     build_suggest_reports_params,
@@ -217,21 +218,42 @@ class ArtifactsAPI:
         # v0.8.0: replace the warn-and-return-None below with
         # ``raise ArtifactNotFoundError(artifact_id)`` (issue #1247). Internal
         # callers that need the silent optional-lookup must use
-        # ``_get_or_none`` directly so the library never self-warns.
-        result = await self._get_or_none(notebook_id, artifact_id)
+        # ``get_or_none`` directly so the library never self-warns.
+        result = await self.get_or_none(notebook_id, artifact_id)
         if result is None:
             warn_get_returns_none("artifact")
         return result
 
-    async def _get_or_none(self, notebook_id: str, artifact_id: str) -> Artifact | None:
-        """Fetch an artifact by ID, returning ``None`` when not found.
+    async def get_or_none(self, notebook_id: str, artifact_id: str) -> Artifact | None:
+        """Get an artifact by ID, returning ``None`` when it does not exist.
 
-        Private optional-lookup helper holding the historical ``get`` body. It
-        never emits a deprecation warning, so internal callers can probe for an
-        artifact without tripping the user-facing deprecation.
+        The sanctioned ``None``-on-miss lookup (ADR-0019): unlike :meth:`get`
+        — which is slated to raise
+        :class:`~notebooklm.exceptions.ArtifactNotFoundError` on a miss in
+        v0.8.0 (issue #1247) — this returns ``None`` for a genuine absence and
+        emits no deprecation warning. This method neither catches nor synthesizes
+        a miss itself; it lists once and id-matches, inheriting :meth:`list`'s
+        behavior unchanged. (Per ADR-0019 Rule 3, ``list`` keeps its deliberate
+        *partial-availability* policy: a transport failure of the mind-map
+        sub-fetch logs a warning and yields the studio artifacts that did load,
+        so a note-backed mind-map id can read absent while that sub-fetch is
+        down. That cross-namespace policy is decided separately and is not
+        re-litigated here.) Faults raised by the primary studio-artifact listing
+        propagate unchanged.
+
+        Args:
+            notebook_id: The notebook ID.
+            artifact_id: The artifact ID.
+
+        Returns:
+            The :class:`~notebooklm.types.Artifact`, or ``None`` if not found.
         """
         logger.debug("Getting artifact %s from notebook %s", artifact_id, notebook_id)
         return await self._listing.get(notebook_id, artifact_id, list_artifacts=self.list)
+
+    # Internal optional-lookup alias: kept as a stable private name so existing
+    # internal call sites and tests can probe without the public deprecation.
+    _get_or_none = get_or_none
 
     async def list_audio(self, notebook_id: str) -> builtins.list[Artifact]:
         """List audio overview artifacts."""
@@ -554,6 +576,86 @@ class ArtifactsAPI:
                 method_id=RPCMethod.REVISE_SLIDE.value,
             )
         return self._parse_generation_result(result, method_id=RPCMethod.REVISE_SLIDE.value)
+
+    async def retry_failed(self, notebook_id: str, artifact_id: str) -> GenerationStatus:
+        """Retry a failed Studio artifact in place (the UI "Retry" action).
+
+        Re-runs generation for an already-failed artifact *without* deleting it
+        first. The same ``artifact_id`` is preserved and returned as the task
+        id, so existing :meth:`poll_status` / :meth:`wait_for_completion` flows
+        keep working — an accepted retry comes back as
+        ``GenerationStatus(status="in_progress")``.
+
+        A single retry may itself fail again provider-side; this is a single
+        in-place operation, so callers decide whether to re-invoke after a
+        later terminal ``failed`` status (observed by polling).
+
+        This method follows the ADR-0019 "async kickoff" contract: a
+        synchronous server refusal (``USER_DISPLAYABLE_ERROR`` — e.g. rate
+        limit, quota, or a non-retryable artifact) **raises** the underlying
+        :class:`~notebooklm.exceptions.RateLimitError` /
+        :class:`~notebooklm.exceptions.RPCError` rather than returning
+        ``status="failed"``. (As a brand-new method it is born on the right
+        side of the contract; the ``generate_*`` / :meth:`revise_slide` methods
+        still swallow refusals into ``status="failed"`` until v0.8.0, issue
+        #1342.)
+
+        Args:
+            notebook_id: The notebook ID. Routing-only — it sets the
+                ``source_path`` header; the artifact is identified solely by
+                ``artifact_id`` in the RPC payload (same trait as
+                :meth:`revise_slide`).
+            artifact_id: The ID of the failed artifact to retry.
+
+        Returns:
+            A :class:`~notebooklm.types.GenerationStatus` whose ``task_id`` is
+            the same ``artifact_id`` and whose ``status`` is ``"in_progress"``
+            once the retry is accepted.
+
+        Raises:
+            RateLimitError: The server refused the retry with a rate-limit /
+                quota ``USER_DISPLAYABLE_ERROR``.
+            RPCError: Any other synchronous server refusal.
+            ArtifactFeatureUnavailableError: The RPC returned a null /
+                missing-id result (no generation task was created).
+        """
+        params = build_retry_artifact_params(artifact_id)
+        # Unlike ``_call_generate`` / ``revise_slide``, a USER_DISPLAYABLE_ERROR
+        # refusal is intentionally NOT swallowed into status="failed" — it
+        # propagates as RateLimitError/RPCError per ADR-0019 "async kickoff".
+        #
+        # ``allow_null=True`` lets a null decode through to the explicit
+        # ``result is None`` guard below (the golden fixture pins the
+        # normal-success row, so it records ``allow_null: false`` for that
+        # happy-path decode — the two are not in conflict).
+        result = await self._rpc.rpc_call(
+            RPCMethod.RETRY_ARTIFACT,
+            params,
+            source_path=f"/notebook/{notebook_id}",
+            allow_null=True,
+        )
+        if result is None:
+            logger.warning("RETRY_ARTIFACT returned null result for artifact %s", artifact_id)
+            raise ArtifactFeatureUnavailableError(
+                "retry",
+                method_id=RPCMethod.RETRY_ARTIFACT.value,
+            )
+        # Born ADR-0019-correct: a missing/empty artifact id means no
+        # generation task was created, so raise rather than return the
+        # synthesized ``status="failed"`` that ``_parse_generation_result``
+        # produces for a falsy id (a refusal must never masquerade as a
+        # started-then-failed task). This is stricter than ``revise_slide`` /
+        # ``generate_*``, which still soft-fail that case until v0.8.0 (#1342).
+        # A structurally-short row still raises ``UnknownRPCMethodError`` from
+        # ``safe_index`` inside ``_parse_generation_result``.
+        status = self._parse_generation_result(result, method_id=RPCMethod.RETRY_ARTIFACT.value)
+        if not status.task_id:
+            logger.warning("RETRY_ARTIFACT returned a row with no artifact id: %r", result)
+            raise ArtifactFeatureUnavailableError(
+                "retry",
+                method_id=RPCMethod.RETRY_ARTIFACT.value,
+            )
+        return status
 
     async def generate_data_table(
         self,

@@ -232,10 +232,18 @@ sit at the intersection — they're catchable as **any** of `NotFoundError`
 | `NotebookNotFoundError` | `NotFoundError`, `RPCError`, `NotebookError`, `NotebookLMError` |
 | `SourceNotFoundError` | `NotFoundError`, `RPCError`, `SourceError`, `NotebookLMError` |
 | `ArtifactNotFoundError` | `NotFoundError`, `RPCError`, `ArtifactError`, `NotebookLMError` |
+| `NoteNotFoundError` | `NotFoundError`, `RPCError`, `NoteError`, `NotebookLMError` |
+| `MindMapNotFoundError` | `NotFoundError`, `RPCError`, `MindMapError`, `NotebookLMError` |
 | `ArtifactFeatureUnavailableError` | `RPCError`, `ArtifactError`, `NotebookLMError` |
 | `SourceTimeoutError` | `WaitTimeoutError`, `TimeoutError`, `SourceError`, `NotebookLMError` |
 | `ArtifactTimeoutError` | `WaitTimeoutError`, `TimeoutError`, `ArtifactError`, `NotebookLMError` |
 | `ResearchTimeoutError` | `WaitTimeoutError`, `TimeoutError`, `ResearchError`, `NotebookLMError` |
+
+`MindMapNotFoundError` is raised by the `client.mind_maps` mutation paths
+(`rename`) on a missing target (issue #1291). `NoteNotFoundError` (with its
+`NoteError` domain base) is defined now but **not raised by any method yet** —
+it is the prerequisite type for the note not-found work landing in **v0.8.0**
+(issue #1346).
 
 Use the table to pick the right level of catch. `client.sources.get(...)`,
 `client.artifacts.get(...)`, and `client.notes.get(...)` currently return
@@ -246,7 +254,21 @@ the matching `*NotFoundError` (`SourceNotFoundError` / `ArtifactNotFoundError` /
 `NotebookNotFoundError`. Migrate any `if result is None:` check to
 `try/except <Resource>NotFoundError` before v0.8.0 (suppress the warning
 meanwhile with `NOTEBOOKLM_QUIET_DEPRECATIONS=1`); see
-[`deprecations.md`](deprecations.md) and issue #1247. The workflows that
+[`deprecations.md`](deprecations.md) and issue #1247. `client.mind_maps.get(...)`
+also returns `None` for a missing mind map today, but it is **not** part of this
+warned deprecation (it emits no `DeprecationWarning` and the `*NotFoundError`
+flip does not cover it); use `client.mind_maps.get_or_none(...)` for the same
+explicit `None`-on-miss contract as the others. If you genuinely want
+`None`-on-miss after the flip, every namespace now offers a paired
+`get_or_none(...)` (`client.notebooks.get_or_none(nb_id)`,
+`client.sources.get_or_none(nb_id, source_id)`, and likewise for `artifacts`,
+`notes`, and `mind_maps`) — the sanctioned, warning-free `None`-on-miss lookup.
+It returns `None` for a genuine absence and re-raises transport, auth, and
+decode faults rather than swallowing them. (The one documented carve-out is
+`artifacts`, which inherits `client.artifacts.list(...)`'s deliberate
+partial-availability behavior: a transport failure of the mind-map sub-fetch is
+logged and the studio artifacts that loaded are still returned — see ADR-0019
+Rule 3.) The workflows that
 *already* raise `SourceNotFoundError` are `client.sources.get_fulltext(...)` and
 `client.sources.wait_until_ready(...)`. Artifact-download workflows raise
 `ArtifactNotFoundError` when a requested artifact ID is not in the listing.
@@ -900,10 +922,15 @@ async with NotebookLMClient.from_storage(rate_limit_max_retries=0) as client:
 >   (`403`/`5xx`/auth/transport) still raise. Use `get()` first to assert
 >   existence.
 > - **`rename()` returns the renamed object** and raises `*NotFoundError`
->   (`ValueError` for mind maps) on a missing target — detected via a
->   content/list lookup, never a transport 404. Pass **`return_object=False`**
->   to skip the hydrate re-fetch and return `None`; that opt-out **also skips
->   missing-target detection**, so a missing target does not raise under it.
+>   (`MindMapNotFoundError` for mind maps) on a missing target. Pass
+>   **`return_object=False`** to skip the hydrate re-fetch and return `None`.
+>   For `notebooks`/`sources`/`artifacts`, missing-target detection rides on
+>   that hydrate re-fetch, so `return_object=False` also skips it (a missing
+>   target does not raise under the opt-out). **Mind maps are the exception:**
+>   they detect absence via a content/list lookup *before* dispatching the
+>   rename RPC (never a transport 404), so `mind_maps.rename` raises
+>   `MindMapNotFoundError` on a missing target **even with**
+>   `return_object=False`.
 
 ### NotebooksAPI (`client.notebooks`)
 
@@ -1051,6 +1078,7 @@ print(f"Keywords: {guide.keywords}")
 | `rename(notebook_id, artifact_id, new_title, *, return_object=True)` | `str, str, str` | `Artifact \| None` | Rename artifact (re-fetched; raises `ArtifactNotFoundError` if missing). `return_object=False` skips the re-fetch and returns `None`. |
 | `poll_status(notebook_id, task_id)` | `str, str` | `GenerationStatus` | Check generation status |
 | `wait_for_completion(notebook_id, task_id, ...)` | `str, str, ...` | `GenerationStatus` | Wait for generation. Pass `on_status_change(status)` for sync or async progress callbacks. |
+| `retry_failed(notebook_id, artifact_id)` | `str, str` | `GenerationStatus` | Retry a failed Studio artifact in place (the UI "Retry"). Same `artifact_id` preserved; accepted → `status="in_progress"`; a synchronous refusal (rate limit / quota / not-retryable) **raises** `RateLimitError`/`RPCError`. See below. |
 
 #### Type-Specific List Methods
 
@@ -1082,6 +1110,42 @@ print(f"Keywords: {guide.keywords}")
 | `generate_infographic(...)` | See below | `GenerationStatus` | Generate infographic |
 | `generate_data_table(...)` | See below | `GenerationStatus` | Generate data table |
 | `generate_mind_map(...)` | See below | `MindMapResult` | Generate a mind map and persist it as a note. Use attribute access (`result.mind_map`, `result.note_id`); legacy `result["mind_map"]` dict-subscript still works (with a `DeprecationWarning`) until v0.8.0. |
+
+#### Retrying a Failed Artifact
+
+**CLI equivalent:** `notebooklm artifact retry <artifact_id> -n <notebook_id> [--json] [--wait]`.
+
+`retry_failed(notebook_id, artifact_id)` re-runs generation for an
+already-failed artifact **in place** — the UI "Retry" action. The artifact is
+not deleted first; the same `artifact_id` is preserved and returned as the task
+id, so `poll_status()` / `wait_for_completion()` keep working against it.
+
+It follows the ADR-0019 "async kickoff" contract: an accepted retry returns
+`GenerationStatus(status="in_progress")`, while a **synchronous refusal**
+(`USER_DISPLAYABLE_ERROR` — rate limit, quota, or a non-retryable artifact)
+**raises** the underlying `RateLimitError` / `RPCError` rather than returning a
+`status="failed"` handle. (As a brand-new method it is born on the right side
+of the contract; the `generate_*` / `revise_slide` methods still swallow such
+refusals into `status="failed"` until v0.8.0.) A retry can itself fail again
+provider-side — observed by later polling as a terminal `failed` status — so
+callers decide whether to re-invoke.
+
+```python
+status = await client.artifacts.retry_failed(nb_id, failed_artifact_id)
+# status.task_id == failed_artifact_id, status.status == "in_progress"
+final = await client.artifacts.wait_for_completion(nb_id, status.task_id)
+
+# Auto-retry on a rate-limited refusal with the public helper. Because
+# retry_failed RAISES RateLimitError (rather than returning a rate-limited
+# status), with_rate_limit_retry now also catches that exception, backs off,
+# and re-raises if the budget is exhausted.
+from notebooklm.artifacts import with_rate_limit_retry
+
+status = await with_rate_limit_retry(
+    lambda: client.artifacts.retry_failed(nb_id, failed_artifact_id),
+    max_retries=3,
+)
+```
 
 #### Downloading Artifacts
 
@@ -1446,9 +1510,12 @@ async def poll(notebook_id: str, task_id: str | None = None) -> ResearchTask:
     """
     Returns a ResearchTask for the selected research task. If task_id is None,
     selects the latest research task and emits an ambiguity warning if multiple
-    tasks are in-flight. Attributes:
+    tasks are in-flight. When task_id is supplied but no in-flight task matches,
+    returns ResearchTask.not_found(task_id) — status NOT_FOUND, a typed
+    poll-observed-absence sentinel (does not raise); the unfiltered empty poll
+    stays NO_RESEARCH. Attributes:
       - task_id:   str            — task/report identifier
-      - status:    ResearchStatus — COMPLETED | FAILED | IN_PROGRESS | NO_RESEARCH
+      - status:    ResearchStatus — COMPLETED | FAILED | IN_PROGRESS | NO_RESEARCH | NOT_FOUND
                                      (a str enum; == "completed" still holds)
       - query:     str            — original research query
       - sources:   tuple[ResearchSource, ...]
@@ -1560,9 +1627,9 @@ Each operation dispatches to the correct backend; you work with `MindMap` /
 | `list(notebook_id)` | `str` | `list[MindMap]` | Both kinds, as distinct `MindMap` entries |
 | `get(notebook_id, mind_map_id)` | `str, str` | `MindMap \| None` | Single mind map by id |
 | `generate(notebook_id, source_ids=None, *, kind, language="en", instructions=None, wait=True)` | … | `MindMap` | Note-backed (sync) or interactive (`CREATE_ARTIFACT` + poll) |
-| `rename(notebook_id, mind_map_id, new_title, *, kind=None, return_object=True)` | … | `MindMap \| None` | `UPDATE_NOTE` / `RENAME_ARTIFACT` by kind (re-fetched; raises `ValueError` if missing). `return_object=False` returns `None`. |
-| `delete(notebook_id, mind_map_id, *, kind=None)` | … | `None` | `DELETE_NOTE` / `DELETE_ARTIFACT` by kind (idempotent when `kind` is passed; `kind=None` raises `ValueError` for an unknown id) |
-| `get_tree(notebook_id, mind_map_id, *, kind=None)` | … | `dict \| None` | The `{"name","children"}` node tree |
+| `rename(notebook_id, mind_map_id, new_title, *, kind=None, return_object=True)` | … | `MindMap \| None` | `UPDATE_NOTE` / `RENAME_ARTIFACT` by kind (re-fetched; raises `MindMapNotFoundError` if missing). `return_object=False` returns `None`. |
+| `delete(notebook_id, mind_map_id, *, kind=None)` | … | `None` | `DELETE_NOTE` / `DELETE_ARTIFACT` by kind (idempotent — deleting an already-absent map returns `None`, for both `kind=None` and a supplied `kind`) |
+| `get_tree(notebook_id, mind_map_id, *, kind=None)` | … | `dict \| None` | The `{"name","children"}` node tree; `None` for a missing or not-yet-populated map (derived read — does not police existence) |
 
 `MindMap` is a frozen value: `id`, `notebook_id`, `title`, `kind` (`MindMapKind.NOTE_BACKED` / `INTERACTIVE`), `created_at`, and `tree`. `generate(..., wait=True)` returns `tree` populated for **both** kinds (interactive maps are polled to completion, then their tree is fetched). For interactive *list* rows `tree` is `None` — fetch it with `get_tree`. When `kind` is omitted from `rename`/`delete`/`get_tree`, the backing is auto-detected (one extra list call).
 

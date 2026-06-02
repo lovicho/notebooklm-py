@@ -117,6 +117,12 @@ __all__ = [
     "ResearchError",
     "ResearchTimeoutError",
     "ResearchTaskMismatchError",
+    # Domain: Notes
+    "NoteError",
+    "NoteNotFoundError",
+    # Domain: Mind maps
+    "MindMapError",
+    "MindMapNotFoundError",
 ]
 
 
@@ -153,7 +159,8 @@ class NotFoundError(NotebookLMError):
             await client.artifacts.download_audio(nb_id, dest, audio_id)
         except NotFoundError as e:
             # Catches NotebookNotFoundError, SourceNotFoundError,
-            # and ArtifactNotFoundError uniformly.
+            # ArtifactNotFoundError, and MindMapNotFoundError uniformly (and
+            # NoteNotFoundError once its not-found paths land in v0.8.0).
             handle_missing_resource(e)
 
     The example uses methods that *raise* a ``*NotFoundError`` on missing
@@ -161,6 +168,9 @@ class NotFoundError(NotebookLMError):
     the artifact download / content paths). :meth:`SourcesAPI.get` and
     :meth:`ArtifactsAPI.get` instead return ``None`` for missing IDs — use
     them when you want a lookup that does not trigger the umbrella.
+    :class:`MindMapNotFoundError` is raised by the ``client.mind_maps``
+    mutation paths (issue #1291); :class:`NoteNotFoundError` is defined but
+    not raised by any method yet (the prerequisite for the v0.8.0 work).
 
     Subclasses retain their existing type-specific bases — for example,
     :class:`SourceNotFoundError` is still a :class:`SourceError`, and
@@ -170,7 +180,7 @@ class NotFoundError(NotebookLMError):
 
     .. note::
 
-        As of v0.6.0, all three concrete subclasses also mix in
+        As of v0.6.0, every concrete ``*NotFoundError`` subclass also mixes in
         :class:`RPCError`, so ``except RPCError`` catches each of them
         uniformly. See the v0.6.0 BREAKING-CHANGE entry in CHANGELOG.md
         for migration guidance (the broad ``except RPCError`` clause now
@@ -1114,7 +1124,7 @@ class ArtifactFeatureUnavailableError(RPCError, ArtifactError):
         )
 
 
-class ArtifactTimeoutError(ArtifactError, WaitTimeoutError):
+class ArtifactTimeoutError(WaitTimeoutError, ArtifactError):
     """Artifact generation did not reach a terminal state before timeout.
 
     The exception remains catchable as built-in :class:`TimeoutError` for
@@ -1307,4 +1317,110 @@ class ResearchTaskMismatchError(ValidationError):
             f"research_task_id={source_research_task_id!r} but caller passed "
             f"task_id={task_id!r}. Sources discovered under one research "
             f"task cannot be imported under another."
+        )
+
+
+# =============================================================================
+# Domain: Notes
+# =============================================================================
+
+
+class NoteError(NotebookLMError):
+    """Base for note operations.
+
+    Gives the note domain a catchable base mirroring :class:`SourceError` /
+    :class:`ArtifactError`. :class:`NoteNotFoundError` inherits from it.
+    """
+
+
+class NoteNotFoundError(NotFoundError, RPCError, NoteError):
+    """Note not found in notebook.
+
+    .. note::
+       This type is **defined but not raised by any method yet**. It is the
+       prerequisite for the note not-found work landing in v0.8.0 (umbrella
+       #1346); the wording below describes the intended catchability once note
+       read/mutation paths surface a missing note this way.
+
+    Inherits from :class:`NotFoundError` (cross-domain umbrella),
+    :class:`RPCError` (transport-level catchability), and :class:`NoteError`
+    (domain base). The RPC base is what note read/mutation paths will raise when
+    the server returns an empty / degenerate payload for a missing note ID, so
+    ``except RPCError`` keeps working at call sites that handle transport-level
+    failures. ``except NoteError`` works at domain-level call sites that don't
+    care about the RPC layer. ``except NotFoundError`` catches it alongside
+    :class:`NotebookNotFoundError` and :class:`SourceNotFoundError`.
+
+    Attributes:
+        note_id: The ID that was not found.
+        method_id: The RPC method ID (inherited from :class:`RPCError`).
+        raw_response: First 80 chars of the raw response, if any
+            (``NOTEBOOKLM_DEBUG=1`` preserves the full body).
+    """
+
+    def __init__(
+        self,
+        note_id: str,
+        *,
+        method_id: str | None = None,
+        raw_response: str | None = None,
+    ):
+        self.note_id = note_id
+        super().__init__(
+            f"Note not found: {note_id}",
+            method_id=method_id,
+            raw_response=raw_response,
+        )
+
+
+# =============================================================================
+# Domain: Mind maps
+# =============================================================================
+
+
+class MindMapError(NotebookLMError):
+    """Base for mind-map operations.
+
+    Gives the mind-map domain a catchable base mirroring :class:`SourceError` /
+    :class:`ArtifactError`. :class:`MindMapNotFoundError` inherits from it.
+    """
+
+
+class MindMapNotFoundError(NotFoundError, RPCError, MindMapError):
+    """Mind map not found in notebook.
+
+    Raised by ``client.mind_maps.rename`` (and the underlying internal
+    ``NoteBackedMindMapService.rename_mind_map``) on a missing target
+    (issue #1291). Absence is detected via a content/list lookup, not a
+    transport 404 (mind maps share storage with notes / studio artifacts). The
+    derived read ``get_tree`` and the idempotent ``delete`` interpret the same
+    absence signal differently: ``get_tree`` returns ``None`` and ``delete`` is
+    a no-op (ADR-0019).
+
+    Inherits from :class:`NotFoundError` (cross-domain umbrella),
+    :class:`RPCError` (transport-level catchability), and :class:`MindMapError`
+    (domain base), so ``except RPCError`` keeps working at call sites that handle
+    transport-level failures. ``except MindMapError`` works at domain-level call
+    sites that don't care about the RPC layer. ``except NotFoundError`` catches
+    it alongside :class:`NotebookNotFoundError` and :class:`SourceNotFoundError`.
+
+    Attributes:
+        mind_map_id: The ID that was not found.
+        method_id: The RPC method ID (inherited from :class:`RPCError`).
+        raw_response: First 80 chars of the raw response, if any
+            (``NOTEBOOKLM_DEBUG=1`` preserves the full body).
+    """
+
+    def __init__(
+        self,
+        mind_map_id: str,
+        *,
+        method_id: str | None = None,
+        raw_response: str | None = None,
+    ):
+        self.mind_map_id = mind_map_id
+        super().__init__(
+            f"Mind map not found: {mind_map_id}",
+            method_id=method_id,
+            raw_response=raw_response,
         )

@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `client.artifacts.retry_failed(notebook_id, artifact_id)` — retry a failed
+  Studio artifact in place (the web UI "Retry" action), via the new
+  `RETRY_ARTIFACT` (`Rytqqe`) RPC. The artifact is not deleted first and the
+  same `artifact_id` is preserved, so existing `poll_status()` /
+  `wait_for_completion()` flows keep working. Follows the ADR-0019 "async
+  kickoff" contract: an accepted retry returns
+  `GenerationStatus(status="in_progress")`, while a synchronous refusal
+  (`USER_DISPLAYABLE_ERROR` — rate limit / quota / not-retryable) **raises** the
+  underlying `RateLimitError` / `RPCError` rather than returning a
+  `status="failed"` handle. New `notebooklm artifact retry <artifact_id>
+  [--wait] [--json]` CLI command. Additive (issues #1319, #1346).
+- `notebooklm.artifacts.with_rate_limit_retry` now also retries when the
+  wrapped callable **raises** `RateLimitError` (backing off and re-raising once
+  the retry budget is exhausted), so it can wrap the new `retry_failed`. The
+  existing returned-rate-limited-`GenerationStatus` path (used by `generate_*`)
+  is unchanged — this is a backward-compatible addition (issue #1319).
+- New public exception types for the note and mind-map domains, mirroring the
+  existing `SourceError` / `SourceNotFoundError` shape: `NoteError` +
+  `NoteNotFoundError` and `MindMapError` + `MindMapNotFoundError`. Each
+  `*NotFoundError` is a triple-base `(NotFoundError, RPCError, <Domain>Error)`,
+  so it is catchable via the cross-domain `NotFoundError` umbrella, at
+  transport-level `except RPCError` call sites, and at domain-level
+  `except NoteError` / `except MindMapError` call sites. These are the
+  prerequisite for the mind-map not-found work (ADR-0019; issues #1291, #1346).
+  `MindMapNotFoundError` is now raised by the `mind_maps` mutation paths (see
+  *Changed* below); `NoteNotFoundError` is not raised by any method yet.
+- `ResearchStatus.NOT_FOUND` — a typed lifecycle sentinel for the
+  poll-observed absence of a *specific* requested research task, distinct from
+  `NO_RESEARCH` ("nothing in flight"). `research.poll(notebook_id, task_id=...)`
+  now returns `ResearchTask.not_found(task_id)` (status `NOT_FOUND`, carrying
+  the requested id) when a non-empty pinned `task_id` matches no in-flight task;
+  the unfiltered `task_id=None` empty poll still returns `NO_RESEARCH`
+  unchanged. Additive and non-breaking — the poll never raises for an absent
+  task (ADR-0019 Rule 4; issues #1344, #1346).
+
+### Changed
+
+- `ArtifactTimeoutError` now declares its bases umbrella-first
+  (`WaitTimeoutError, ArtifactError`), matching `SourceTimeoutError` and
+  `ResearchTimeoutError`. This is a cosmetic reorder with no behavior change:
+  `isinstance`/`except` against either base is unaffected.
+- `client.mind_maps` mutation sites now raise `MindMapNotFoundError` instead of
+  a bare `ValueError` on a missing target, so callers can `except NotFoundError`
+  (or `except MindMapError`) uniformly across namespaces. `rename` (and the
+  underlying note-backed `rename_mind_map`) raise it; `MindMapNotFoundError`
+  multi-inherits `ValueError`'s sibling `NotFoundError`, **not** `ValueError`
+  itself, so existing `except ValueError` rename callers must switch to
+  `except NotFoundError` / `except MindMapNotFoundError`. `delete(kind=None)` is
+  now **idempotent** — deleting an already-absent mind map returns `None` rather
+  than raising (matching `sources`/`artifacts`/`notes` delete, and the
+  `kind`-supplied path). `get_tree` returns `None` for a missing mind map (it is
+  a derived read that does not police parent existence) — previously `kind=None`
+  raised on an unknown id. Shape-drift in the interactive payload still raises
+  `UnknownRPCMethodError` (ADR-0019; issues #1291, #1346).
+
 ## [0.7.0] - 2026-05-30
 
 ### Breaking changes
