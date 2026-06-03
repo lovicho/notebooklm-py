@@ -1,10 +1,14 @@
 """Static AST checks enforcing the ADR-008 ``cli/services`` layering boundary.
 
 This file scans cleaned ``cli/services`` modules for forbidden imports —
-top-level ``click`` and relative imports from sibling presentation/runtime
-modules (``..rendering``, ``..error_handler``, ``..runtime``). It also
-inventories the Stage-3 transitional exceptions for workflow services still
-being migrated out of rendering/exit ownership.
+top-level ``click`` and relative imports that *resolve* to the command-layer
+presentation/runtime modules (``notebooklm.cli.rendering`` /
+``error_handler`` / ``runtime``). The relative-import check is
+resolution-based and depth-agnostic: each ``from ..X`` / ``from ...X`` /
+``from ....X`` is resolved to its absolute target module and flagged iff that
+target is one of the forbidden command modules, regardless of dot count
+(#1400). It also inventories the Stage-3 transitional exceptions for workflow
+services still being migrated out of rendering/exit ownership.
 
 Scope: every file under ``cli/services/`` (recursively, excluding
 ``__init__.py`` and ``__pycache__``) must be classified into exactly one of
@@ -53,35 +57,55 @@ import pytest
 # dependency.
 FORBIDDEN_TOP_LEVEL_MODULES = {"click"}
 
-# Relative imports from these sibling packages of ``cli/services`` are
-# forbidden. The check fires for any ``from ..<name>`` or ``from ..<name>.X``
-# import — i.e. ``..rendering`` and ``..rendering.something`` both count.
+# Relative imports that *resolve* to these absolute command-layer modules are
+# forbidden, regardless of nesting depth or dot count. The check is
+# **resolution-based**: for every ``from ..X`` / ``from ...X`` / ``from ....X``
+# relative import in a scanned module, the scanner computes the import's
+# absolute target module from the importing module's package + the dot count
+# (Python's own relative-import resolution) and flags it iff the resolved
+# target is one of these presentation/runtime command modules.
 #
-# Note: level-3 imports (``...rendering``, from a deeper subpackage like
-# ``cli/services/login/``) are NOT flagged here. Login submodules currently
-# rely on that path; tracking their reach-in is done via the
-# ``pattern_a_violations`` inventory inside ``TRANSITIONAL_GUARDED_PATHS``
-# (e.g. ``cli/services/login/browser_accounts.py``). Broadening the import
-# scanner to level-3 would surface those automatically; that's a deliberate
-# follow-up, not a gap to plug here.
+# History: the scanner originally flagged only the level-2 (``..rendering``)
+# form by dot-count. ``cli/services/login/*`` modules sit one directory deeper,
+# so their ``...rendering`` reach-ins resolved to the real ``cli.rendering``
+# while slipping past the gate (#1393). #1393 tightened the bound to dot-depths
+# 2 AND 3 — but that bound was coupled to the current max directory depth: a
+# future ``cli/services/login/sub/`` module could reach ``cli.rendering`` via a
+# level-4 ``....rendering`` import and evade the gate (#1400). The check is now
+# depth-agnostic and resolution-based, so the forbidden set is expressed as the
+# absolute module names below and the dot-count no longer matters: ``....auth``
+# (→ ``notebooklm.auth``) stays allowed from any depth, while ``....rendering``
+# (→ ``notebooklm.cli.rendering``) is flagged from any depth.
 FORBIDDEN_RELATIVE_PARENTS = {"rendering", "error_handler", "runtime"}
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+SRC_ROOT = REPO_ROOT / "src"
 SERVICES_ROOT = REPO_ROOT / "src" / "notebooklm" / "cli" / "services"
+CLI_PACKAGE = "notebooklm.cli"
+
+# Absolute command-layer modules a ``cli/services`` module must never reach via
+# a relative import — derived from ``FORBIDDEN_RELATIVE_PARENTS`` so the two
+# stay in lockstep. A resolved relative target is forbidden iff it equals one
+# of these exactly (e.g. ``notebooklm.cli.rendering``) or is a submodule of one
+# (e.g. ``notebooklm.cli.rendering.sub``).
+FORBIDDEN_ABSOLUTE_TARGETS = frozenset(
+    f"{CLI_PACKAGE}.{name}" for name in FORBIDDEN_RELATIVE_PARENTS
+)
 
 # Fully cleaned service modules. Each must have zero ``_boundary_violations``
 # AND zero Pattern A pairs (see :func:`_pattern_a_pairs`).
 #
-# Several login submodules (``browser_accounts.py``, ``cookie_writes.py``,
-# ``chromium_accounts.py``, ``firefox_accounts.py``, ``refresh.py``) still
-# emit progress/warning output (and ``refresh.py`` owns success messaging +
-# the shared ``_exit_on_outcome`` rendering boundary) through a narrow lazy
-# LEVEL-3 ``console`` seam (``_emit`` / ``_emit_progress``). The boundary
-# scanner intentionally does not flag those level-3 imports; the load-bearing
-# invariant is zero Pattern A pairs — no single function body co-locates
-# ``console.print`` with ``exit_with_code``, because the print is routed
-# through a split helper the scanner treats as the preferred shape. The
-# remaining seams can be inverted into caller-provided callbacks later.
+# The login submodules (``browser_accounts.py``, ``cookie_writes.py``,
+# ``chromium_accounts.py``, ``firefox_accounts.py``, ``refresh.py``) used to
+# reach the command layer's ``console`` / ``exit_with_code`` / ``run_async``
+# through narrow LEVEL-3 (``...rendering`` / ``...error_handler`` /
+# ``...runtime``) seams that slipped past this scanner. #1393 tightened the
+# import check to level-3 and inverted those reach-ins behind a caller-injected
+# ``LoginIO`` sink (Protocol + resolver in ``cli/services/login/io_seam.py``;
+# concrete sink registered by the command layer in
+# ``cli/playwright_login_io.py``). The ``_emit`` / ``_emit_progress`` /
+# ``_emit_warning`` helpers now forward to ``io.emit`` — no presentation import
+# remains in any of these modules, so they are genuinely GUARDED.
 # Login ``cookie_domains.py`` is pure service code: the command layer hosts
 # Click ``BadParameter`` translation and optional-domain warning rendering.
 GUARDED_PATHS = {
@@ -99,10 +123,12 @@ GUARDED_PATHS = {
     "cli/services/login/cookie_writes.py": SERVICES_ROOT / "login" / "cookie_writes.py",
     "cli/services/login/exceptions.py": SERVICES_ROOT / "login" / "exceptions.py",
     "cli/services/login/firefox_accounts.py": SERVICES_ROOT / "login" / "firefox_accounts.py",
+    "cli/services/login/io_seam.py": SERVICES_ROOT / "login" / "io_seam.py",
     "cli/services/login/outcomes.py": SERVICES_ROOT / "login" / "outcomes.py",
     "cli/services/login/profile_targets.py": SERVICES_ROOT / "login" / "profile_targets.py",
     "cli/services/login/refresh.py": SERVICES_ROOT / "login" / "refresh.py",
     "cli/services/login/rookiepy_errors.py": SERVICES_ROOT / "login" / "rookiepy_errors.py",
+    "cli/services/playwright_login.py": SERVICES_ROOT / "playwright_login.py",
     "cli/services/polling.py": SERVICES_ROOT / "polling.py",
     "cli/services/research.py": SERVICES_ROOT / "research.py",
     "cli/services/session_context.py": SERVICES_ROOT / "session_context.py",
@@ -141,50 +167,16 @@ GUARDED_PATHS = {
 #                               A pair but still reaches into Click.
 #   ``rationale``             — short note on what migration is in flight or
 #                               why the module is here.
-TRANSITIONAL_GUARDED_PATHS: dict[str, dict[str, object]] = {
-    "cli/services/playwright_login.py": {
-        "path": SERVICES_ROOT / "playwright_login.py",
-        "forbidden_imports": [
-            "playwright_login.py:45: forbidden relative import: '..error_handler'",
-            "playwright_login.py:46: forbidden relative import: '..rendering'",
-            "playwright_login.py:47: forbidden relative import: '..runtime'",
-        ],
-        "pattern_a_violations": [
-            ("ensure_chromium_installed", 526),
-            ("validate_login_flag_conflicts", 632),
-            ("validate_login_flag_conflicts", 637),
-            ("validate_login_flag_conflicts", 643),
-            ("validate_login_flag_conflicts", 646),
-            ("prepare_login_paths", 675),
-            ("run_playwright_login", 748),
-            ("run_playwright_login", 837),
-            ("run_playwright_login", 844),
-            ("run_playwright_login", 866),
-            ("run_playwright_login", 873),
-            ("run_playwright_login", 898),
-            ("run_playwright_login", 916),
-            ("run_playwright_login", 959),
-        ],
-        "rationale": (
-            "Playwright login orchestrator owns the full presentation + "
-            "exit-code matrix for browser-automation failures; the sole "
-            "remaining residual after #1383 drained the other four targets "
-            "(auth_source / chromium_accounts / firefox_accounts / "
-            "refresh). Unlike the ``login/`` submodules it sits at "
-            "``cli/services/`` so its reach-ins are LEVEL-2 imports "
-            "(``..rendering`` / ``..error_handler`` / ``..runtime``) that "
-            "the boundary scanner DOES flag — a lazy ``_emit`` seam cannot "
-            "clear the import violation, and the ~30 ``console.print`` "
-            "calls stream live during a multi-minute browser SSO session "
-            "(so they resist a return-an-outcome inversion). Draining it "
-            "needs a caller-provided sink/callback inversion, tracked in "
-            "#1391. Line numbers shifted in #1367 when the "
-            "``_resolve_paths_helper`` patch-surface bridge (and the "
-            "``_ensure_chromium_installed`` ``session_cmd`` getattr) were "
-            "deleted; refreshed here."
-        ),
-    },
-}
+# Emptied by #1391: ``playwright_login.py`` was the sole remaining entry. The
+# drain inverted its ``console.print`` / ``exit_with_code`` / ``run_async``
+# reach-ins into a caller-injected ``LoginIO`` sink (the concrete sink +
+# command wrappers live in ``cli/playwright_login_io.py``), so the service no
+# longer imports ``..rendering`` / ``..error_handler`` / ``..runtime`` and
+# carries zero Pattern A pairs — it is now a fully cleaned ``GUARDED_PATHS``
+# module. Every service module under ``cli/services/`` is now either GUARDED or
+# WAIVED; this dict stays declared (and asserted ``== {}`` below) so a future
+# re-introduction of a transitional module is a deliberate, reviewed addition.
+TRANSITIONAL_GUARDED_PATHS: dict[str, dict[str, object]] = {}
 
 # Modules with a documented, indefinite exception. Empty by default; adding
 # to this dict requires a documented architecture exception.
@@ -256,8 +248,75 @@ def _runtime_imports(path: pathlib.Path) -> Iterator[tuple[str, int]]:
     yield from _walk(tree, inside_type_checking=False)
 
 
-def _boundary_violations(path: pathlib.Path) -> list[str]:
-    """Return human-readable violation strings (empty iff clean)."""
+def _package_for_path(path: pathlib.Path) -> str | None:
+    """Return the importing module's dotted package, or ``None`` if off-tree.
+
+    For a real module under ``src/`` (e.g.
+    ``src/notebooklm/cli/services/login/refresh.py``), the package is the
+    dotted path of its *containing directory*
+    (``notebooklm.cli.services.login``) — that is the anchor Python uses to
+    resolve relative imports. Synthetic fixtures created in ``tmp_path`` live
+    outside ``src/``; they return ``None`` and must pass an explicit
+    ``package=`` to :func:`_boundary_violations` to simulate a tree location.
+    """
+    try:
+        rel = path.resolve().relative_to(SRC_ROOT)
+    except ValueError:
+        return None
+    parts = rel.with_suffix("").parts
+    # Drop the module's own leaf name to get its containing package.
+    return ".".join(parts[:-1])
+
+
+def _resolve_relative(target: str, package: str) -> str:
+    """Resolve a dotted relative import ``target`` against ``package``.
+
+    Mirrors :func:`importlib._bootstrap._resolve_name`: ``level`` leading dots
+    strip ``level - 1`` trailing components off ``package``, then the named
+    remainder (if any) is appended. ``..rendering`` from
+    ``notebooklm.cli.services`` → ``notebooklm.cli.rendering``; ``....rendering``
+    from ``notebooklm.cli.services.login.sub`` → ``notebooklm.cli.rendering``.
+
+    Raises :class:`ValueError` for an import that reaches past the top-level
+    package (more dots than ``package`` has components) — exactly the case
+    Python itself rejects with ``ImportError: attempted relative import beyond
+    top-level package``. Such an import can never execute, so silently clamping
+    it (``rsplit`` returning a too-short list) would mis-resolve it to a wrong
+    absolute module and could mask a real reach-in; failing loudly is correct.
+    """
+    level = len(target) - len(target.lstrip("."))
+    name = target.lstrip(".")
+    if level > 1:
+        bits = package.rsplit(".", level - 1)
+        if len(bits) < level:
+            raise ValueError(
+                f"attempted relative import {target!r} beyond top-level package {package!r}"
+            )
+        base = bits[0]
+    else:
+        base = package
+    return f"{base}.{name}" if name else base
+
+
+def _is_forbidden_target(resolved: str) -> bool:
+    """Flag iff ``resolved`` is a forbidden command module or a submodule of one."""
+    return any(
+        resolved == forbidden or resolved.startswith(f"{forbidden}.")
+        for forbidden in FORBIDDEN_ABSOLUTE_TARGETS
+    )
+
+
+def _boundary_violations(path: pathlib.Path, *, package: str | None = None) -> list[str]:
+    """Return human-readable violation strings (empty iff clean).
+
+    Relative imports are resolved to their absolute target module (from the
+    importing module's ``package`` + the dot count) and flagged iff the target
+    is a forbidden command-layer module — independent of the dot count. The
+    ``package`` is derived from ``path`` for real on-tree modules; off-tree
+    fixtures must pass it explicitly to simulate their tree location.
+    """
+    if package is None:
+        package = _package_for_path(path)
     violations: list[str] = []
     for target, line in _runtime_imports(path):
         # Top-level import like ``import click`` or ``from click import ...``.
@@ -265,13 +324,29 @@ def _boundary_violations(path: pathlib.Path) -> list[str]:
         if not target.startswith(".") and head in FORBIDDEN_TOP_LEVEL_MODULES:
             violations.append(f"{path.name}:{line}: forbidden top-level import: {target!r}")
             continue
-        # Relative import ``from ..rendering ...`` etc. (exactly two leading dots
-        # because that targets a sibling of ``cli/services``).
-        if target.startswith("..") and not target.startswith("..."):
-            remainder = target.lstrip(".")
-            parent = remainder.split(".", 1)[0]
-            if parent in FORBIDDEN_RELATIVE_PARENTS:
-                violations.append(f"{path.name}:{line}: forbidden relative import: {target!r}")
+        if not target.startswith("."):
+            continue
+        # Relative import: resolve to its absolute target module and flag iff
+        # that target is a command-layer presentation/runtime module
+        # (``notebooklm.cli.rendering`` / ``error_handler`` / ``runtime``),
+        # regardless of the dot count. ``..rendering`` from
+        # ``cli/services/*``, ``...rendering`` from ``cli/services/login/*``,
+        # and a hypothetical ``....rendering`` from
+        # ``cli/services/login/sub/*`` all resolve to the same forbidden
+        # module; ``....auth`` (→ ``notebooklm.auth``) does not and stays
+        # allowed at any depth.
+        if package is None:
+            raise AssertionError(
+                f"Cannot resolve relative import {target!r} in {path}: the module "
+                "is off-tree (outside src/) so its package is unknown. Pass an "
+                "explicit package= to _boundary_violations() for synthetic fixtures."
+            )
+        resolved = _resolve_relative(target, package)
+        if _is_forbidden_target(resolved):
+            violations.append(
+                f"{path.name}:{line}: forbidden relative import: {target!r} "
+                f"(resolves to {resolved})"
+            )
     return violations
 
 
@@ -417,6 +492,25 @@ def test_transitional_services_boundary_violations_are_documented(logical_name, 
     )
 
 
+def test_transitional_allowlist_is_empty():
+    """The Stage-3 transitional allowlist is fully drained (#1391).
+
+    ``playwright_login.py`` was the last entry; the drain inverted its
+    presentation / exit / async reach-ins behind a caller-injected
+    ``LoginIO`` sink (concrete sink + command wrappers in
+    ``cli/playwright_login_io.py``), promoting it to ``GUARDED_PATHS``. This
+    is the ADR-0008 end state: every ``cli/services/`` module is enforced at
+    the level-2-import boundary, with no transitional carve-outs. Adding a new
+    transitional entry is a deliberate regression this assertion blocks.
+    """
+    assert TRANSITIONAL_GUARDED_PATHS == {}, (
+        "TRANSITIONAL_GUARDED_PATHS must stay empty after #1391 — a service "
+        "module that owns presentation/exit policy must instead invert it "
+        "behind a caller-injected sink (see cli/playwright_login_io.py) and "
+        f"land in GUARDED_PATHS. Unexpected entries: {sorted(TRANSITIONAL_GUARDED_PATHS)}"
+    )
+
+
 def test_inventory_completeness():
     """Every service module must appear in exactly one of the three sets.
 
@@ -529,11 +623,123 @@ def test_guard_helper_detects_from_parent_import_sibling(tmp_path):
     alias-only form silently passes — even though it carries the same runtime
     dependency on ``cli.rendering`` as ``from ..rendering import X``. CodeRabbit
     flagged this in PR #961 review.
+
+    Simulated from a ``cli/services/*`` module: ``from .. import rendering``
+    resolves to ``notebooklm.cli.rendering``.
     """
     bad = tmp_path / "fake_service_alias_form.py"
     bad.write_text("from __future__ import annotations\nfrom .. import rendering\n")
-    violations = _boundary_violations(bad)
+    violations = _boundary_violations(bad, package="notebooklm.cli.services")
     assert any("rendering" in v for v in violations), violations
+
+
+def test_guard_helper_detects_level_2_relative_import(tmp_path):
+    """``from ..rendering import X`` (level-2) must trip the guard.
+
+    The baseline case: a ``cli/services/*`` module reaching its presentation
+    sibling. Simulated from package ``notebooklm.cli.services`` →
+    ``notebooklm.cli.rendering``.
+    """
+    bad = tmp_path / "fake_level2_service.py"
+    with bad.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("from __future__ import annotations\nfrom ..rendering import console\n")
+    violations = _boundary_violations(bad, package="notebooklm.cli.services")
+    assert any("rendering" in v for v in violations), violations
+
+
+def test_guard_helper_detects_level_3_relative_import(tmp_path):
+    """``from ...rendering import X`` (level-3) must trip the guard (#1393).
+
+    Login submodules sit one directory deeper than ``cli/services``, so their
+    presentation reach-ins use three leading dots and resolve to the real
+    ``cli.rendering`` module. Simulated from package
+    ``notebooklm.cli.services.login`` → ``notebooklm.cli.rendering``.
+    """
+    bad = tmp_path / "fake_level3_service.py"
+    # Pin LF + UTF-8 so the fixture is byte-stable across the OS test matrix.
+    with bad.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("from __future__ import annotations\nfrom ...rendering import console\n")
+    violations = _boundary_violations(bad, package="notebooklm.cli.services.login")
+    assert any("rendering" in v for v in violations), violations
+
+
+def test_guard_helper_detects_level_4_relative_import_resolving_to_cli(tmp_path):
+    """``from ....rendering import X`` (level-4) must trip the guard when it
+    resolves to ``cli.rendering`` (#1400).
+
+    This is the future blind spot the old depth-2/3 bound left open: a
+    hypothetical ``cli/services/login/sub/*`` module (package
+    ``notebooklm.cli.services.login.sub``) reaching the command layer via four
+    leading dots resolves to ``notebooklm.cli.rendering`` — a presentation
+    reach-in that the depth-coupled scanner would have missed. The
+    resolution-based check flags it regardless of dot count.
+    """
+    bad = tmp_path / "fake_level4_cli_service.py"
+    with bad.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("from __future__ import annotations\nfrom ....rendering import console\n")
+    violations = _boundary_violations(bad, package="notebooklm.cli.services.login.sub")
+    assert any("rendering" in v for v in violations), violations
+
+
+def test_guard_helper_allows_level_4_relative_import_to_notebooklm(tmp_path):
+    """``from ....auth import X`` (level-4) must NOT trip the guard.
+
+    From a ``cli/services/login/*`` module (package
+    ``notebooklm.cli.services.login``), four leading dots resolve to a package
+    outside ``cli`` (``notebooklm.auth``), a legitimate dependency the login
+    modules genuinely use. The resolution-based check must keep allowing it at
+    any depth.
+    """
+    ok = tmp_path / "fake_level4_notebooklm_auth.py"
+    # Pin LF + UTF-8 so the fixture is byte-stable across the OS test matrix.
+    with ok.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("from __future__ import annotations\nfrom ....auth import AuthTokens\n")
+    assert _boundary_violations(ok, package="notebooklm.cli.services.login") == []
+
+
+def test_guard_helper_allows_level_4_notebooklm_namesake_module(tmp_path):
+    """``from ....config import X`` (level-4) → ``notebooklm.config`` must pass.
+
+    A ``notebooklm.*`` top-level module that happens to share a *leaf* name is
+    not a ``cli.*`` reach-in. From ``notebooklm.cli.services.login``,
+    ``....config`` resolves to ``notebooklm.config`` (not
+    ``notebooklm.cli.config``), so the namesake must not be flagged. Guards
+    against a regression that keys off the leaf name instead of the resolved
+    absolute module.
+    """
+    ok = tmp_path / "fake_level4_notebooklm_config.py"
+    with ok.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("from __future__ import annotations\nfrom ....config import DEFAULT_ENDPOINT\n")
+    assert _boundary_violations(ok, package="notebooklm.cli.services.login") == []
+
+
+def test_guard_helper_allows_level_1_intra_package_import(tmp_path):
+    """``from .rendering import X`` (level-1) must NOT trip the guard.
+
+    A single-dot import from a ``cli/services/*`` module targets a *sibling
+    inside* ``cli.services`` (``notebooklm.cli.services.rendering``), not the
+    command-layer ``notebooklm.cli.rendering``. Guards the ``level == 1``
+    branch of ``_resolve_relative`` against a regression that would resolve
+    intra-package imports up to the ``cli`` package.
+    """
+    ok = tmp_path / "fake_level1_service.py"
+    with ok.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("from __future__ import annotations\nfrom .rendering import build_table\n")
+    assert _boundary_violations(ok, package="notebooklm.cli.services") == []
+
+
+def test_resolve_relative_rejects_import_beyond_top_level_package():
+    """``_resolve_relative`` raises when an import reaches past the root package.
+
+    Mirrors Python's own ``ImportError: attempted relative import beyond
+    top-level package``. Such an import can never execute, so silently
+    clamping it would mis-resolve to a wrong absolute module and could mask a
+    real reach-in; the helper must fail loudly instead. (gemini-code-assist /
+    claude review on #1401.)
+    """
+    # ``....rendering`` (level-4) from a 2-component package overruns the root.
+    with pytest.raises(ValueError, match="beyond top-level package"):
+        _resolve_relative("....rendering", "a.b")
 
 
 def test_guard_helper_allows_type_checking_imports(tmp_path):
@@ -545,7 +751,7 @@ def test_guard_helper_allows_type_checking_imports(tmp_path):
         "if TYPE_CHECKING:\n"
         "    from ..rendering import ListRender  # noqa\n"
     )
-    assert _boundary_violations(ok) == []
+    assert _boundary_violations(ok, package="notebooklm.cli.services") == []
 
 
 def test_pattern_a_helper_detects_co_occurrence(tmp_path):
