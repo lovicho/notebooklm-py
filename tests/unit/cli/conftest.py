@@ -109,10 +109,10 @@ def _disable_chromium_profile_fanout():
     synthetic profiles — the autouse here just guarantees deterministic
     legacy-path behavior everywhere else.
 
-    D1 PR-3 migration: previously used
-    ``monkeypatch.setattr("notebooklm.cli._chromium_profiles...", ...)``
-    — the string-target form ADR-007 forbids because it silently no-ops
-    if the target relocates. Now uses ``patch(...)`` which raises
+    D1 PR-3 migration: previously used a ``monkeypatch`` string-target
+    setattr aimed at the ``cli._chromium_profiles`` discovery helper — the
+    string-target form ADR-007 forbids because it silently no-ops if the
+    target relocates. Now uses ``patch(...)`` which raises
     ``AttributeError`` on missing targets.
     """
     with patch(
@@ -407,20 +407,21 @@ def mock_context_file(tmp_path):
 
     * ``cli.helpers`` — passes the resolver explicitly.
     * ``cli.context`` + ``cli.resolve`` — call-time lookups after the helper split.
-    * ``cli.session_cmd`` — legacy direct binding (preserved patch surface for
-      pre-existing tests).
-    * ``cli.services.session_context`` — the P3.T3 service-layer call site that
-      reads the context file in ``read_status``. Without this patch, the
-      service-layer ``read_status`` would fall through to the real
-      ``~/.notebooklm/context.json`` even when every other binding is patched
-      (rev-1 CodeRabbit feedback on #962).
+    * ``cli.services.session_context`` — the service-layer call site that reads
+      the context file in ``read_status``. This is the real consumer binding;
+      ``read_status`` resolves ``get_context_path`` here (the precedence chain's
+      level-1 service-module attribute), so without this patch the service-layer
+      ``read_status`` would fall through to the real ``~/.notebooklm/context.json``
+      even when every other binding is patched (rev-1 CodeRabbit feedback on #962).
+      Migrated off the legacy ``cli.session_cmd.get_context_path`` patch surface
+      (#1367): that re-export was a pure bridge fully shadowed by this binding and
+      never invoked, so patching it was a no-op.
     """
     context_file = tmp_path / "context.json"
     with (
         patch("notebooklm.cli.helpers.get_context_path", return_value=context_file),
         patch("notebooklm.cli.context.get_context_path", return_value=context_file),
         patch("notebooklm.cli.resolve.get_context_path", return_value=context_file),
-        patch("notebooklm.cli.session_cmd.get_context_path", return_value=context_file),
         patch(
             "notebooklm.cli.services.session_context.get_context_path",
             return_value=context_file,
