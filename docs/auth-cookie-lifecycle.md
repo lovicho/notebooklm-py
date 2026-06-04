@@ -303,7 +303,7 @@ than it sounds:
 The library uses `rookiepy` (Rust extension with a Python binding)
 rather than implementing extraction itself. `rookiepy` covers ~16
 browsers across all three platforms; `_ROOKIEPY_BROWSER_ALIASES` in
-`cli/session.py` maps user-facing names (`firefox`, `arc`, `vivaldi`,
+`cli/session_cmd.py` maps user-facing names (`firefox`, `arc`, `vivaldi`,
 …) to its functions, and `convert_rookiepy_cookies_to_storage_state`
 in `auth.py` reshapes the result into a Playwright-compatible
 `storage_state.json`. From the rest of the codebase's perspective,
@@ -530,7 +530,7 @@ reading `auth.py` against the lifecycle of `NotebookLMClient` /
 
 > **Resolved in #361.** ``CookiePersistence`` (see
 > ``src/notebooklm/_cookie_persistence.py``; driven by ``ClientLifecycle``
-> at open-time, ``src/notebooklm/_runtime_lifecycle.py``) now captures an
+> at open-time, ``src/notebooklm/_runtime/lifecycle.py``) now captures an
 > open-time ``CookieSnapshotKey -> CookieSnapshotValue`` snapshot of its jar;
 > ``save_cookies_to_storage``
 > accepts an ``original_snapshot=...`` kwarg and, when provided, writes only
@@ -1420,7 +1420,7 @@ Two stacks, in order of preference:
 > makes Chrome cookie reads admin-or-bust (see §7.5). On macOS and Linux,
 > any of the listed browsers work; Firefox just sidesteps the Keychain
 > prompt that Chrome / Brave / Edge trigger on first read. See
-> `_ROOKIEPY_BROWSER_ALIASES` in `cli/session.py` for the canonical list.
+> `_ROOKIEPY_BROWSER_ALIASES` in `cli/services/login/cookie_jar.py` for the canonical list.
 > Chromium-family browsers also accept `chrome::<profile-name-or-directory>`
 > (for example `chrome::Profile 1` or `brave::Work`) to refresh from one
 > user-profile instead of relying on fan-out/account matching.

@@ -421,7 +421,7 @@ except NonIdempotentRetryError:
     ...
 ```
 
-`client.sources.add_file(...)` and `client.sources.add_drive(...)` are now also covered by the probe-then-create wrapper: the create RPC runs with `disable_internal_retries=True` and, on transport failure, the wrapper probes the server-side source list (via `idempotent_create`) before deciding whether to retry — so transient failures no longer produce duplicate sources. See `_source_add.py` (`SourceAddService.add_drive`) and `_source_upload.py` (`SourceUploadPipeline.register_file_source`) for the implementation.
+`client.sources.add_file(...)` and `client.sources.add_drive(...)` are now also covered by the probe-then-create wrapper: the create RPC runs with `disable_internal_retries=True` and, on transport failure, the wrapper probes the server-side source list (via `idempotent_create`) before deciding whether to retry — so transient failures no longer produce duplicate sources. See `_source/add.py` (`SourceAddService.add_drive`) and `_source/upload.py` (`SourceUploadPipeline.register_file_source`) for the implementation.
 
 ---
 
@@ -724,7 +724,7 @@ Kernel owns the `httpx.AsyncClient`; `NotebookLMClient` constructs the
 runtime graph and owns the public surface. Per the
 [ADR-010](adr/0010-session-kernel-split.md) split, `Kernel.__init__` in
 `src/notebooklm/_kernel.py` constructs the `httpx.AsyncClient` and is
-responsible for closing it on `aclose()`. `_runtime_init.py` constructs
+responsible for closing it on `aclose()`. `_runtime/init.py` constructs
 the collaborator bundle, `RuntimeTransport`, middleware chain, and
 `RpcExecutor`, then binds them into `ClientComposed`. The supporting state
 (metrics, drain bookkeeping, request-id counter, transport plumbing,
@@ -1890,7 +1890,7 @@ class Artifact:
     status: int                     # 1=processing, 2=pending, 3=completed, 4=failed
     created_at: Optional[datetime]
     url: Optional[str]
-    _variant: int | None = None     # Internal variant for type-4 artifacts (1=flashcards, 2=quiz).
+    _variant: int | None = None     # Internal variant for type-4 artifacts (1=flashcards, 2=quiz, 4=interactive mind map).
 
     @property
     def kind(self) -> ArtifactType:
