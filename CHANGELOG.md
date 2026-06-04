@@ -180,11 +180,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (a runway raises regardless of quiet). The four `get()` methods are now routed
   through a single `_lookup.resolve_get` bridge, eliminating the hand-duplicated
   warn-on-miss pattern. Helper: `notebooklm._deprecation.future_errors_enabled`.
-  The purely-behavioral v0.8.0 changes that lack a warn-runway (`delete()`
-  returning `None`, refusal-suppression, fail-loud listing) are not gated yet;
-  they will be folded in as their behavior is defined. Does **not** close
-  #1247/#1251/#1254 — the runways remain until the v0.8.0 flip. See
-  `docs/deprecations.md`. Additive (issue #1346).
+  The flag now **also** previews the purely-behavioral v0.8.0 changes that have
+  no warn-runway (#1405): the uninformative `bool` returns of `sources.refresh`
+  and `chat.delete_conversation` become `None` (#1290); a synchronous generation
+  refusal **raises** the decoder's `RateLimitError` / `RPCError` /
+  `DecodingError` / `ArtifactFeatureUnavailableError` instead of being swallowed
+  into `GenerationStatus(status="failed")` / returned `None` — across
+  `_call_generate`, `revise_slide`, `_parse_generation_result`, and
+  `research.start` (#1342); and the mutate-existing ops `notes.update` and
+  `sources`/`artifacts` `rename(return_object=False)` fail loud with a
+  `*NotFoundError` on a missing target (#1362). These previews are runtime-only —
+  **no public return annotation changes** until the v0.8.0 flip — so default-off
+  stays byte-identical. Does **not** close #1247/#1251/#1254/#1290/#1342/#1362 —
+  the runways and current behavior remain until the v0.8.0 flip. See
+  `docs/deprecations.md`. Additive (issues #1346, #1405).
 - `client.artifacts.retry_failed(notebook_id, artifact_id)` — retry a failed
   Studio artifact in place (the web UI "Retry" action), via the new
   `RETRY_ARTIFACT` (`Rytqqe`) RPC. The artifact is not deleted first and the
@@ -388,6 +397,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CLI now emits the `NOT_FOUND` error envelope for the `*NotFoundError`
+  family from the centralized handler, instead of the generic
+  `NOTEBOOKLM_ERROR`.** Any `NotebookNotFoundError` / `SourceNotFoundError` /
+  `ArtifactNotFoundError` / `NoteNotFoundError` / `MindMapNotFoundError` that
+  reaches `cli/error_handler.py` (e.g. `notebooks.get()` on a missing notebook,
+  or a `rename` whose target was deleted mid-operation) now exits `1` with the
+  typed `{"error": true, "code": "NOT_FOUND", ...}` JSON envelope carrying the
+  missing resource id — matching the per-command `source` / `artifact` /
+  `note get` convention (the documented CLI not-found contract since v0.5.0).
+  The per-command `get` paths already used `get_or_none` and are unaffected.
+  This also makes the `NOTEBOOKLM_FUTURE_ERRORS=1` preview faithful at the CLI
+  boundary, pre-positioning it for the v0.8.0 `get()` → raise / mutate-existing
+  fail-loud flips (issues #1364, #1247, #1362).
 - **`Source.from_api_response` now reports the real processing `status`.** The
   `ADD_SOURCE` / rename parsing path previously never read the status block and
   always fell back to `SourceStatus.READY`, while `client.sources.list()` /
