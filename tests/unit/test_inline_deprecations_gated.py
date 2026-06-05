@@ -1,7 +1,7 @@
 """Formerly-inline warnings honor the right category + gate (#1369).
 
 Four sites used to call ``warnings.warn(..., DeprecationWarning)`` inline,
-bypassing the suppression gate ADR-018 promises. The fix split them by what
+bypassing the suppression gate ADR-0018 promises. The fix split them by what
 they actually are:
 
 * **Three genuine scheduled deprecations** — awaiting ``from_storage(...)``,
@@ -16,7 +16,7 @@ they actually are:
   inline, outside ADR-0018's scope: NOT gated by ``NOTEBOOKLM_QUIET_DEPRECATIONS``.
 
 The structural recurrence guard lives in
-``tests/_lint/test_no_inline_deprecation_warnings.py``; this file pins the
+``tests/_guardrails/test_no_inline_deprecation_warnings.py``; this file pins the
 user-visible category + suppression behavior the lint can't observe.
 """
 

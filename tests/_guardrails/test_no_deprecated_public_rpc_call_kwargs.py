@@ -3,7 +3,7 @@ with deprecated kwargs (_is_retry, source_path, operation_variant).
 
 Allowlist is keyed on (relative path, enclosing function name) so it
 survives line-number reordering and `pytest.warns(...)` wraps. See
-ADR-007 for the file-/function-level allowlist rationale.
+ADR-0007 for the file-/function-level allowlist rationale.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ _ALLOWLIST: frozenset[tuple[str, str]] = frozenset()
 
 _SKIP_DIRS: frozenset[str] = frozenset(
     {
-        "tests/_lint",  # this file itself contains the kwarg literals
+        "tests/_guardrails",  # this file itself contains the kwarg literals
         "tests/cassettes",  # data only
         "tests/fixtures",  # data only
     }
