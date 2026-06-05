@@ -38,12 +38,13 @@ from ._artifact.payloads import (
     build_video_artifact_params,
 )
 from ._env import get_default_language
-from ._lookup import resolve_get
+from ._lookup import unwrap_or_raise
 from ._mind_map import NoteBackedMindMapService
 from ._note_service import NoteService
 from ._notebook_metadata import NotebookSourceIdProvider
 from ._polling_registry import PollRegistry
 from ._runtime.contracts import RpcCaller
+from ._types.artifacts import _status_from_code
 from ._types.research import MindMapResult
 from .exceptions import (
     ArtifactFeatureUnavailableError,
@@ -71,7 +72,6 @@ from .rpc import (
     SlideDeckLength,
     VideoFormat,
     VideoStyle,
-    artifact_status_to_str,
     safe_index,
 )
 from .types import (
@@ -211,11 +211,11 @@ class ArtifactsAPI:
                 (matches ``notebooks.get``; issue #1247). Use :meth:`get_or_none`
                 for the sanctioned ``None``-on-miss lookup.
         """
-        # ``resolve_get`` single-sources the raise-on-miss decision (#1247).
+        # ``unwrap_or_raise`` single-sources the raise-on-miss decision (#1247).
         # Internal callers needing the silent lookup use get_or_none.
-        return resolve_get(
+        return unwrap_or_raise(
             await self.get_or_none(notebook_id, artifact_id),
-            not_found=ArtifactNotFoundError(artifact_id),
+            ArtifactNotFoundError(artifact_id),
         )
 
     async def get_or_none(self, notebook_id: str, artifact_id: str) -> Artifact | None:
@@ -1326,8 +1326,7 @@ class ArtifactsAPI:
 
         if artifact_id:
             status_code = safe_index(result, 0, 4, method_id=method_id, source=source)
-            status = artifact_status_to_str(status_code) if status_code is not None else "pending"
-            return GenerationStatus(task_id=artifact_id, status=status)
+            return GenerationStatus(task_id=artifact_id, status=_status_from_code(status_code))
 
         # v0.8.0 (#1342): a missing id means no task was created — raise.
         # Null id (feature gated) -> ArtifactFeatureUnavailableError; else drift.

@@ -217,6 +217,7 @@ _FROZEN_TYPES_ALL = [
     "SourceFulltext",
     "SourceSummary",
     "Artifact",
+    "GenerationState",
     "GenerationStatus",
     "ReportSuggestion",
     "Note",
@@ -295,6 +296,7 @@ _TOP_LEVEL_TYPE_EXPORTS = [
     "ConversationTurn",
     "DriveMimeType",
     "ExportType",
+    "GenerationState",
     "GenerationStatus",
     "InfographicDetail",
     "InfographicOrientation",
@@ -350,6 +352,7 @@ _TYPES_EXCEPTION_REEXPORTS = [
 ]
 
 _TOP_LEVEL_EXCEPTION_EXPORTS = [
+    "AmbiguousResearchTaskError",
     "ArtifactDownloadError",
     "ArtifactError",
     "ArtifactFeatureUnavailableError",

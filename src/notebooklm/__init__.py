@@ -54,6 +54,7 @@ from .client import NotebookLMClient
 
 # Public API: Exceptions (centralized in exceptions.py)
 from .exceptions import (
+    AmbiguousResearchTaskError,  # Domain: Research
     # Domain: Artifacts
     ArtifactDownloadError,
     ArtifactError,
@@ -91,7 +92,6 @@ from .exceptions import (
     # Cross-domain umbrellas
     NotFoundError,
     RateLimitError,
-    # Domain: Research
     ResearchError,
     ResearchTaskMismatchError,
     ResearchTimeoutError,
@@ -130,6 +130,7 @@ from .types import (
     ConversationTurn,
     DriveMimeType,
     ExportType,
+    GenerationState,
     GenerationStatus,
     InfographicDetail,
     InfographicOrientation,
@@ -200,6 +201,7 @@ __all__ = [
     "SourceGuide",
     "SourceSummary",
     "Artifact",
+    "GenerationState",
     "GenerationStatus",
     "ReportSuggestion",
     "MindMap",
@@ -263,6 +265,7 @@ __all__ = [
     "ArtifactPendingTimeoutError",
     "ArtifactInProgressTimeoutError",
     # Domain Exceptions: Research
+    "AmbiguousResearchTaskError",
     "ResearchError",
     "ResearchTimeoutError",
     "ResearchTaskMismatchError",

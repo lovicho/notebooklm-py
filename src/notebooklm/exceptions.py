@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import reprlib
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -117,6 +118,7 @@ __all__ = [
     "ResearchError",
     "ResearchTimeoutError",
     "ResearchTaskMismatchError",
+    "AmbiguousResearchTaskError",
     # Domain: Notes
     "NoteError",
     "NoteNotFoundError",
@@ -1320,6 +1322,39 @@ class ResearchTaskMismatchError(ValidationError):
         )
 
 
+class AmbiguousResearchTaskError(ResearchError):
+    """Two or more research tasks are in flight but no ``task_id`` was given.
+
+    Raised by :meth:`ResearchAPI.poll` / :meth:`ResearchAPI.wait_for_completion`
+    when ``task_id`` is ``None`` and the notebook has two or more in-flight
+    tasks: with no discriminator the call would have to guess, risking the wrong
+    task, so it fails loud (ADR-0019: "ambiguous -> raise, never silently
+    guess"). Pass the ``task_id`` from :meth:`ResearchAPI.start`; a single
+    in-flight task is unambiguous and still returned silently.
+
+    .. versionchanged:: 0.8.0 previously warned and returned the latest task.
+
+    Inherits from :class:`ResearchError` and deliberately NOT from
+    :class:`ValidationError` — the counterpoint to
+    :class:`ResearchTaskMismatchError` (which IS a ``ValidationError``), so
+    ``except ValidationError`` does not catch this; catch ``except ResearchError``.
+
+    Attributes:
+        notebook_id: Notebook containing the ambiguous in-flight tasks.
+        task_ids: The ``task_id`` of every in-flight task observed at poll time.
+    """
+
+    def __init__(self, *, notebook_id: str, task_ids: list[str]):
+        self.notebook_id = notebook_id
+        self.task_ids = task_ids
+        super().__init__(
+            f"ResearchAPI poll on notebook {notebook_id!r} is ambiguous: "
+            f"{len(task_ids)} research tasks are in flight but no task_id was "
+            f"supplied to select one. Pass task_id=<id> (from research.start) "
+            f"to choose explicitly. In-flight task ids: {reprlib.repr(task_ids)}."
+        )
+
+
 # =============================================================================
 # Domain: Notes
 # =============================================================================
@@ -1337,10 +1372,9 @@ class NoteNotFoundError(NotFoundError, RPCError, NoteError):
     """Note not found in notebook.
 
     .. note::
-       Under v0.7.0 this type is raised only when ``NOTEBOOKLM_FUTURE_ERRORS``
-       is on — ``notes.get`` (via ``resolve_get``, #1247) and ``notes.update``
-       (#1362) then fail loud on a missing note. It is the unconditional
-       not-found signal for note paths in v0.8.0 (#1346); see below.
+       As of v0.8.0 this is the unconditional not-found signal for note paths
+       (#1346): ``notes.get`` (#1247) and ``notes.update`` (#1362) fail loud on
+       a missing note. See below.
 
     Inherits from :class:`NotFoundError` (cross-domain umbrella),
     :class:`RPCError` (transport-level catchability), and :class:`NoteError`
