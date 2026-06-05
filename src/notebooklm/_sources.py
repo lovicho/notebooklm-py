@@ -11,8 +11,8 @@ from urllib.parse import urlparse
 
 import httpx
 
-from ._deprecation import future_errors_enabled
 from ._lookup import resolve_get
+from ._row_adapters.sources import interpret_source_freshness
 from ._runtime.config import DEFAULT_MAX_CONCURRENT_UPLOADS
 from ._runtime.contracts import RpcCaller
 from ._settings import build_get_user_settings_params, extract_account_limits
@@ -148,7 +148,7 @@ class SourcesAPI:
         """
         return await self._lister.list(notebook_id, strict=strict)
 
-    async def get(self, notebook_id: str, source_id: str) -> Source | None:
+    async def get(self, notebook_id: str, source_id: str) -> Source:
         """Get details of a specific source.
 
         Args:
@@ -156,32 +156,27 @@ class SourcesAPI:
             source_id: The source ID.
 
         Returns:
-            Source object with current status, or None if not found.
+            The :class:`~notebooklm.types.Source` with its current status.
 
-        .. deprecated:: 0.7.0
-            Returning ``None`` for a missing source is deprecated and emits a
-            :class:`DeprecationWarning`. In **v0.8.0** this method will raise
-            :class:`~notebooklm.exceptions.SourceNotFoundError` instead, to match
-            ``notebooks.get`` (issue #1247); wrap in ``try/except
-            SourceNotFoundError`` to keep handling missing sources. Suppress with
-            ``NOTEBOOKLM_QUIET_DEPRECATIONS``, or set ``NOTEBOOKLM_FUTURE_ERRORS=1``
-            to preview the v0.8.0 raise now.
+        Raises:
+            SourceNotFoundError: If no source with ``source_id`` exists (matches
+                ``notebooks.get``; issue #1247). Use :meth:`get_or_none` for the
+                sanctioned ``None``-on-miss lookup.
         """
-        # ``resolve_get`` single-sources the warn-vs-raise decision (#1247);
+        # ``resolve_get`` single-sources the raise-on-miss decision (#1247);
         # internal callers needing the silent lookup use ``get_or_none``.
         return resolve_get(
             await self.get_or_none(notebook_id, source_id),
             not_found=SourceNotFoundError(source_id),
-            resource="source",
         )
 
     async def get_or_none(self, notebook_id: str, source_id: str) -> Source | None:
         """Get a source by ID, returning ``None`` when it does not exist.
 
         The sanctioned ``None``-on-miss lookup (ADR-0019): unlike :meth:`get`
-        — which is slated to raise :class:`~notebooklm.exceptions.SourceNotFoundError`
-        on a miss in v0.8.0 (issue #1247) — this returns ``None`` for a genuine
-        absence and emits no deprecation warning. Transport, auth, and decode
+        — which now raises :class:`~notebooklm.exceptions.SourceNotFoundError`
+        on a miss (#1247) — this returns ``None`` for a genuine absence and
+        emits no deprecation warning. Transport, auth, and decode
         faults are **not** swallowed; only a real "not found" yields ``None``.
 
         Args:
@@ -638,23 +633,25 @@ class SourcesAPI:
             return_object: When ``True`` (default), return the renamed
                 :class:`~notebooklm.types.Source` (preferring the
                 ``UPDATE_SOURCE`` echo, fetching only on a null echo). When
-                ``False``, return ``None`` without hydrating. Under the v0.8.0
-                preview ``False`` still returns ``None`` but adds miss-detection
-                (the flag gates detection, not return — see ``Raises``).
+                ``False``, return ``None`` without hydrating. Miss-detection
+                runs in both modes (``False`` returns ``None`` but raises a miss).
 
         Returns:
             The renamed :class:`~notebooklm.types.Source`, or ``None`` when
             ``return_object=False``.
 
         Raises:
-            SourceNotFoundError: if the source does not exist (detected via a
-                content/list fetch, not a 404). Always when ``return_object=True``;
-                also on ``False`` under ``NOTEBOOKLM_FUTURE_ERRORS``.
+            SourceNotFoundError: if the source does not exist (a content/list
+                fetch, not a 404, detects it), in both ``return_object`` modes.
 
         .. versionchanged:: 0.7.0
             **Breaking change:** no longer fabricates an unverified
             ``Source(id, title)`` on a null echo; it hydrates and raises
             :class:`SourceNotFoundError` (#1255), plus ``return_object``.
+
+        .. versionchanged:: 0.8.0
+            **Breaking change:** ``return_object=False`` now runs the existence
+            preflight on a null echo too, raising on a miss (#1362).
         """
         logger.debug("Renaming source %s to: %s", source_id, new_title)
         params = build_rename_source_params(source_id, new_title)
@@ -667,16 +664,16 @@ class SourcesAPI:
         if result and return_object:
             return Source.from_api_response(result, method_id=RPCMethod.UPDATE_SOURCE.value)
         # Null echo: hydrate via the internal lookup (never public ``get()`` —
-        # #1247) so a miss raises. ``False`` skips it when existence is proven
-        # (echo) or flag-off; the v0.8.0 preview (#1362) runs it to detect a miss.
-        if not return_object and (result or not future_errors_enabled()):
+        # #1247) so a miss raises. ``False`` skips it only when existence is
+        # proven by the echo; v0.8.0 (#1362) runs it to detect a miss.
+        if not return_object and result:
             return None
         source = await self._get_or_none(notebook_id, source_id)
         if source is None:
             raise SourceNotFoundError(source_id, method_id=RPCMethod.UPDATE_SOURCE.value)
         return None if not return_object else source
 
-    async def refresh(self, notebook_id: str, source_id: str) -> bool:
+    async def refresh(self, notebook_id: str, source_id: str) -> None:
         """Refresh a source to get updated content (for URL/Drive sources).
 
         Args:
@@ -684,9 +681,11 @@ class SourcesAPI:
             source_id: The source ID to refresh.
 
         Returns:
-            ``True`` if refresh was initiated (failures raise first, so it is
-            uninformative). Under ``NOTEBOOKLM_FUTURE_ERRORS`` (#1290) returns
-            ``None``; ``-> bool`` stays until v0.8.0.
+            ``None`` on success; any failure raises first.
+
+        .. versionchanged:: 0.8.0
+            **Breaking change:** returns ``None`` (not always-``True``); the
+            ``-> bool`` annotation is dropped (#1290).
         """
         params = [None, [source_id], [2]]
         await self._rpc.rpc_call(
@@ -695,10 +694,7 @@ class SourcesAPI:
             source_path=f"/notebook/{notebook_id}",
             allow_null=True,
         )
-        # v0.8.0 preview (#1290): uninformative ``True`` -> ``None`` (runtime-only).
-        if future_errors_enabled():
-            return None  # type: ignore[return-value]
-        return True
+        return None
 
     async def check_freshness(self, notebook_id: str, source_id: str) -> bool:
         """Check if a source needs to be refreshed.
@@ -709,6 +705,11 @@ class SourcesAPI:
 
         Returns:
             True if source is fresh, False if it needs refresh.
+
+        Raises:
+            DecodingError: If the freshness payload has a structurally
+                unrecognized shape (schema drift) — so callers can tell a miss
+                from drift instead of a silent "stale" (#1344).
         """
         params = [None, [source_id], [2]]
         result = await self._rpc.rpc_call(
@@ -717,21 +718,7 @@ class SourcesAPI:
             source_path=f"/notebook/{notebook_id}",
             allow_null=True,
         )
-        # Shapes by source type: ``[]`` or ``[[null, true, [id]]]`` = fresh
-        # (URL / Drive); bare ``True`` = fresh; bare ``False`` = stale.
-        if result is True:
-            return True
-        if result is False:
-            return False
-        if isinstance(result, list):
-            # Empty array means fresh
-            if len(result) == 0:
-                return True
-            # Check for nested structure [[null, true, ...]] from Drive sources
-            first = result[0]
-            if isinstance(first, list) and len(first) > 1 and first[1] is True:
-                return True
-        return False
+        return interpret_source_freshness(result)
 
     async def get_guide(self, notebook_id: str, source_id: str) -> SourceGuide:
         """Get AI-generated summary and keywords for a specific source.
@@ -746,12 +733,9 @@ class SourcesAPI:
         Returns:
             A :class:`~notebooklm._types.research.SourceGuide` with:
                 - ``summary``: AI-generated summary with **bold** keywords (markdown)
-                - ``keywords``: tuple of topic keyword strings (``guide["keywords"]``
-                  still yields a ``list`` for back-compat)
+                - ``keywords``: tuple of topic keyword strings
 
-            Use attribute access (``guide.summary``). Legacy
-            ``guide["summary"]`` dict-subscript access still works (with a
-            ``DeprecationWarning``) until v0.8.0.
+            Use attribute access (``guide.summary``, ``guide.keywords``).
         """
         return await self._content.get_guide(notebook_id, source_id)
 

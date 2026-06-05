@@ -718,7 +718,8 @@ class TestGenerateInfographic:
 
 
 class TestGenerateMindMap:
-    def test_generate_mind_map(self, runner, mock_auth):
+    def test_generate_mind_map_note_backed(self, runner, mock_auth):
+        """--kind note-backed routes through client.artifacts.generate_mind_map."""
         with patch("notebooklm.cli.generate_cmd.NotebookLMClient") as mock_client_cls:
             mock_client = create_mock_client()
             mock_client.artifacts.generate_mind_map = AsyncMock(
@@ -732,9 +733,13 @@ class TestGenerateMindMap:
                 "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch:
                 mock_fetch.return_value = ("csrf", "session")
-                result = runner.invoke(cli, ["generate", "mind-map", "-n", "nb_123"])
+                result = runner.invoke(
+                    cli, ["generate", "mind-map", "--kind", "note-backed", "-n", "nb_123"]
+                )
 
             assert result.exit_code == 0
+            mock_client.artifacts.generate_mind_map.assert_awaited_once()
+            mock_client.mind_maps.generate.assert_not_called()
 
     def test_generate_mind_map_interactive(self, runner, mock_auth):
         """--interactive routes through client.mind_maps.generate(kind=INTERACTIVE)."""
@@ -897,13 +902,18 @@ class TestGenerateMindMap:
             mock_client.mind_maps.generate.assert_awaited_once()
             assert not mock_client.mind_maps.generate.await_args.kwargs.get("instructions")
 
-    def test_generate_mind_map_default_kind_emits_transition_notice(self, runner, mock_auth):
-        """Omitting --kind warns that the default flips to interactive in v0.8.0."""
+    def test_generate_mind_map_default_routes_interactive(self, runner, mock_auth):
+        """Omitting --kind now defaults to the interactive studio-artifact path (#1272)."""
+        from notebooklm.types import MindMap, MindMapKind
+
         with patch("notebooklm.cli.generate_cmd.NotebookLMClient") as mock_client_cls:
             mock_client = create_mock_client()
-            mock_client.artifacts.generate_mind_map = AsyncMock(
-                return_value=mind_map_result(
-                    {"mind_map": {"name": "Root", "children": []}, "note_id": "n1"}
+            mock_client.mind_maps.generate = AsyncMock(
+                return_value=MindMap(
+                    id="art_42",
+                    notebook_id="nb_123",
+                    title="Interactive Mind Map",
+                    kind=MindMapKind.INTERACTIVE,
                 )
             )
             mock_client_cls.return_value = mock_client
@@ -913,32 +923,16 @@ class TestGenerateMindMap:
             ) as mock_fetch:
                 mock_fetch.return_value = ("csrf", "session")
                 result = runner.invoke(cli, ["generate", "mind-map", "-n", "nb_123"])
+
             assert result.exit_code == 0
-            assert "switches to interactive in v0.8.0" in result.output
-
-            # An explicit --kind suppresses the transition notice.
-            with patch(
-                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
-            ) as mock_fetch:
-                mock_fetch.return_value = ("csrf", "session")
-                result2 = runner.invoke(
-                    cli, ["generate", "mind-map", "--kind", "note-backed", "-n", "nb_123"]
-                )
-            assert result2.exit_code == 0
-            assert "switches to interactive in v0.8.0" not in result2.output
-
-            # The transition notice is *informational* (no input dropped), so
-            # --json suppresses it entirely — it must not leak onto stdout or
-            # stderr, keeping machine-readable output clean (design decision).
-            with patch(
-                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
-            ) as mock_fetch:
-                mock_fetch.return_value = ("csrf", "session")
-                result3 = runner.invoke(cli, ["generate", "mind-map", "-n", "nb_123", "--json"])
-            assert result3.exit_code == 0
-            assert "switches to interactive in v0.8.0" not in result3.stdout
-            assert "switches to interactive in v0.8.0" not in result3.stderr
-            json.loads(result3.stdout)  # stdout is pure, parseable JSON
+            # The bare default dispatches to the unified interactive API, not the
+            # note-backed artifacts.generate_mind_map.
+            mock_client.mind_maps.generate.assert_awaited_once()
+            assert (
+                mock_client.mind_maps.generate.await_args.kwargs["kind"] == MindMapKind.INTERACTIVE
+            )
+            mock_client.artifacts.generate_mind_map.assert_not_called()
+            assert "art_42" in result.output
 
 
 # =============================================================================
@@ -1097,8 +1091,8 @@ class TestGenerateReport:
 class TestGenerateJsonOutput:
     """JSON-output tests for commands whose envelope differs from the standard shape."""
 
-    def test_generate_mind_map_json_output(self, runner, mock_auth):
-        """Test --json for mind-map (different return structure)."""
+    def test_generate_mind_map_note_backed_json_output(self, runner, mock_auth):
+        """--kind note-backed --json emits the note-backed {mind_map, note_id} shape."""
         with patch("notebooklm.cli.generate_cmd.NotebookLMClient") as mock_client_cls:
             mock_client = create_mock_client()
             mock_client.artifacts.generate_mind_map = AsyncMock(
@@ -1112,7 +1106,9 @@ class TestGenerateJsonOutput:
                 "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch:
                 mock_fetch.return_value = ("csrf", "session")
-                result = runner.invoke(cli, ["generate", "mind-map", "--json", "-n", "nb_123"])
+                result = runner.invoke(
+                    cli, ["generate", "mind-map", "--kind", "note-backed", "--json", "-n", "nb_123"]
+                )
 
             assert result.exit_code == 0
             data = json.loads(result.output)
@@ -1253,16 +1249,19 @@ class TestGenerateWithRetry:
 
     @pytest.mark.asyncio
     async def test_retry_on_rate_limit(self):
-        """Test that rate limit triggers retry."""
+        """Test that a raised RateLimitError triggers retry (#1342)."""
+        from notebooklm.exceptions import RateLimitError
         from notebooklm.types import GenerationStatus
 
-        rate_limited = GenerationStatus(
-            task_id="", status="failed", error="Rate limited", error_code="USER_DISPLAYABLE_ERROR"
-        )
         success_result = GenerationStatus(
             task_id="task_123", status="pending", error=None, error_code=None
         )
-        generate_fn = AsyncMock(side_effect=[rate_limited, success_result])
+        generate_fn = AsyncMock(
+            side_effect=[
+                RateLimitError("Rate limited", rpc_code="USER_DISPLAYABLE_ERROR"),
+                success_result,
+            ]
+        )
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             result = await generate_with_retry(generate_fn, max_retries=3, artifact_type="audio")
@@ -1272,39 +1271,25 @@ class TestGenerateWithRetry:
         mock_sleep.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_retry_exhausted(self):
-        """Test that all retries being exhausted returns last result."""
-        from notebooklm.types import GenerationStatus
+    async def test_retry_exhausted_reraises(self):
+        """v0.8.0 (#1342): exhausting the budget re-raises the RateLimitError."""
+        from notebooklm.exceptions import RateLimitError
 
-        rate_limited = GenerationStatus(
-            task_id="", status="failed", error="Rate limited", error_code="USER_DISPLAYABLE_ERROR"
-        )
-        generate_fn = AsyncMock(return_value=rate_limited)
+        error = RateLimitError("Rate limited", rpc_code="USER_DISPLAYABLE_ERROR")
+        generate_fn = AsyncMock(side_effect=error)
 
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await generate_with_retry(generate_fn, max_retries=2, artifact_type="audio")
+        with (
+            patch("asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(RateLimitError) as exc_info,
+        ):
+            await generate_with_retry(generate_fn, max_retries=2, artifact_type="audio")
 
-        assert result == rate_limited
+        assert exc_info.value is error
         assert generate_fn.call_count == 3  # initial + 2 retries
 
     @pytest.mark.asyncio
-    async def test_no_retry_when_max_retries_zero(self):
-        """Test that max_retries=0 means no retry attempts."""
-        from notebooklm.types import GenerationStatus
-
-        rate_limited = GenerationStatus(
-            task_id="", status="failed", error="Rate limited", error_code="USER_DISPLAYABLE_ERROR"
-        )
-        generate_fn = AsyncMock(return_value=rate_limited)
-
-        result = await generate_with_retry(generate_fn, max_retries=0, artifact_type="audio")
-
-        assert result == rate_limited
-        assert generate_fn.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_retry_delays_increase_exponentially(self):
-        """Verify delays follow exponential backoff pattern (60s, 120s, 240s)."""
+    async def test_returned_rate_limited_status_returns_without_retry(self):
+        """v0.8.0 (#1342): a returned rate-limited status is no longer a retry signal."""
         from notebooklm.types import GenerationStatus
 
         rate_limited = GenerationStatus(
@@ -1313,6 +1298,37 @@ class TestGenerateWithRetry:
         generate_fn = AsyncMock(return_value=rate_limited)
 
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await generate_with_retry(generate_fn, max_retries=3, artifact_type="audio")
+
+        assert result == rate_limited
+        assert generate_fn.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_retry_when_max_retries_zero(self):
+        """Test that max_retries=0 means no retry attempts (re-raises immediately)."""
+        from notebooklm.exceptions import RateLimitError
+
+        error = RateLimitError("Rate limited", rpc_code="USER_DISPLAYABLE_ERROR")
+        generate_fn = AsyncMock(side_effect=error)
+
+        with pytest.raises(RateLimitError):
+            await generate_with_retry(generate_fn, max_retries=0, artifact_type="audio")
+
+        assert generate_fn.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_delays_increase_exponentially(self):
+        """Verify delays follow exponential backoff pattern (60s, 120s, 240s)."""
+        from notebooklm.exceptions import RateLimitError
+
+        error = RateLimitError("Rate limited", rpc_code="USER_DISPLAYABLE_ERROR")
+        generate_fn = AsyncMock(side_effect=error)
+
+        with (
+            patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            pytest.raises(RateLimitError),
+        ):
             await generate_with_retry(generate_fn, max_retries=3, artifact_type="audio")
 
         # Verify delays: 60s, 120s, 240s (3 retries = 3 sleeps)
@@ -1322,14 +1338,15 @@ class TestGenerateWithRetry:
     @pytest.mark.asyncio
     async def test_retry_delay_caps_at_max(self):
         """Verify delay caps at 300s even with many retries."""
-        from notebooklm.types import GenerationStatus
+        from notebooklm.exceptions import RateLimitError
 
-        rate_limited = GenerationStatus(
-            task_id="", status="failed", error="Rate limited", error_code="USER_DISPLAYABLE_ERROR"
-        )
-        generate_fn = AsyncMock(return_value=rate_limited)
+        error = RateLimitError("Rate limited", rpc_code="USER_DISPLAYABLE_ERROR")
+        generate_fn = AsyncMock(side_effect=error)
 
-        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with (
+            patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            pytest.raises(RateLimitError),
+        ):
             await generate_with_retry(generate_fn, max_retries=10, artifact_type="audio")
 
         # Verify no delay exceeds RETRY_MAX_DELAY (300s)
@@ -2143,17 +2160,22 @@ class TestGenerateWithRetryConsoleOutput:
 
     @pytest.mark.asyncio
     async def test_retry_shows_console_message_when_not_json(self):
-        """Line 111: console.print shown during retry when json_output=False."""
+        """Line 111: console.print shown during retry when json_output=False.
 
+        v0.8.0 (#1342): the retry is driven by a raised RateLimitError.
+        """
+        from notebooklm.exceptions import RateLimitError
         from notebooklm.types import GenerationStatus
 
-        rate_limited = GenerationStatus(
-            task_id="", status="failed", error="Rate limited", error_code="USER_DISPLAYABLE_ERROR"
-        )
         success_result = GenerationStatus(
             task_id="task_123", status="pending", error=None, error_code=None
         )
-        generate_fn = AsyncMock(side_effect=[rate_limited, success_result])
+        generate_fn = AsyncMock(
+            side_effect=[
+                RateLimitError("Rate limited", rpc_code="USER_DISPLAYABLE_ERROR"),
+                success_result,
+            ]
+        )
 
         retry_sink = MagicMock()
         with patch("asyncio.sleep", new_callable=AsyncMock):

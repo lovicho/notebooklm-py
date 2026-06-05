@@ -1,13 +1,13 @@
 """Unit tests for NotesAPI private helpers and edge cases."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from notebooklm._mind_map import NoteBackedMindMapService
 from notebooklm._note_service import NoteService
 from notebooklm._notes import NotesAPI
-from notebooklm.exceptions import RPCError
+from notebooklm.exceptions import NoteNotFoundError, RPCError
 
 
 @pytest.fixture
@@ -427,16 +427,13 @@ class TestGetNote:
     """Edge case tests for get() method."""
 
     @pytest.mark.asyncio
-    async def test_get_returns_none_for_empty_list(self, notes_api, mock_core):
-        """Test get() returns None (with deprecation) when notes list is empty."""
+    async def test_get_raises_for_empty_list(self, notes_api, mock_core):
+        """Test get() raises NoteNotFoundError when notes list is empty."""
         mock_core.rpc_executor.rpc_call.return_value = [[]]
 
-        # v0.7.0: a miss still returns None but now emits a DeprecationWarning
-        # (flips to raising NoteNotFoundError in v0.8.0, issue #1247).
-        with pytest.warns(DeprecationWarning, match="NoteNotFoundError"):
-            result = await notes_api.get("nb_123", "note_1")
-
-        assert result is None
+        # v0.8.0: a miss now raises NoteNotFoundError (issue #1247).
+        with pytest.raises(NoteNotFoundError):
+            await notes_api.get("nb_123", "note_1")
 
     @pytest.mark.asyncio
     async def test_get_matches_first_element(self, notes_api, mock_core):
@@ -552,6 +549,9 @@ class TestUpdateNote:
     @pytest.mark.asyncio
     async def test_update_calls_rpc_with_correct_params(self, notes_api, mock_core):
         """Test that update() passes correct parameters."""
+        # v0.8.0 (#1362): update() runs an existence preflight first; stub a hit
+        # so the UPDATE_NOTE RPC fires and we can pin its params.
+        notes_api.get_or_none = AsyncMock(return_value=MagicMock())
         mock_core.rpc_executor.rpc_call.return_value = None
 
         await notes_api.update("nb_123", "note_456", "New content", "New title")

@@ -37,7 +37,6 @@ from ._artifact.payloads import (
     build_suggest_reports_params,
     build_video_artifact_params,
 )
-from ._deprecation import future_errors_enabled
 from ._env import get_default_language
 from ._lookup import resolve_get
 from ._mind_map import NoteBackedMindMapService
@@ -67,7 +66,6 @@ from .rpc import (
     QuizDifficulty,
     QuizQuantity,
     ReportFormat,
-    RPCError,
     RPCMethod,
     SlideDeckFormat,
     SlideDeckLength,
@@ -198,7 +196,7 @@ class ArtifactsAPI:
             list_mind_maps=self._list_mind_maps,
         )
 
-    async def get(self, notebook_id: str, artifact_id: str) -> Artifact | None:
+    async def get(self, notebook_id: str, artifact_id: str) -> Artifact:
         """Get a specific artifact by ID.
 
         Args:
@@ -206,33 +204,27 @@ class ArtifactsAPI:
             artifact_id: The artifact ID.
 
         Returns:
-            Artifact object, or None if not found.
+            The :class:`~notebooklm.types.Artifact`.
 
-        .. deprecated:: 0.7.0
-            Returning ``None`` for a missing artifact is deprecated and emits a
-            :class:`DeprecationWarning`. In **v0.8.0** this method will raise
-            :class:`~notebooklm.exceptions.ArtifactNotFoundError` instead, to
-            match ``notebooks.get`` (issue #1247). Wrap the call in
-            ``try/except ArtifactNotFoundError`` to keep handling missing
-            artifacts. Suppress with ``NOTEBOOKLM_QUIET_DEPRECATIONS``, or set
-            ``NOTEBOOKLM_FUTURE_ERRORS=1`` to preview the v0.8.0 raise now.
+        Raises:
+            ArtifactNotFoundError: If no artifact with ``artifact_id`` exists
+                (matches ``notebooks.get``; issue #1247). Use :meth:`get_or_none`
+                for the sanctioned ``None``-on-miss lookup.
         """
-        # ``resolve_get`` single-sources the warn-runway/raise decision: warn +
-        # return ``None`` today, or raise under ``NOTEBOOKLM_FUTURE_ERRORS``
-        # (#1247). Internal callers needing the silent lookup use get_or_none.
+        # ``resolve_get`` single-sources the raise-on-miss decision (#1247).
+        # Internal callers needing the silent lookup use get_or_none.
         return resolve_get(
             await self.get_or_none(notebook_id, artifact_id),
             not_found=ArtifactNotFoundError(artifact_id),
-            resource="artifact",
         )
 
     async def get_or_none(self, notebook_id: str, artifact_id: str) -> Artifact | None:
         """Get an artifact by ID, returning ``None`` when it does not exist.
 
         The sanctioned ``None``-on-miss lookup (ADR-0019): unlike :meth:`get`
-        — which is slated to raise
-        :class:`~notebooklm.exceptions.ArtifactNotFoundError` on a miss in
-        v0.8.0 (issue #1247) — this returns ``None`` for a genuine absence and
+        — which now raises
+        :class:`~notebooklm.exceptions.ArtifactNotFoundError` on a miss
+        (#1247) — this returns ``None`` for a genuine absence and
         emits no deprecation warning. This method neither catches nor synthesizes
         a miss itself; it lists once and id-matches, inheriting :meth:`list`'s
         behavior unchanged. (Per ADR-0019 Rule 3, ``list`` keeps its deliberate
@@ -253,8 +245,8 @@ class ArtifactsAPI:
         logger.debug("Getting artifact %s from notebook %s", artifact_id, notebook_id)
         return await self._listing.get(notebook_id, artifact_id, list_artifacts=self.list)
 
-    # Internal optional-lookup alias: kept as a stable private name so existing
-    # internal call sites and tests can probe without the public deprecation.
+    # Internal optional-lookup alias: a stable private name so internal call
+    # sites and tests use the ``None``-on-miss lookup rather than the raising get().
     _get_or_none = get_or_none
 
     async def list_audio(self, notebook_id: str) -> builtins.list[Artifact]:
@@ -555,23 +547,14 @@ class ArtifactsAPI:
             raise ValidationError(f"slide_index must be >= 0, got {slide_index}")
 
         params = build_revise_slide_params(artifact_id, slide_index, prompt)
-        try:
-            result = await self._rpc.rpc_call(
-                RPCMethod.REVISE_SLIDE,
-                params,
-                source_path=f"/notebook/{notebook_id}",
-                allow_null=True,
-            )
-        except RPCError as e:
-            # v0.8.0 preview (#1342): a refusal raises; see ``_call_generate``.
-            if e.rpc_code == "USER_DISPLAYABLE_ERROR" and not future_errors_enabled():
-                return GenerationStatus(
-                    task_id="",
-                    status="failed",
-                    error=str(e),
-                    error_code=str(e.rpc_code) if e.rpc_code is not None else None,
-                )
-            raise
+        # v0.8.0 (#1342): a synchronous refusal (``RPCError``) propagates rather
+        # than being swallowed into a soft ``status="failed"`` return.
+        result = await self._rpc.rpc_call(
+            RPCMethod.REVISE_SLIDE,
+            params,
+            source_path=f"/notebook/{notebook_id}",
+            allow_null=True,
+        )
         if result is None:
             logger.warning("REVISE_SLIDE returned null result for artifact %s", artifact_id)
             raise ArtifactFeatureUnavailableError(
@@ -698,9 +681,7 @@ class ArtifactsAPI:
             A :class:`~notebooklm._types.research.MindMapResult` with
             ``mind_map`` (the parsed mind-map structure, or ``None`` on an
             empty response) and ``note_id`` (the persisted note id, or
-            ``None``). Use attribute access (``result.mind_map``). Legacy
-            ``result["mind_map"]`` dict-subscript access still works (with a
-            ``DeprecationWarning``) until v0.8.0.
+            ``None``). Use attribute access (``result.mind_map``).
         """
         if language is None:
             language = get_default_language()
@@ -942,9 +923,9 @@ class ArtifactsAPI:
             return_object: When ``True`` (default), re-fetch (a full
                 ``LIST_ARTIFACTS`` call) and return the renamed
                 :class:`~notebooklm.types.Artifact`; when ``False``, return
-                ``None`` without re-fetching. Under the v0.8.0 preview ``False``
-                still returns ``None`` but adds miss-detection (the flag gates
-                detection, not the return — see ``Raises``).
+                ``None`` without re-fetching. Miss-detection runs in both modes
+                (``False`` still returns ``None`` on success but raises on a
+                miss — see ``Raises``).
 
         Returns:
             The renamed :class:`~notebooklm.types.Artifact`, or ``None`` when
@@ -952,14 +933,20 @@ class ArtifactsAPI:
 
         Raises:
             ArtifactNotFoundError: if the artifact does not exist (detected via
-                a list fetch, not a 404). Always when ``return_object=True``;
-                also on ``False`` under ``NOTEBOOKLM_FUTURE_ERRORS``. Note-backed
-                mind-map ids are *not* renameable here — use ``mind_maps.rename``.
+                a list fetch, not a 404), in both ``return_object`` modes.
+                Note-backed mind-map ids are *not* renameable here — use
+                ``mind_maps.rename``.
 
         .. versionchanged:: 0.7.0
             **Breaking change:** no longer returns ``None`` on success; it
             re-fetches and raises :class:`ArtifactNotFoundError` for a missing
             target (#1255), plus the ``return_object`` opt-out.
+
+        .. versionchanged:: 0.8.0
+            **Breaking change:** ``return_object=False`` now runs the existence
+            preflight too, so a missing target raises
+            :class:`ArtifactNotFoundError` instead of silently returning
+            ``None`` (#1362).
         """
         params = [[artifact_id, new_title], [["title"]]]
         await self._rpc.rpc_call(
@@ -970,10 +957,9 @@ class ArtifactsAPI:
         )
         # Resolve via studio artifacts only — never public ``get()`` (#1247) nor
         # the merged listing (a note-backed mind-map id no-ops on RENAME_ARTIFACT
-        # — use ``mind_maps.rename``). v0.7.0 ``False`` short-circuits; the v0.8.0
-        # preview (#1362) runs the lookup on ``False`` too but still returns None.
-        if not return_object and not future_errors_enabled():
-            return None
+        # — use ``mind_maps.rename``). v0.8.0 (#1362): the lookup runs on
+        # ``False`` too so a missing target is detected, but ``False`` still
+        # returns ``None`` on success.
         artifact = await self._listing.get_studio_only(
             notebook_id, artifact_id, list_raw=self._list_raw
         )
@@ -1231,27 +1217,19 @@ class ArtifactsAPI:
             descriptor[2] if isinstance(descriptor, list) and len(descriptor) > 2 else "unknown"
         )
         logger.debug("Generating artifact type=%s in notebook %s", artifact_type, notebook_id)
-        try:
-            # CREATE_ARTIFACT is PROBE_THEN_CREATE (``_idempotency.py``).
-            # ``operation_variant=None`` marks this call site as the no-variant
-            # default (a future-proofing marker; the registry resolves the same).
-            result = await self._rpc.rpc_call(
-                RPCMethod.CREATE_ARTIFACT,
-                params,
-                source_path=f"/notebook/{notebook_id}",
-                allow_null=True,
-                operation_variant=None,
-            )
-        except RPCError as e:
-            # v0.8.0 preview (#1342): a refusal raises (couldn't-start); default-off swallow.
-            if e.rpc_code == "USER_DISPLAYABLE_ERROR" and not future_errors_enabled():
-                return GenerationStatus(
-                    task_id="",
-                    status="failed",
-                    error=str(e),
-                    error_code=str(e.rpc_code) if e.rpc_code is not None else None,
-                )
-            raise
+        # CREATE_ARTIFACT is PROBE_THEN_CREATE (``_idempotency.py``).
+        # ``operation_variant=None`` marks this call site as the no-variant
+        # default (a future-proofing marker; the registry resolves the same).
+        # v0.8.0 (#1342): a synchronous refusal (couldn't-start, ``RPCError``)
+        # propagates rather than being swallowed into a soft
+        # ``status="failed"`` return.
+        result = await self._rpc.rpc_call(
+            RPCMethod.CREATE_ARTIFACT,
+            params,
+            source_path=f"/notebook/{notebook_id}",
+            allow_null=True,
+            operation_variant=None,
+        )
         if result is None and null_result_artifact_type is not None:
             raise ArtifactFeatureUnavailableError(
                 null_result_artifact_type,
@@ -1351,15 +1329,11 @@ class ArtifactsAPI:
             status = artifact_status_to_str(status_code) if status_code is not None else "pending"
             return GenerationStatus(task_id=artifact_id, status=status)
 
-        # v0.8.0 preview (#1342): a missing id means no task was created — raise.
+        # v0.8.0 (#1342): a missing id means no task was created — raise.
         # Null id (feature gated) -> ArtifactFeatureUnavailableError; else drift.
-        if future_errors_enabled():
-            if artifact_id is None:
-                raise ArtifactFeatureUnavailableError("artifact", method_id=method_id)
-            raise DecodingError(f"No artifact id (source={source})", method_id=method_id)
-        return GenerationStatus(
-            task_id="", status="failed", error="Generation failed - no artifact_id returned"
-        )
+        if artifact_id is None:
+            raise ArtifactFeatureUnavailableError("artifact", method_id=method_id)
+        raise DecodingError(f"No artifact id (source={source})", method_id=method_id)
 
     @staticmethod
     def _extract_artifact_error(art: builtins.list[Any]) -> str | None:

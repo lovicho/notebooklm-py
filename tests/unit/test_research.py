@@ -590,15 +590,8 @@ class TestResearch:
         async with NotebookLMClient(auth_tokens) as client:
             with pytest.raises(ValueError, match="timeout must be non-negative"):
                 await client.research.wait_for_completion("nb_123", timeout=-1)
-            # Neutral "poll interval" wording so callers on the deprecated
-            # interval= alias don't see a name they never used.
             with pytest.raises(ValueError, match="poll interval must be positive"):
                 await client.research.wait_for_completion("nb_123", initial_interval=0)
-            with (
-                pytest.raises(ValueError, match="poll interval must be positive"),
-                pytest.warns(DeprecationWarning),
-            ):
-                await client.research.wait_for_completion("nb_123", interval=0)
 
     @pytest.mark.asyncio
     async def test_wait_for_completion_rejects_non_numeric_interval(self, auth_tokens):
@@ -611,42 +604,21 @@ class TestResearch:
                 )
 
     @pytest.mark.asyncio
-    async def test_wait_for_completion_interval_alias_deprecated(
-        self, auth_tokens, httpx_mock, build_rpc_response
-    ):
-        """The legacy ``interval`` kwarg still works but emits a warning."""
-        response_body = build_rpc_response(
-            RPCMethod.POLL_RESEARCH,
-            [
-                [
-                    [
-                        "task_123",
-                        _build_research_task_payload(
-                            "query",
-                            "https://example.com",
-                            "Result",
-                            status_code=1,
-                        ),
-                    ]
-                ]
-            ],
-        )
-        httpx_mock.add_response(content=response_body.encode(), method="POST")
-
+    async def test_wait_for_completion_interval_alias_removed(self, auth_tokens):
+        """The removed ``interval`` kwarg now raises the unknown-keyword TypeError."""
         async with NotebookLMClient(auth_tokens) as client:
-            with pytest.warns(DeprecationWarning, match="initial_interval"):
-                with pytest.raises(TimeoutError):
-                    await client.research.wait_for_completion(
-                        "nb_123",
-                        timeout=0,
-                        interval=1,
-                    )
+            with pytest.raises(TypeError, match="interval"):
+                await client.research.wait_for_completion(
+                    "nb_123",
+                    timeout=0,
+                    interval=1,  # type: ignore[call-arg]
+                )
 
     @pytest.mark.asyncio
     async def test_wait_for_completion_default_shape_is_silent(
         self, auth_tokens, httpx_mock, build_rpc_response, recwarn
     ):
-        """Default-shape calls (no interval kwarg) emit no deprecation warning."""
+        """Default-shape calls (no initial_interval kwarg) emit no deprecation warning."""
         response_body = build_rpc_response(
             RPCMethod.POLL_RESEARCH,
             [
@@ -669,17 +641,6 @@ class TestResearch:
             with pytest.raises(TimeoutError):
                 await client.research.wait_for_completion("nb_123", timeout=0)
         assert not [w for w in recwarn.list if issubclass(w.category, DeprecationWarning)]
-
-    @pytest.mark.asyncio
-    async def test_wait_for_completion_both_intervals_raises(self, auth_tokens):
-        """Passing both ``interval`` and ``initial_interval`` raises TypeError."""
-        async with NotebookLMClient(auth_tokens) as client:
-            with pytest.raises(TypeError, match="both 'initial_interval'"):
-                await client.research.wait_for_completion(
-                    "nb_123",
-                    interval=2,
-                    initial_interval=3,
-                )
 
     @pytest.mark.asyncio
     async def test_import_research(self, auth_tokens, httpx_mock, build_rpc_response):
@@ -744,15 +705,18 @@ class TestResearch:
                 )
 
     @pytest.mark.asyncio
-    async def test_start_research_returns_none(self, auth_tokens, httpx_mock, build_rpc_response):
-        """Test start returns None on empty response."""
+    async def test_start_research_empty_payload_raises(
+        self, auth_tokens, httpx_mock, build_rpc_response
+    ):
+        """v0.8.0 (#1342): start raises DecodingError on an empty response."""
+        from notebooklm.exceptions import DecodingError
+
         response_body = build_rpc_response(RPCMethod.START_FAST_RESEARCH, [])
         httpx_mock.add_response(content=response_body.encode(), method="POST")
 
         async with NotebookLMClient(auth_tokens) as client:
-            result = await client.research.start(notebook_id="nb_123", query="test", mode="fast")
-
-        assert result is None
+            with pytest.raises(DecodingError):
+                await client.research.start(notebook_id="nb_123", query="test", mode="fast")
 
     @pytest.mark.asyncio
     async def test_poll_no_research(self, auth_tokens, httpx_mock, build_rpc_response):
@@ -1294,10 +1258,12 @@ class TestResearch:
             sources = poll_result.sources
             assert len(sources) == 3
 
+            # Attribute-only typed sources (#1251): the dict-membership bridge
+            # was dropped; url/title/result_type are plain attributes.
             for src in sources:
-                assert "url" in src
-                assert "title" in src
-                assert "result_type" in src
+                assert hasattr(src, "url")
+                assert hasattr(src, "title")
+                assert hasattr(src, "result_type")
 
             imported = await client.research.import_sources(
                 notebook_id="nb_123", task_id=task_id, sources=sources[:2]
