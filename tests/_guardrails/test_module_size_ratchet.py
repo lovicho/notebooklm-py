@@ -48,7 +48,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src" / "notebooklm"
 
 # Any *new* module is forbidden from exceeding this many lines. Chosen to sit
-# just below the smallest currently-allowlisted module (``_idempotency.py`` at
+# just below the smallest currently-allowlisted module (``_research.py`` at
 # 936) so the allowlist is the *complete* set of modules over budget today and
 # the gate is green on main. New work must come in at or under this budget or
 # split before merge.
@@ -62,19 +62,15 @@ MODULE_SIZE_BUDGET = 900
 # DO NOT raise a ceiling to make room for new code in a fat module — split it.
 # DO lower a ceiling when a module shrinks (the gate will tell you the value).
 ALLOWLISTED_CEILINGS: dict[str, int] = {
-    "cli/source_cmd.py": 1498,
+    "cli/source_cmd.py": 949,
     "exceptions.py": 1460,
     "_artifacts.py": 1393,
     "_source/upload.py": 1236,
-    "cli/session_cmd.py": 1080,
     "_sources.py": 1007,
-    "cli/services/playwright_login.py": 988,
     "_artifact/downloads.py": 973,
     "client.py": 973,
     "_research.py": 936,
-    "cli/services/generate.py": 926,
     "_chat/api.py": 946,
-    "_idempotency.py": 936,
 }
 
 
