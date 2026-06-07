@@ -42,6 +42,7 @@ from ._client_composed import ClientComposed
 from ._client_seams import resolve_client_seams
 from ._deprecation import warn_deprecated
 from ._env import get_base_url as get_base_url
+from ._labels import LabelsAPI
 from ._mind_map import NoteBackedMindMapService
 from ._mind_maps_api import MindMapsAPI
 from ._note_service import NoteService
@@ -49,6 +50,7 @@ from ._notebooks import NotebooksAPI
 from ._notes import NotesAPI
 from ._research import ResearchAPI
 from ._runtime.config import (
+    DEFAULT_CHAT_TIMEOUT,
     DEFAULT_KEEPALIVE_MIN_INTERVAL,
     DEFAULT_MAX_CONCURRENT_RPCS,
     DEFAULT_MAX_CONCURRENT_UPLOADS,
@@ -83,6 +85,7 @@ class NotebookLMClient:
     - notes: Create and manage user notes
     - settings: Manage user settings (output language, etc.)
     - sharing: Manage notebook sharing and permissions
+    - labels: AI-group sources into topic labels (auto-label / reorganize)
 
     Usage:
         # Create from saved authentication (canonical idiom)
@@ -103,6 +106,7 @@ class NotebookLMClient:
         notes: NotesAPI for user notes
         settings: SettingsAPI for user settings
         sharing: SharingAPI for notebook sharing
+        labels: LabelsAPI for source labels (topic grouping)
         auth: The AuthTokens used for authentication
     """
 
@@ -122,12 +126,17 @@ class NotebookLMClient:
         on_rpc_event: Callable[[RpcTelemetryEvent], object] | None = None,
         cookie_saver: CookieSaver | None = None,
         cookie_rotator: CookieRotator | None = None,
+        chat_timeout: float | None = DEFAULT_CHAT_TIMEOUT,
     ):
         """Initialize the NotebookLM client.
 
         Args:
             auth: Authentication tokens from browser login.
             timeout: HTTP request timeout in seconds. Defaults to 30 seconds.
+            chat_timeout: Per-read HTTP timeout in seconds for
+                ``client.chat.ask``. Defaults to 180 seconds because shared
+                notebooks can be slow to send the first streamed byte. Pass
+                ``None`` to inherit the normal client timeout for chat.
             storage_path: Path to the storage state file for loading download cookies.
             keepalive: Optional interval in seconds for a background task that
                 pokes ``accounts.google.com`` while the client is open, eliciting
@@ -420,6 +429,7 @@ class NotebookLMClient:
             transport=self._composed.transport,
             reqid=internals.collaborators.reqid,
             loop_guard=internals.collaborators.lifecycle,
+            chat_timeout=chat_timeout,
             notebooks=self.notebooks,
         )
         self.notes = NotesAPI(
@@ -440,6 +450,10 @@ class NotebookLMClient:
         self.research = ResearchAPI(internals.executor)
         self.settings = SettingsAPI(internals.executor)
         self.sharing = SharingAPI(internals.executor)
+        # Source labels. Takes a narrow ``list_sources`` callable (not the whole
+        # SourcesAPI) for the membership->Source join in ``labels.sources()``;
+        # wired after ``self.sources`` exists. Same client/bound loop (ADR-0004).
+        self.labels = LabelsAPI(internals.executor, list_sources=self.sources.list)
 
     @property
     def auth(self) -> AuthTokens:
@@ -730,6 +744,7 @@ class NotebookLMClient:
         max_concurrent_rpcs: int | None = DEFAULT_MAX_CONCURRENT_RPCS,
         upload_timeout: httpx.Timeout | None = None,
         on_rpc_event: Callable[[RpcTelemetryEvent], object] | None = None,
+        chat_timeout: float | None = DEFAULT_CHAT_TIMEOUT,
     ) -> _FromStorageContext:
         """Create a client from Playwright storage state file.
 
@@ -778,6 +793,9 @@ class NotebookLMClient:
                 and the rationale (the gate sits below the connection
                 pool so back-pressure surfaces cleanly instead of as
                 opaque ``httpx.PoolTimeout``).
+            chat_timeout: Per-read HTTP timeout in seconds for
+                ``client.chat.ask``. Defaults to 180 seconds. Pass ``None``
+                to inherit ``timeout`` for chat.
             upload_timeout: Optional override for the ``httpx.Timeout`` used
                 by the resumable-upload start handshake and the finalize
                 POST. ``None`` (default) preserves the original hardcoded
@@ -820,6 +838,7 @@ class NotebookLMClient:
             limits=limits,
             max_concurrent_uploads=max_concurrent_uploads,
             max_concurrent_rpcs=max_concurrent_rpcs,
+            chat_timeout=chat_timeout,
             upload_timeout=upload_timeout,
             on_rpc_event=on_rpc_event,
         )
@@ -929,6 +948,7 @@ class _FromStorageContext:
             limits=kwargs["limits"],
             max_concurrent_uploads=kwargs["max_concurrent_uploads"],
             max_concurrent_rpcs=kwargs["max_concurrent_rpcs"],
+            chat_timeout=kwargs["chat_timeout"],
             upload_timeout=kwargs["upload_timeout"],
             on_rpc_event=kwargs["on_rpc_event"],
         )
