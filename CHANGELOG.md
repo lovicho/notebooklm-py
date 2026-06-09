@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Schema-drift observability: `rpc_decode_errors` counter + chat drift canary**
+  (#1492). Wire-schema drift is the stated #1 breakage class, but
+  decode/drift failures (`DecodingError` / `UnknownRPCMethodError`) were
+  invisible to metrics — they did not even reach the transport-leg
+  `rpc_calls_failed` counter (the middleware chain wraps only the transport
+  leg; decode happens after). `ClientMetricsSnapshot` now exposes a dedicated
+  `rpc_decode_errors` counter (additive, defaults to `0`, appended at the end
+  of the dataclass so existing positional construction is unaffected),
+  incremented at the executor's response-decode boundary whenever a decoded
+  response envelope is rejected as drift — both the wrapped shape-drift case
+  (bad JSON / missing key-or-index) and a surfaced `DecodingError` /
+  `UnknownRPCMethodError` from the envelope decoder. A decoded *semantic* error
+  (rate-limit, not-found, auth) is not drift and does not bump the counter; a
+  drift error recovered by refresh-and-retry is not counted. (Positional drift
+  raised later by feature-layer `safe_index` navigation, after `rpc_call`
+  returns, is not yet routed through this counter — a tracked follow-up.)
+  Operators can now alert on "Google reshaped a response" distinctly from
+  ordinary 5xx / network failures. Separately,
+  `scripts/check_rpc_health.py` now probes the streamed-chat orchestration RPC
+  `GenerateFreeFormStreamed` — a `PATH_NOT_METHOD` (`v1` URL) endpoint with no
+  obfuscated method ID — by asserting a 200 plus a recognizable stream frame,
+  closing the gap where the chat surface escaped the daily drift canary.
+
+### Fixed
+
+- **Empty notebook summary no longer raises `UnknownRPCMethodError`** (#1485).
+  A brand-new, source-less notebook has no summary yet, so the `SUMMARIZE` RPC
+  returns an absent/`None` payload. `notebooks.get_summary()` and
+  `notebooks.get_description()` now treat that routine "no summary yet" state as
+  an empty summary (`""`) instead of mis-classifying it as wire-schema drift.
+  Genuinely-malformed payloads (a present-but-non-list `result[0]`, a scalar, or
+  a string where a nested list is expected) still raise. `get_summary` now shares
+  the `_extract_summary` descent with `get_description`, so both agree on every
+  shape. As part of the fix, `safe_index` rejects a `str`/`bytes` value at an
+  intermediate descent hop (it is indexable but never a valid container, so
+  descending it would smuggle a single character past drift detection).
+- **`download <type>` no longer exits 1 with no file written** (#1488). The
+  download path listed artifacts twice — the executor listed to select the
+  target, then each per-type download re-listed to re-find it by id — so the
+  second `LIST_ARTIFACTS` could not replay against a single-interaction VCR
+  cassette and aborted the download. The executor now lists once and threads
+  the already-fetched rows into the download method (which skips its redundant
+  second list); studio downloads also no longer trigger the note-backed
+  mind-map sub-fetch they never needed. Live behavior is unchanged for direct
+  `client.artifacts.download_*()` calls.
+
 ## [0.8.0]
 
 This release lands the **breaking half** of the ADR-0019 error contract

@@ -43,6 +43,7 @@ from ._mind_map import NoteBackedMindMapService
 from ._note_service import NoteService
 from ._notebook_metadata import NotebookSourceIdProvider
 from ._polling_registry import PollRegistry
+from ._row_adapters.artifacts import ReportSuggestionRow
 from ._runtime.contracts import RpcCaller
 from ._types.artifacts import _status_from_code
 from ._types.research import MindMapResult
@@ -190,6 +191,18 @@ class ArtifactsAPI:
         """
         logger.debug("Listing artifacts in notebook %s", notebook_id)
         return await self._listing.list_artifacts(
+            notebook_id,
+            artifact_type,
+            list_raw=self._list_raw,
+            list_mind_maps=self._list_mind_maps,
+        )
+
+    async def _list_for_download(
+        self, notebook_id: str, artifact_type: ArtifactType | None = None
+    ) -> tuple[builtins.list[Artifact], builtins.list[Any], builtins.list[Any] | None]:
+        """List artifacts + the raw rows fetched to build them — same RPC set as
+        :meth:`list`. Internal seam for the ``_app`` download executor (#1488)."""
+        return await self._listing.list_artifacts_with_raw(
             notebook_id,
             artifact_type,
             list_raw=self._list_raw,
@@ -756,22 +769,43 @@ class ArtifactsAPI:
     # =========================================================================
 
     async def download_audio(
-        self, notebook_id: str, output_path: str, artifact_id: str | None = None
+        self,
+        notebook_id: str,
+        output_path: str,
+        artifact_id: str | None = None,
+        *,
+        artifacts_data: builtins.list[Any] | None = None,
     ) -> str:
         """Download an Audio Overview to a file."""
-        return await self._downloads.download_audio(notebook_id, output_path, artifact_id)
+        return await self._downloads.download_audio(
+            notebook_id, output_path, artifact_id, artifacts_data=artifacts_data
+        )
 
     async def download_video(
-        self, notebook_id: str, output_path: str, artifact_id: str | None = None
+        self,
+        notebook_id: str,
+        output_path: str,
+        artifact_id: str | None = None,
+        *,
+        artifacts_data: builtins.list[Any] | None = None,
     ) -> str:
         """Download a Video Overview to a file."""
-        return await self._downloads.download_video(notebook_id, output_path, artifact_id)
+        return await self._downloads.download_video(
+            notebook_id, output_path, artifact_id, artifacts_data=artifacts_data
+        )
 
     async def download_infographic(
-        self, notebook_id: str, output_path: str, artifact_id: str | None = None
+        self,
+        notebook_id: str,
+        output_path: str,
+        artifact_id: str | None = None,
+        *,
+        artifacts_data: builtins.list[Any] | None = None,
     ) -> str:
         """Download an Infographic to a file."""
-        return await self._downloads.download_infographic(notebook_id, output_path, artifact_id)
+        return await self._downloads.download_infographic(
+            notebook_id, output_path, artifact_id, artifacts_data=artifacts_data
+        )
 
     async def download_slide_deck(
         self,
@@ -779,10 +813,12 @@ class ArtifactsAPI:
         output_path: str,
         artifact_id: str | None = None,
         output_format: str = "pdf",
+        *,
+        artifacts_data: builtins.list[Any] | None = None,
     ) -> str:
         """Download a slide deck as PDF or PPTX."""
         return await self._downloads.download_slide_deck(
-            notebook_id, output_path, artifact_id, output_format
+            notebook_id, output_path, artifact_id, output_format, artifacts_data=artifacts_data
         )
 
     async def _download_interactive_artifact(
@@ -792,10 +828,12 @@ class ArtifactsAPI:
         artifact_id: str | None,
         output_format: str,
         artifact_type: str,
+        *,
+        artifacts: builtins.list[Artifact] | None = None,
     ) -> str:
         """Download quiz or flashcard artifact."""
         return await self._downloads.download_interactive_artifact(
-            notebook_id, output_path, artifact_id, output_format, artifact_type
+            notebook_id, output_path, artifact_id, output_format, artifact_type, artifacts=artifacts
         )
 
     def _format_interactive_content(
@@ -831,27 +869,44 @@ class ArtifactsAPI:
         notebook_id: str,
         output_path: str,
         artifact_id: str | None = None,
+        *,
+        artifacts_data: builtins.list[Any] | None = None,
     ) -> str:
         """Download a report artifact as markdown."""
-        return await self._downloads.download_report(notebook_id, output_path, artifact_id)
+        return await self._downloads.download_report(
+            notebook_id, output_path, artifact_id, artifacts_data=artifacts_data
+        )
 
     async def download_mind_map(
         self,
         notebook_id: str,
         output_path: str,
         artifact_id: str | None = None,
+        *,
+        mind_maps: builtins.list[Any] | None = None,
+        artifacts_data: builtins.list[Any] | None = None,
     ) -> str:
         """Download a mind map as JSON."""
-        return await self._downloads.download_mind_map(notebook_id, output_path, artifact_id)
+        return await self._downloads.download_mind_map(
+            notebook_id,
+            output_path,
+            artifact_id,
+            mind_maps=mind_maps,
+            artifacts_data=artifacts_data,
+        )
 
     async def download_data_table(
         self,
         notebook_id: str,
         output_path: str,
         artifact_id: str | None = None,
+        *,
+        artifacts_data: builtins.list[Any] | None = None,
     ) -> str:
         """Download a data table as CSV."""
-        return await self._downloads.download_data_table(notebook_id, output_path, artifact_id)
+        return await self._downloads.download_data_table(
+            notebook_id, output_path, artifact_id, artifacts_data=artifacts_data
+        )
 
     async def download_quiz(
         self,
@@ -859,10 +914,12 @@ class ArtifactsAPI:
         output_path: str,
         artifact_id: str | None = None,
         output_format: str = "json",
+        *,
+        artifacts: builtins.list[Artifact] | None = None,
     ) -> str:
         """Download quiz questions."""
         return await self._download_interactive_artifact(
-            notebook_id, output_path, artifact_id, output_format, "quiz"
+            notebook_id, output_path, artifact_id, output_format, "quiz", artifacts=artifacts
         )
 
     async def download_flashcards(
@@ -871,10 +928,12 @@ class ArtifactsAPI:
         output_path: str,
         artifact_id: str | None = None,
         output_format: str = "json",
+        *,
+        artifacts: builtins.list[Artifact] | None = None,
     ) -> str:
         """Download flashcard deck."""
         return await self._download_interactive_artifact(
-            notebook_id, output_path, artifact_id, output_format, "flashcards"
+            notebook_id, output_path, artifact_id, output_format, "flashcards", artifacts=artifacts
         )
 
     # =========================================================================
@@ -1175,29 +1234,28 @@ class ArtifactsAPI:
             allow_null=True,
         )
 
-        suggestions = []
-        if result and isinstance(result, list) and len(result) > 0:
-            # GET_SUGGESTED_REPORTS returns a wrapped ``[[row1, ...]]`` envelope or an
-            # already-flat ``[row1, ...]``; only unwrap the wrapped case (single outer
-            # element whose first inner element is itself a row). Bind ``inner`` so the
-            # wrap probe is ``inner[0]`` not chained ``result[0][0]``.
-            items = result
-            if len(result) == 1 and isinstance(result[0], list):
-                inner = result[0]
-                if not inner or isinstance(inner[0], list):
-                    items = inner
-            for item in items:
-                if isinstance(item, list) and len(item) >= 5:
-                    suggestions.append(
-                        ReportSuggestion(
-                            title=item[0] if isinstance(item[0], str) else "",
-                            description=item[1] if isinstance(item[1], str) else "",
-                            prompt=item[4] if isinstance(item[4], str) else "",
-                            audience_level=item[5] if len(item) > 5 else 2,
-                        )
-                    )
+        if not (result and isinstance(result, list)):
+            return []
 
-        return suggestions
+        # GET_SUGGESTED_REPORTS returns a wrapped ``[[row1, ...]]`` envelope or an
+        # already-flat ``[row1, ...]``; only unwrap the wrapped case (single outer
+        # element whose first inner element is itself a row).
+        items = result
+        if len(result) == 1 and isinstance(result[0], list):
+            inner = result[0]
+            if not inner or isinstance(inner[0], list):
+                items = inner
+        # ``ReportSuggestionRow`` centralises the per-row position knowledge (#1491).
+        return [
+            ReportSuggestion(
+                title=row.title,
+                description=row.description,
+                prompt=row.prompt,
+                audience_level=row.audience_level,
+            )
+            for row in map(ReportSuggestionRow, items)
+            if row.is_well_formed
+        ]
 
     # =========================================================================
     # Private Helpers
