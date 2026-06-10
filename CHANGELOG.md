@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Layer-3 headless re-auth: `client.refresh_auth(allow_headless=True)`** (#1525,
+  P2; P1 was #1512). When NotebookLM's first-party cookies are fully dead — the
+  homepage GET 302s to the Google login page and neither token refresh (L1) nor
+  `RotateCookies` rotation (L2) can help — a persisted browser profile may still
+  hold a live Google SSO session that outlives `storage_state.json`. The new
+  opt-in re-auth layer drives an unattended **headless** browser against that
+  profile to silently re-mint cookies, then retries. It is **explicit by
+  default**: `refresh_auth(allow_headless=True)` (additive keyword-only,
+  defaults to `False`) triggers it on demand, and a *mid-RPC* auto-fire happens
+  only when `NOTEBOOKLM_HEADLESS_REAUTH=1` is set — L3 **never** fires by
+  default, so behavior with no opt-in and no profile is unchanged. Outcomes are
+  typed and honest (re-minted / profile-session-also-dead / unavailable) and it
+  never reports success on dead tokens. **SECURITY:** the persistent profile is
+  an account-equivalent credential; L3 is **local-unattended-only** and must not
+  be the auth path for a remote / hosted MCP server. It reuses the existing
+  cookie-domain allowlist and never logs a captured cookie value.
+
 - **`client.mind_maps.list_note_backed(notebook_id)`** — typed list of only
   the **note-backed** mind maps (every `kind` is `NOTE_BACKED`, `tree`
   populated, deleted rows excluded) via a single `GET_NOTES_AND_MIND_MAPS`
@@ -41,6 +58,165 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closing the gap where the chat surface escaped the daily drift canary.
 
 ### Fixed
+
+- **Decoded `created_at` timestamps are now tz-aware UTC instead of naive
+  host-local time** (#1519). The shared decoder `_datetime_from_timestamp`
+  (backing `Notebook`/`Source`/`Artifact`/`MindMap.created_at`) called
+  `datetime.fromtimestamp(value)` with no `tz`, producing a **naive** datetime in
+  the host's local zone — so the same epoch surfaced as a different wall-time
+  string per machine, and `created_at.isoformat()` / `--json` output, the
+  `strftime` table cells, etc. mis-stated the absolute instant (a notebook
+  created `13:40:05` UTC rendered as the offset-less `08:40:05` under
+  `America/New_York`). It now returns `datetime.fromtimestamp(value, tz=utc)`:
+  the value is tz-aware UTC and host-independent. `.timestamp()` round-trips
+  unchanged, so internal sort/dedup/download ordering is provably unaffected —
+  only the rendered string changes (now offset-aware, identical everywhere).
+  This is the production sibling of the timezone slip pinned out of the #1511
+  golden VCR test.
+- **Artifact downloads re-validate every redirect hop against the trusted-host
+  allowlist (SSRF-adjacent)** (#1521). Both download clients
+  (`download_url` single + `download_urls_batch`) use
+  `follow_redirects=True`, but the host-allowlist + HTTPS gate validated only
+  the *initial* URL. A trusted Google URL whose `Location` pointed
+  off-allowlist — a non-HTTPS hop, or a private/link-local host such as
+  `169.254.169.254` / `localhost` — was followed and its body written to the
+  caller's `output_path`, defeating the explicit allowlist. (Google session
+  cookies were already not leaked to a non-Google redirect host — the stdlib
+  cookie policy is domain-scoped — so this never exposed credentials; the
+  residual harm was attacker-influenced bytes landing on the filesystem.) Both
+  clients now attach an httpx `request` event hook that re-checks every hop's
+  host + scheme **before the request is sent**, raising `ArtifactDownloadError`
+  on the first off-allowlist or non-HTTPS hop so the untrusted host never
+  receives a connection. Legitimate trusted→trusted redirects (Google
+  signed-URL CDNs already on the allowlist) are unaffected. The host-allowlist
+  check (`_is_trusted_download_host`) also no longer percent-decodes the host
+  before matching: decoding created a parser differential where
+  `evil%2egoogleapis.com` (`%2e`→`.`) was judged trusted while httpx connected
+  to the raw, non-Google host — the guard now matches the exact host httpx
+  connects to and rejects any host containing `%`.
+
+- **`source delete` now honors exact-id-wins over prefix matching, in lockstep
+  with `source get` / `rename` / `refresh`** (#1522). The delete-path resolver
+  (`_app/source_mutations.resolve_source_for_delete`) built its prefix-match
+  list and branched solely on `len(matches)` with no exact-id short-circuit, so
+  `source delete abc` raised `AMBIGUOUS_ID` when a notebook held both `abc` and
+  `abcdef` — even though the shared resolvers (`cli.resolve.resolve_partial_id_in_items`
+  and its `_app` twin `_app.resolve.resolve_ref`) both return on an exact
+  (case-insensitive) id match before evaluating prefixes, so the other verbs
+  resolved the same input. The delete resolver now mirrors that Rule 3: a
+  source whose id equals the input (case-insensitively) wins over any
+  longer-id prefix match (and is not treated as a partial expansion, so no
+  "Matched:" prose is emitted). Genuine prefix ambiguity (two strict prefixes,
+  no exact match) and the not-found / title-instead-of-id paths are unchanged.
+- **`Note.created_at` and note-backed `MindMap.created_at` are now populated**
+  (#1529). Both fields were declared `datetime | None` but never filled in,
+  even though the raw `GET_NOTES_AND_MIND_MAPS` / `CREATE_NOTE` responses carry
+  the creation timestamp in the note metadata envelope at `row[1][2][2][0]` —
+  the same slot the artifact path already decodes. `NoteRow` gains a
+  `created_at_raw` / `created_at` property pair (mirroring `ArtifactRow`) that
+  centralizes the descent behind named position constants, and every
+  note-creation surface now reads it: `notes.list` / `notes.get`,
+  `notes.create` (both the wrapped `[[id, …]]` and the flat
+  `[id, …]` CREATE_NOTE response shapes), `chat.save_answer_as_note`, and the
+  note-backed `mind_maps.list_note_backed` / `mind_maps.generate`.
+  `Artifact.from_mind_map` was lifted to reuse the shared `NoteRow` extraction
+  so the position knowledge lives in one place. Additive: absent / legacy
+  rows still yield `None`; no signature change.
+- **`profile` filesystem commands now surface a friendly error + exit 1
+  instead of a raw traceback** (#1520). The `profile delete` (`shutil.rmtree`),
+  `profile create` (directory materialization), `profile rename` (`os.rename`),
+  and text-mode `profile list` paths performed their pure-filesystem operations
+  unguarded, so an `OSError` — a half-deleted or locked profile directory, a
+  read-only mount, or a browser-profile file held by AV/the browser on Windows
+  — escaped `SectionedGroup.main` (which only catches `ClickException`/`Abort`)
+  and printed a Python traceback. Each now mirrors `profile switch`'s existing
+  `except OSError -> click.ClickException` idiom, yielding the documented
+  friendly-message + exit-1 CLI contract. The `--json profile list` path keeps
+  its existing `handle_errors` envelope (an unexpected `OSError` there stays the
+  `UNEXPECTED_ERROR` / exit-2 contract automation relies on).
+- **Runtime secret redaction now derives from one canonical registry, closing
+  several credential-disclosure gaps** (#1517, #1518). The logging redaction
+  cookie-name alternation in `_logging.py` was hand-enumerated and had drifted
+  from the project's own cassette sanitizer: the session cookies `NID`,
+  `LSOLH`, and `__Host-GAPS` (classified must-scrub by
+  `tests/cassette_patterns.py`) were absent, so a bare `NID=g.a000-…` token —
+  exactly what `_auth/refresh.py` logs at DEBUG from refresh-command
+  stdout/stderr through the redacting logger — passed through `scrub_secrets`
+  verbatim (#1517). Google API keys (`AIza…`) and any future `__Secure-*` /
+  `__Host-*` cookie carrying an opaque (non-token-shaped) value were also not
+  redacted at runtime. Separately, `UnknownRPCMethodError.data_at_failure` was
+  spliced unscrubbed with `!r` into `__str__` / `__repr__` / tracebacks (a
+  string splice that bypasses the logging `RedactingFilter`), unlike the
+  sibling `raw_response` which was already scrubbed, so a credential-shaped
+  indexed value leaked through every rendering regardless of `NOTEBOOKLM_DEBUG`
+  (#1518). All are fixed by a single canonical runtime registry
+  (`notebooklm._secrets`): `RUNTIME_SESSION_COOKIES` (the bare must-scrub cookie
+  names the redaction alternation now derives from), `SECURE_HOST_UMBRELLA_PATTERNS`
+  (`__Secure-*` / `__Host-*` prefix umbrellas whose name class spans the full
+  RFC 6265 `token` charset — any future secure/host cookie name fails closed by
+  construction), and `AUTH_TOKEN_SHAPE_PATTERNS` (carrier-agnostic
+  `g.a000-` / `sidts-` / `ya29.` token catch-alls plus the `AIza…` Google
+  API-key shape, ported from the cassette registry as defense in depth so a
+  secret under an unknown carrier name still fails closed). `data_at_failure`
+  (and the already-scrubbed `AuthExtractionError.payload_preview`) are routed
+  through `scrub_secrets`, so all three additions cover the exception surfaces
+  too. Every name-anchored value pattern (cookies, the `__Secure-*`/`__Host-*`
+  umbrellas, and the `at=`/`csrf=`/`f.sid=`/`upload_id=`/OAuth/`Bearer` query +
+  header forms) now also redacts an RFC 6265 / JSON **double-quoted** value
+  (`SID="opaque"`, `f.sid="opaque"`): the value class excluded `"`, so a quoted
+  value made the whole pattern miss and leaked verbatim — the optional
+  surrounding quotes redact the inner value while preserving the quotes. A
+  parity guardrail
+  (`tests/_guardrails/test_runtime_secret_registry_parity.py`) asserts the
+  runtime registry stays in lockstep with the cassette sanitizer on every axis:
+  bare-cookie superset, secure/host umbrella coverage by construction, and
+  regex-string equality of the credential-shape set — so a new must-scrub shape
+  added to the cassette registry forces the runtime registry to keep up.
+- **Playwright login: closing the browser during the final storage-state
+  capture now shows the browser-closed help instead of a bug-report prompt**
+  (#1514, deferred from the #1512 review). Every in-flow Playwright call in
+  the login flow (page recovery, the navigation retry loop, the login wait,
+  cookie-forcing) already mapped `TargetClosedError` to the friendly
+  `BROWSER_CLOSED_HELP` text + exit 1, but a closure in the narrow window
+  during the final `context.storage_state()` capture fell through the outer
+  handler's bare `raise` and exited 2 ("Unexpected error … please report a
+  bug"). The outer handler in `run_browser_capture` now recognizes
+  TargetClosed and surfaces the same help + exit 1; every other unexpected
+  failure keeps the exit-2 bug-report contract.
+- **Playwright storage-state filter hardened against malformed cookie rows
+  and exact-duplicate identities** (#1513, deferred from the #1512 review).
+  `filter_storage_state_cookies_by_domain_policy` no longer crashes the whole
+  persist when rookiepy / Playwright emits a malformed row: non-dict entries,
+  cookies whose `domain` is not a str, and cookies whose `name` is not a
+  non-empty str are skipped with one bounded `logger.warning` per row
+  (`reprlib` preview) instead of raising in `.get` / `.lstrip`. It also
+  dedups rows sharing an exact RFC 6265 identity `(name, domain, path)`
+  (path normalized via `or "/"`, matching every loader): the last occurrence
+  in capture order wins whole (fields are never merged), mirroring the
+  persistence-merge rule in `save_cookies_to_storage` where the newer
+  observation overwrites the stored row for the same key. Same-name rows on
+  *different* domains or paths are all kept — cross-domain same-name
+  resolution remains a load-time concern (the flat loaders rank by
+  `_auth_domain_priority`); deduping by bare name at write time would starve
+  the `(name, domain, path)`-keyed runtime loader
+  (`build_httpx_cookies_from_storage`), which legitimately holds e.g. the
+  per-product `OSID` cookie on `notebooklm.google.com` and
+  `myaccount.google.com` as distinct jar entries.
+
+- **Split-state PSIDTS recovery no longer writes a duplicate
+  `__Secure-3PSIDTS` row to `storage_state.json`** (#1523). On the
+  `--browser-cookies` path, when `__Secure-1PSIDTS` is missing/expired (so
+  recovery fires) but a fresh `__Secure-3PSIDTS` is already in the source jar,
+  Google's `RotateCookies` POST returns both rotated SIDTS cookies and the
+  in-memory recovery append loop emitted a second `__Secure-3PSIDTS` (and a
+  stale `__Secure-1PSIDTS` twin) entry with no analog in any real browser jar.
+  Auth still worked (the row is deduped on load), but the on-disk artifact
+  diverged from the true cookie set. `recover_psidts_in_memory` now keys the
+  source jar by RFC 6265 identity `(name, domain, path)` (path normalized via
+  `or "/"`, matching every loader) and overwrites the existing row in place
+  with the rotated occurrence instead of appending — exactly one row per key,
+  carrying the fresh value, mirroring the last-occurrence-wins dedup added to
+  `filter_storage_state_cookies_by_domain_policy` in #1513.
 
 - **`sources.add_text` no longer swallows typed transport errors into
   `SourceAddError`.** Its bare `except RPCError` wrapped *everything* —
