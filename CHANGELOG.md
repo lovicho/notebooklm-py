@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`client.mind_maps.list_note_backed(notebook_id)`** — typed list of only
+  the **note-backed** mind maps (every `kind` is `NOTE_BACKED`, `tree`
+  populated, deleted rows excluded) via a single `GET_NOTES_AND_MIND_MAPS`
+  RPC — no `LIST_ARTIFACTS`. Factored out of `mind_maps.list()` (which now
+  builds on it) and used by the CLI `artifact delete` carve-out probe so the
+  note-backed membership check is fully typed while keeping the historical
+  single-RPC call set (recorded cassettes replay unchanged).
+
 - **Schema-drift observability: `rpc_decode_errors` counter + chat drift canary**
   (#1492). Wire-schema drift is the stated #1 breakage class, but
   decode/drift failures (`DecodingError` / `UnknownRPCMethodError`) were
@@ -34,6 +42,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`sources.add_text` no longer swallows typed transport errors into
+  `SourceAddError`.** Its bare `except RPCError` wrapped *everything* —
+  including the `RPCError` subclasses `RateLimitError`, `AuthError`, and
+  `ServerError` — so callers could not catch a rate-limited `add_text` to
+  back off via `retry_after` (or re-login on `AuthError`). It now re-raises
+  the narrow transport types unwrapped before wrapping only the residual
+  broad `RPCError`, matching the ADR-0019 catch ordering its siblings
+  `add_url`/`add_drive` already follow. The rule is now *enforced*, not just
+  documented: a new AST guardrail
+  (`tests/_guardrails/test_error_contract_catch_ordering.py`) fails any
+  `except RPCError` clause that wrap-and-raises a different exception class
+  without a preceding narrow-transport re-raise clause in the same `try`
+  (scope: `src/notebooklm/**` minus the `rpc/` protocol layer, where the
+  transport subtree originates).
+
+- **`notebooklm note create --json` no longer reports failure on every
+  successful create.** It previously emitted `{"id": null, "created": false,
+  "error": "Creation may have failed"}` for every note it successfully
+  created: a leftover raw-shape decoder in the `_app` layer went dead when
+  `notes.create` was typed to return a `Note` (it expected the retired
+  raw-list RPC shape and yielded `None` for a typed `Note`). The bug was
+  masked in the unit suite by stale raw-list mocks of `notes.create`. The CLI
+  now emits the real note id with `"created": true`; facade failures
+  propagate as exceptions through the standard CLI error handler instead of
+  a soft-failure envelope.
+
+- **14 positional-decode sites no longer fabricate wrong-but-valid values
+  silently on wire drift.** Guarded single-level reads of decoded
+  `batchexecute` payloads could swallow a Google reshape into a plausible
+  default — an empty notebook / mind-map id, an empty share email, a deleted
+  mind map leaking as live, a silently-empty chat history, a `LIST_NOTEBOOKS`
+  wrapper mis-dispatch feeding garbage rows, an unvalidated source type code,
+  and a note lookup flipping found → not-found. Per the #1485
+  absence-vs-malformed policy, genuine absence (short rows, `None` slots,
+  legitimately-empty containers) keeps its soft degrade, while
+  present-but-malformed data is now loud: the chat conversation-history walk
+  moved behind a new `ConversationTurnRow` adapter and raises
+  `UnknownRPCMethodError` on a truthy non-list payload or turns container
+  (malformed individual turn rows and unrecognized role codes are skipped
+  with a DEBUG diagnostic); `notebooks.list()` raises `DecodingError` on an
+  unrecognized payload shape; mind-map rows are decoded through `NoteRow`
+  and WARN when a null content slot lacks the soft-delete sentinel;
+  notebook-id, share-email, and source-type-code slots WARN with a bounded
+  payload preview when present-but-wrong-type (keeping list parsing alive);
+  and `notes.get_or_none` id matching reads through `NoteRow.id`. One
+  behavior nuance: `SharedUser.email` is now always a `str` — a `None` email
+  slot normalizes to `""` instead of leaking `None` through the `str`-typed
+  field.
+- **Chat citation-structure drift is no longer swallowed at DEBUG** (#1505
+  continuity — the last named survivor of that drift-swallow class). A Google
+  reshape of the streamed-chat citation structure previously degraded to
+  "answers with no citations" via a blanket `except → logger.debug → []` in
+  `parse_citations` — invisible, and it also discarded already-parsed
+  citations. Per the absence-vs-malformed policy: genuine absence (no type
+  block, short type block, `None`/empty citation slot — the routine "answer
+  without citations" shapes on real traffic) stays completely silent; a
+  truthy non-list where the citation *container* belongs (`first[4][3]`) is
+  structural wire drift and raises `UnknownRPCMethodError` (matching the
+  parser's existing `inner_data[0]` raise and `unwrap_conversation_turns`);
+  a present-but-unusable individual citation row now logs at least one
+  bounded WARNING and is skipped, so a good answer keeps its surviving
+  citations. Surviving citations keep their **raw wire ordinal** as
+  `citation_number` (a skipped row leaves a hole; with nothing skipped this
+  equals the dense numbering always produced), so the answer's literal `[N]`
+  markers never shift onto a different citation. Correspondingly,
+  save-as-note's positional marker fallback (`references[N-1]`) now applies
+  only when that positional reference carries no `citation_number`: a holed
+  marker drops its anchor with a warning instead of anchoring the wrong
+  chunk.
 - **Empty notebook summary no longer raises `UnknownRPCMethodError`** (#1485).
   A brand-new, source-less notebook has no summary yet, so the `SUMMARIZE` RPC
   returns an absent/`None` payload. `notebooks.get_summary()` and

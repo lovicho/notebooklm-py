@@ -1259,6 +1259,34 @@ class TestGetHistoryErrorHandling:
         assert result == []
 
     @pytest.mark.asyncio
+    async def test_get_history_raises_on_malformed_turns_container(
+        self,
+        auth_tokens,
+        httpx_mock: HTTPXMock,
+        build_rpc_response,
+    ):
+        """A truthy non-list where the turn list belongs raises, not [] (#1485).
+
+        Historically this shape silently parsed to an empty history —
+        indistinguishable from a genuinely-empty conversation. The container
+        unwrap now raises ``UnknownRPCMethodError`` so wire drift is loud.
+        """
+        from notebooklm.exceptions import UnknownRPCMethodError
+
+        id_response = build_rpc_response(RPCMethod.GET_LAST_CONVERSATION_ID, [[["conv_001"]]])
+        httpx_mock.add_response(content=id_response.encode())
+
+        async with NotebookLMClient(auth_tokens) as client:
+            with patch.object(
+                client.chat,
+                "get_conversation_turns",
+                new_callable=AsyncMock,
+                return_value=["not-the-turn-list"],
+            ):
+                with pytest.raises(UnknownRPCMethodError):
+                    await client.chat.get_history("nb_123")
+
+    @pytest.mark.asyncio
     async def test_get_history_reverses_turns(
         self,
         auth_tokens,
@@ -1577,14 +1605,20 @@ class TestExtractAnswerAndRefsFromChunk:
 
 
 class TestParseCitationsEdgeCases:
-    """Tests for _parse_citations edge cases (lines 599-605)."""
+    """Tests for _parse_citations edge cases (absence soft, malformed loud)."""
 
-    def test_parse_citations_returns_empty_on_type_error(self, auth_tokens):
-        """Test _parse_citations returns [] when first causes TypeError (lines 599-605)."""
+    def test_parse_citations_raises_on_non_list_answer_row(self, auth_tokens):
+        """A non-list ``first`` is structural drift and raises (was a silent-DEBUG ``[]``).
+
+        Flipped under the #1505 absence-vs-malformed policy: the stream parser
+        already raises ``UnknownRPCMethodError`` for a non-list answer row, so
+        the direct-call surface now matches instead of swallowing a TypeError.
+        """
+        from notebooklm.exceptions import UnknownRPCMethodError
+
         client = NotebookLMClient(auth_tokens)
-        # Passing None triggers TypeError in len(first) at the guard check
-        refs = client.chat._parse_citations(None)  # type: ignore[arg-type]
-        assert refs == []
+        with pytest.raises(UnknownRPCMethodError):
+            client.chat._parse_citations(None)  # type: ignore[arg-type]
 
     def test_parse_citations_returns_empty_when_first_too_short(self, auth_tokens):
         """Test _parse_citations returns [] when first has <= 4 elements."""
@@ -1600,12 +1634,19 @@ class TestParseCitationsEdgeCases:
         refs = client.chat._parse_citations(first)
         assert refs == []
 
-    def test_parse_citations_returns_empty_when_type_info_3_not_list(self, auth_tokens):
-        """Test _parse_citations returns [] when type_info[3] is not a list."""
+    def test_parse_citations_raises_when_type_info_3_truthy_non_list(self, auth_tokens):
+        """A truthy non-list citation container is structural drift and raises.
+
+        Flipped under the #1505 absence-vs-malformed policy (was a silent
+        ``[]``): real traffic sends ``None`` (absence, still soft) or a list
+        here — a truthy non-list means the container itself was reshaped.
+        """
+        from notebooklm.exceptions import UnknownRPCMethodError
+
         client = NotebookLMClient(auth_tokens)
         first = ["text", None, None, None, [1, 2, 3, "not_a_list"]]
-        refs = client.chat._parse_citations(first)
-        assert refs == []
+        with pytest.raises(UnknownRPCMethodError):
+            client.chat._parse_citations(first)
 
 
 class TestParseSingleCitationEdgeCases:
@@ -2084,18 +2125,13 @@ class TestParseAskResponseBranchCoverage:
         ]
         inner_json = json.dumps(inner_data)
         chunk_json = json.dumps([["wrb.fr", None, inner_json]])
-        # Two identical chunks - second one produces a ref with citation_number already set
-        # But actually each call to _parse_ask_response creates fresh refs, so two chunks
-        # means two refs (same source), first gets 1, second gets 2 (both had citation_number=None)
-        # To trigger 496->495 we need ref.citation_number to already be set.
-        # This can happen if we manually set citation_number before the assignment loop.
-        # However, in the normal flow, refs from _parse_citations don't have citation_number set.
-        # The only way to get citation_number != None before the assignment loop is if
-        # somehow the code path sets it earlier - which it doesn't.
-        # So arc 496->495 requires citation_number to be not None from _parse_citations.
-        # Since _parse_citations creates ChatReference with citation_number=None by default,
-        # this arc may not be reachable in normal flow - it's a defensive check.
-        # Let's verify the assignment logic works correctly with multiple refs.
+        # Since the citation-hardening pass, _parse_citations stamps each
+        # surviving reference with its RAW wire ordinal (so a skipped
+        # malformed row leaves a hole instead of shifting [N] markers onto
+        # the wrong citation). The final assignment's preserve-non-None arc
+        # is therefore the NORMAL path now: it must keep the raw ordinal
+        # untouched. With nothing skipped, raw ordinal == dense ordinal,
+        # which is what this asserts (citation_number == 1 for the sole ref).
         response_body = f")]}}'\n{len(chunk_json)}\n{chunk_json}\n"
         answer, refs, conv_id = client.chat._parse_ask_response_with_references(response_body)
         assert len(refs) == 1
