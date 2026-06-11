@@ -1,37 +1,44 @@
-# Architecture (post-v0.5.0)
+# Architecture
 
-This document describes the runtime shape of `notebooklm-py` after the
-v0.5.0 refactor program closed. It is the canonical post-refactor map;
-the historical narrative lives in
-[`docs/refactor-history.md`](./refactor-history.md).
+This document is the canonical map of `notebooklm-py`'s current runtime shape.
+The historical refactor narrative (including the program that first established
+this layering) lives in [`docs/refactor-history.md`](./refactor-history.md).
 
 ## Layered overview
 
 ```text
+            three thin, transport-specific adapters
++----------------+  +----------------+  +----------------+
+| CLI    (cli/)  |  | MCP    (mcp/)  |  | REST (server/) |
+| Click commands |  | FastMCP tools  |  | FastAPI routes |
++----------------+  +----------------+  +----------------+
+         \                  |                  /
+          \                 |                 /
+           +----------------+----------------+
+                            ▼
 +----------------------------------------------------------+
-| CLI Layer (src/notebooklm/cli/*)                         |
-|   Top-level commands (login, use, status, list, ask,     |
-|   doctor, completion, ...) registered by the session/    |
-|   notebook/chat/doctor modules; plus subcommand groups   |
-|   (source, artifact, agent, generate, download, note,    |
-|   share, skill, research, language, profile). Pure       |
-|   adapter — no RPC logic.                                |
+| Application Layer  (src/notebooklm/_app/*)               |
+|   Transport-neutral business logic shared by all three   |
+|   adapters: id validation/resolution, plan-building,     |
+|   status projection, retry/wait orchestration,           |
+|   errors.classify (the single failure-category source),  |
+|   diagnostics. Imports no click / rich / fastmcp /       |
+|   fastapi (boundary lint-enforced; ADR-0021).            |
 +----------------------------------------------------------+
-                          ▼
+                            ▼
 +----------------------------------------------------------+
 | Client Layer (client.py + feature APIs)                  |
 |   NotebookLMClient + namespaced sub-clients:             |
 |     .notebooks  .sources  .artifacts  .chat              |
 |     .notes      .research  .settings  .sharing           |
 +----------------------------------------------------------+
-                          ▼
+                            ▼
 +----------------------------------------------------------+
 | Runtime Layer (client-owned collaborators)               |
-|   NotebookLMClient owns ClientComposed plus focused       |
-|   collaborators such as RpcExecutor, RuntimeTransport,   |
-|   ClientLifecycle, and Kernel.                           |
+|   ClientComposed + RpcExecutor, RuntimeTransport,        |
+|   ClientLifecycle, Kernel.                               |
 +----------------------------------------------------------+
-                          ▼
+                            ▼
 +----------------------------------------------------------+
 | RPC Layer (src/notebooklm/rpc/*)                         |
 |   types.py    method IDs + enums (source of truth)       |
@@ -40,20 +47,34 @@ the historical narrative lives in
 +----------------------------------------------------------+
 ```
 
+Three thin **transport adapters** fan into that one shared core; everything below
+`_app/` is then identical regardless of which adapter drove the call — there is
+exactly one client runtime and one RPC stack:
+
+| Adapter | Package | Transport | Console script | Install | Failures render as |
+| --- | --- | --- | --- | --- | --- |
+| **CLI** | `cli/` | terminal (Click) | `notebooklm` | base | exit codes + the byte-stable `--json` error envelope (ADR-0015) |
+| **MCP** | `mcp/` | Model Context Protocol (FastMCP) | `notebooklm-mcp` | `mcp` extra · experimental | MCP tool error content (`CODE: message`) |
+| **REST** | `server/` | HTTP (FastAPI) | `notebooklm-server` | `server` extra · experimental | HTTP status + `{"error": {"category": "...", "message": "..."}}` |
+
 ### Transport-neutral application layer (`_app/`)
 
-The CLI is a thin adapter over `src/notebooklm/_app/` — transport-neutral
-business logic (id validation/resolution, plan-building, status projection,
-retry/wait orchestration, error classification, diagnostics) shared by the CLI
-and other front-ends (a FastMCP server, a future HTTP surface). Each adapter
-parses its own inputs into typed `Request`/`Plan`/`Result` dataclasses, calls
-the neutral core, and renders the typed result into its own envelope vocabulary
-(the CLI builds the byte-stable `--json` envelope; ADR-0015). The package imports
-no `click`/`rich`/`cli`/`fastmcp` — the boundary is lint-enforced — and raises
-only the public `notebooklm.exceptions` hierarchy, with `_app.errors.classify`
-as the single neutral source of the failure-category decision each adapter
-projects onto its own codes. See ADR-0021. The per-module index and the full
-tree are in [File map](#file-map) below.
+The CLI, the MCP server (`mcp/`), and the REST server (`server/`) are each thin
+adapters over `src/notebooklm/_app/` — transport-neutral business logic (id
+validation/resolution, plan-building, status projection, retry/wait
+orchestration, error classification, diagnostics) shared by all three
+front-ends. Each adapter parses its transport's inputs into typed
+`Request`/`Plan`/`Result` dataclasses, calls the neutral core (which receives the
+live client), and renders the typed result into its own envelope vocabulary;
+simple reads/mutations call the `client.*` namespaces directly, while multi-step
+flows go through the `_app/` cores. The package imports no transport framework —
+`click` / `rich` / `fastmcp` / `fastapi`, nor the `cli` / `server` / `rpc`
+sibling packages — with the boundary lint-enforced
+(`tests/_guardrails/test_app_boundary.py`). It raises only the public
+`notebooklm.exceptions` hierarchy, with `_app.errors.classify` as the single
+neutral source of the failure-category decision each adapter projects onto its
+own codes (CLI exit codes, MCP error shapes, REST HTTP statuses). See ADR-0021.
+The per-module index and the full tree are in [File map](#file-map) below.
 
 ## Library call flows
 
@@ -71,7 +92,7 @@ Most public methods (`client.notebooks.list()`, `client.sources.rename()`,
 
 ```text
 +----------------------------------------------------------------+
-| CLI command or user code                                       |
+| CLI command / MCP tool / REST route / library call             |
 +----------------------------------------------------------------+
                                  |
                                  v
@@ -640,6 +661,38 @@ low-level helpers (`runtime`, `context`, `resolve`, `rendering`,
 `auth_runtime`, `options`) from growing upward dependencies on command modules
 or the `cli.helpers` compatibility facade.
 
+## MCP adapter (`mcp/`)
+
+The MCP server is a second thin adapter beside `cli/`, opt-in behind the `mcp`
+extra and **experimental** (preview). `create_server()` builds a FastMCP server
+that exposes the `_app/` cores as MCP tools driving a single long-lived
+`NotebookLMClient`; run it with the `notebooklm-mcp` console script (stdio or
+loopback HTTP). It imports no `click` / `rich` / `cli` — like the CLI, it is built
+on the `_app/` cores only (enforced by `tests/_guardrails/test_mcp_boundary.py`).
+Failures surface as `CODE: message` strings projected from `_app.errors.classify`,
+and mutating tools are confirmation-gated (they return a `needs_confirmation`
+preview unless called with `confirm=true`). `notebooklm mcp install <client>`
+wires it into Claude Desktop/Code, Cursor, or Windsurf, and `desktop-extension/`
+packages a one-click `.mcpb` bundle. Full guide:
+[`docs/mcp-guide.md`](./mcp-guide.md).
+
+## REST server (`server/`)
+
+The single-tenant REST server is the third adapter (ADR-0021), opt-in behind the
+`server` extra and **experimental**. A FastAPI app maps `/v1` routes onto the
+`_app/` cores and the public client namespaces, with one `NotebookLMClient` opened
+once at the ASGI lifespan inside the server loop (honoring the ADR-0004 loop-
+affinity contract). Every `/v1` request requires a static bearer token
+(constant-time compare) plus a loopback `Host` literal (a DNS-rebinding guard);
+`/healthz` is the one public route, and the `/docs` / `/openapi.json` schema
+surface is disabled. Long-running work (source ingest, artifact generation) uses
+the **poll-the-resource** model — the create call returns immediately and the
+matching `GET` reports `pending` / `200` / `404` / `409` / `410`. Failures project
+from `_app.errors.classify` onto an HTTP status plus the
+`{"error": {"category": "...", "message": "..."}}` envelope. It imports no `click` / `rich` /
+`cli` (enforced by `tests/_guardrails/test_server_boundary.py`). Launch and
+configuration: [`docs/installation.md`](./installation.md#rest-api-server).
+
 ## Middleware chain (ADR-0009)
 
 The runtime chain order is pinned by
@@ -985,6 +1038,7 @@ src/notebooklm/
 │   ├── generate_retry.py        # Click-free `generate` retry/wait: GenerationOutcome, generate_with_retry, handle_generation_result, status extractors, spinner status-line formatter (wait_context/wait_start_sink neutral seams)
 │   ├── labels.py                # Click-free label core: create/sources/generate/rename/emoji/add/remove/delete + the composite resolve_label_id (<id|name>) resolver + LabelResolutionError (injected notebook/source resolvers; members→titles JOIN render stays in cli/services/label_listing.py)
 │   ├── language.py              # Click-free language core: SUPPORTED_LANGUAGES catalog + is_supported_language + LanguageConfigStore (injected config-path/home/atomic-update; get/save/get_language/set_language)
+│   ├── mcp_install.py           # Click-free `mcp install <client>` core: supported-client catalog (claude-desktop/claude-code/cursor/windsurf) + per-OS resolve_config_path + uvx build_server_block + merge_server_config read-modify-merge into mcpServers (created/updated/unchanged; never clobbers unrelated keys); UnsupportedClientError. CLI owns the atomic write (cli/mcp_cmd.py)
 │   ├── notebooks.py             # Click-free notebook core: create/delete/rename/describe(summary)/metadata fetch+compute (injected resolve_notebook_id; summary/metadata serializers stay in cli/notebook_cmd.py)
 │   ├── notes.py                 # Click-free note core: create/get/save/rename/delete (typed-facade only — notes.create returns a Note) + content-preserving rename (resolve_note_content); found-flag results map to the CLI NOT_FOUND/exit-1 path (injected notebook/note resolvers)
 │   ├── profile.py               # Click-free profile core: gather_profile_list -> ProfileEntry rows (injected list_profiles/resolve_profile/get_storage_path/read_account_metadata), is_protected_profile delete-guard decision, set_default/retarget_default config.json mutators (CLI keeps the locked _atomic_write_config + click.confirm + Rich render)
@@ -1093,13 +1147,32 @@ src/notebooklm/
 ├── _settings.py                 # SettingsAPI
 ├── _labels.py                   # LabelsAPI — client.labels (source labels: generate/create/list/…)
 ├── notebooklm_cli.py            # Entry-point assembler — imports + registers cli/ groups
+├── mcp/                         # MCP server (opt-in `mcp` extra) — transport-neutral adapter over _app/, sibling to cli/
+│   ├── __init__.py              # Re-exports create_server / SERVER_NAME / SERVER_INSTRUCTIONS
+│   ├── __main__.py              # `notebooklm-mcp` entrypoint: argparse (--profile/--transport/--host/--port/--log-level), stderr logging, loopback HTTP bind guard
+│   ├── server.py                # create_server(profile, client_factory): FastMCP server; lifespan binds one NotebookLMClient; register_all tool-registration seam
+│   ├── _context.py              # AppState dataclass + get_client(ctx) — the lifespan-bound client
+│   ├── _errors.py               # Structured tool-error projection (CATEGORY_TABLE/ERROR_CODES/mcp_errors/to_tool_error/tool_error_payload) over _app.errors.classify
+│   ├── _resolve.py              # resolve_notebook/resolve_source/resolve_note — name + partial-id resolution over _app.resolve plus exact-title matching
+│   ├── _confirm.py              # needs_confirmation() both-mode envelope + READ_ONLY/DESTRUCTIVE ToolAnnotations
+│   └── tools/                   # Per-domain tool modules; each exposes register(mcp) wired by server.register_all
+│       ├── __init__.py          # Tools package marker (no click/rich/cli)
+│       ├── _passthrough.py      # Shared pass-through resolvers (passthrough_notebook_id/passthrough_child_id) for the CLI-shaped _app executors
+│       ├── _preview.py          # title_for_id() — shared id→title lookup for the delete tools' needs_confirmation previews
+│       ├── notebooks.py         # notebook_list/create/describe/rename/delete over _app.notebooks
+│       ├── sources.py           # source_list/get_content/rename/delete/wait/add over _app.source_* (add: url/text/file/youtube via source_add, drive via source_mutations)
+│       ├── chat.py              # chat_ask (client.chat.ask) + chat_configure (_app.chat.execute_configure)
+│       ├── notes.py             # note_create/list/update/delete over _app.notes
+│       ├── artifacts.py         # artifact_list/generate/status/download (enum dispatch over _app.generate + _app.download; stateless poll via _app.artifacts.poll_artifact)
+│       ├── research.py          # research_start (client.research.start) + research_status (_app.research.poll_and_classify) + research_import
+│       └── meta.py              # server_info — package version + auth-health over _app.auth_check (no notebook arg)
 ├── rpc/                         # RPC protocol layer
 │   ├── types.py                 # Method IDs and enums
 │   ├── encoder.py               # Request encoding
 │   ├── decoder.py               # Response parsing
 │   ├── _safe_index.py           # Strict bounds-checked positional access for decoded RPC payloads
 │   └── overrides.py             # Runtime RPC ID override policy (env-driven)
-└── cli/                         # CLI implementation
+├── cli/                         # CLI implementation
     ├── __init__.py              # Re-exports click groups under historical names from *_cmd modules
     ├── _chromium_profiles.py    # Multi-user-data-profile cookie extraction for Chromium browsers
     ├── _download_specs.py       # Registry data for `download <type>` leaf commands
@@ -1124,6 +1197,7 @@ src/notebooklm/
     ├── input.py                 # CLI prompt and stdin input helpers
     ├── label_cmd.py             # label list/sources/generate/create/rename/emoji/add/delete
     ├── language_cmd.py          # Language configuration CLI commands
+    ├── mcp_cmd.py               # `mcp install <client>` command — thin Click adapter over `_app/mcp_install.py`; resolves the client config path (`--config-path` override) and applies the merge inside `notebooklm.io.atomic_update_json` (locked, crash-safe, merge-not-clobber)
     ├── notebook_cmd.py          # list, create, delete, rename
     ├── note_cmd.py              # note commands
     ├── options.py               # Shared CLI option decorators
@@ -1171,6 +1245,21 @@ src/notebooklm/
         ├── source_mutations.py  # Source-mutation CLI adapter over `_app/source_mutations.py` — re-exports plan/result/error/helpers; injects cli.resolve validate_id + resolve_source_id (preserves the resolve_source_id monkeypatch seam) and the click.confirm confirmer
         ├── source_research.py   # `source add-research` CLI adapter — thin wrapper over `_app/source_research.py` (injects the rich-coupled importer; re-exports plan/result + validate_add_research_flags; preserves the import_research_sources monkeypatch seam)
         └── source_serializers.py # Shared JSON serializers for source CLI output
+└── server/                      # Single-tenant REST API adapter (the third _app adapter, after cli/ and mcp/; behind the optional `server` extra). EXPERIMENTAL: /v1 surface may change, excluded from the api-compat gate. Imports no click/rich/cli.
+    ├── __init__.py              # Re-exports create_app + SERVER_NAME; importing it without the `server` extra fails on the fastapi import
+    ├── __main__.py              # `notebooklm-server` entry: argparse + NOTEBOOKLM_SERVER_* env defaults + loopback-bind guard + fail-closed token check
+    ├── app.py                   # create_app(*, client_factory=None) -> FastAPI; ASGI lifespan binds one client; public /healthz; auth-gated /v1 mount (docs/redoc/openapi disabled)
+    ├── _context.py              # AppState (lifespan-bound client + pending registry) + get_client / get_pending FastAPI dependencies
+    ├── _auth.py                 # Bearer-token (constant-time, 401) + loopback-Host (DNS-rebinding guard, 403) dependency for /v1
+    ├── _errors.py               # ErrorCategory -> HTTP status table + _redact + the classify-once exception handler emitting {error:{category,message}}
+    ├── _pending.py              # In-process pending-id registry (per-notebook provenance for poll -> 200-pending vs 404)
+    └── routes/                  # Per-resource FastAPI routers; handlers call _app.serialize.to_jsonable directly
+        ├── __init__.py          # Aggregates the resource routers for the app factory
+        ├── _passthrough.py      # Pass-through resolvers handed to the _app cores (REST works in full ids)
+        ├── notebooks.py         # /v1/notebooks list/get/create/delete
+        ├── sources.py           # /v1/notebooks/{id}/sources list/get/add(url·text·file)/delete + poll-the-resource status
+        ├── chat.py              # POST /v1/notebooks/{id}/chat — blocking ask (no SSE)
+        └── artifacts.py         # /v1/notebooks/{id}/artifacts list/generate/poll/download (registry-projected poll; server-generated temp download path)
 ```
 
 ## ADR cross-references
@@ -1187,7 +1276,7 @@ src/notebooklm/
 - [ADR-0010](./adr/0010-session-kernel-split.md) — Session/Kernel split (Superseded by ADR-0013).
 - [ADR-0011](./adr/0011-schema-validation-policy.md) — Schema validation policy (Accepted; `safe_index` is the canonical decode helper).
 - [ADR-0012](./adr/0012-implementation-surface-convention.md) — Implementation surface convention (Accepted; underscore-prefix = unsupported import surface).
-- [ADR-0013](./adr/0013-composable-session-capabilities.md) — Composable Session Capabilities (the post-v0.5.0 capability model).
+- [ADR-0013](./adr/0013-composable-session-capabilities.md) — Composable Session Capabilities (the composable session-capability model).
 - [ADR-0014](./adr/0014-feature-local-runtime-adapters.md) — Feature-local runtime adapters (Accepted; features receive direct collaborators instead of `Session`).
 - [ADR-0015](./adr/0015-json-envelope-contract-for-post-parse-click-exceptions.md) — Typed JSON error envelope for post-parse CLI failures (Accepted).
 - [ADR-0021](./adr/0021-transport-neutral-app-layer.md) — Transport-neutral application layer (`_app/`) (Accepted; boundary enforced by `tests/_guardrails/test_app_boundary.py`, classify↔error_handler agreement by `tests/_guardrails/test_classify_error_handler_consistency.py`).
