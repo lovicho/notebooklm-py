@@ -1,8 +1,8 @@
 """Characterization (golden-snapshot) tests for ``notebooklm generate`` commands.
 
 These tests lock in the exact byte-for-byte output of every ``generate``
-subcommand BEFORE the P3.T1 service-layer extraction lands, so the
-extraction commit can prove handler-regression-free behavior. They cover:
+subcommand before the service-layer extraction, so extraction work can prove
+handler-regression-free behavior. They cover:
 
 * happy-path text + JSON output for each of the 10 leaf generate commands
 * the rate-limited (retry-exhausted) error path
@@ -10,7 +10,7 @@ extraction commit can prove handler-regression-free behavior. They cover:
 * video / cinematic-video usage-error message text
 * report's "smart custom" format coercion and ``--append`` warning text
 
-Test discipline (phase-3.md → Characterization-Test Discipline):
+Characterization-test discipline:
 
 * This file MUST pass on the PR's branch base (main) **before** the
   extraction commit lands. Run with ``uv run pytest
@@ -34,6 +34,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from click.testing import CliRunner, Result
 
+import notebooklm.auth as auth_module
+import notebooklm.cli.helpers as helpers_module
 from notebooklm.notebooklm_cli import cli
 from notebooklm.types import GenerationStatus
 
@@ -82,12 +84,14 @@ def authed_invoke(
         if configure is not None:
             configure(mock_client)
         with (
-            patch(
-                "notebooklm.cli.helpers.load_auth_from_storage",
+            patch.object(
+                helpers_module,
+                "load_auth_from_storage",
                 return_value=_AUTH_PAYLOAD,
             ),
-            patch(
-                "notebooklm.auth.fetch_tokens_with_domains",
+            patch.object(
+                auth_module,
+                "fetch_tokens_with_domains",
                 new_callable=AsyncMock,
             ) as mock_fetch,
         ):
@@ -111,7 +115,7 @@ def _attach_async_return(method_name: str, value: Any) -> Callable[[Any], None]:
 # ---------------------------------------------------------------------------
 
 # Mapping (CLI subcommand, ``client.artifacts.*`` method name, extra args, task_id).
-# The 10 leaf generate commands per phase-3.md → P3.T1.
+# The 10 leaf generate commands covered by this characterization suite.
 HAPPY_PATH_CASES: list[tuple[str, str, list[str], str]] = [
     ("audio", "generate_audio", [], "task_audio"),
     ("video", "generate_video", [], "task_video"),

@@ -6,6 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
+import notebooklm.auth as auth_module
+import notebooklm.cli.context as context_module
+from notebooklm.cli import helpers as helpers_module
 from notebooklm.notebooklm_cli import cli
 from notebooklm.types import AskResult, ChatReference, Note
 
@@ -43,7 +46,7 @@ def runner():
 
 @pytest.fixture
 def mock_auth():
-    with patch("notebooklm.cli.helpers.load_auth_from_storage") as mock:
+    with patch.object(helpers_module, "load_auth_from_storage") as mock:
         mock.return_value = {
             "SID": "test",
             "HSID": "test",
@@ -61,8 +64,8 @@ class TestAskSaveAsNote:
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
         mock_client.notes.create = AsyncMock(return_value=make_note())
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -83,8 +86,8 @@ class TestAskSaveAsNote:
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
         mock_client.notes.create = AsyncMock(return_value=make_note(title="My Title"))
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -112,8 +115,8 @@ class TestAskSaveAsNote:
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
         mock_client.notes.create = AsyncMock(return_value=make_note())
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -156,8 +159,8 @@ class TestAskSaveAsNote:
         mock_client.chat.save_answer_as_note = AsyncMock(return_value=make_note(title="Saved"))
         mock_client.notes.create = AsyncMock(return_value=make_note())
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -182,8 +185,8 @@ class TestAskSaveAsNote:
         mock_client.chat.save_answer_as_note = AsyncMock()
         mock_client.notes.create = AsyncMock(return_value=make_note())
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -204,8 +207,8 @@ class TestHistoryCommand:
         mock_client.chat.get_history = AsyncMock(return_value=MOCK_HISTORY)
         mock_client.chat.get_conversation_id = AsyncMock(return_value=MOCK_CONV_ID)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(cli, ["history", "-n", "nb_123"], obj=inject_client(mock_client))
@@ -220,8 +223,8 @@ class TestHistoryCommand:
         mock_client.chat.get_history = AsyncMock(return_value=MOCK_HISTORY)
         mock_client.notes.create = AsyncMock(return_value=make_note())
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -236,8 +239,8 @@ class TestHistoryCommand:
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
         mock_client.chat.get_history = AsyncMock(return_value=[])
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(cli, ["history", "-n", "nb_123"], obj=inject_client(mock_client))
@@ -250,8 +253,8 @@ class TestHistoryCommand:
         mock_client.chat.get_history = AsyncMock(return_value=MOCK_HISTORY)
         mock_client.chat.get_conversation_id = AsyncMock(return_value=MOCK_CONV_ID)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -275,8 +278,8 @@ class TestHistoryCommand:
         mock_client.chat.get_history = AsyncMock(return_value=[])
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -299,8 +302,8 @@ class TestHistoryCommand:
         mock_client.chat.get_history = AsyncMock(return_value=pairs)
         mock_client.chat.get_conversation_id = AsyncMock(return_value=MOCK_CONV_ID)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -331,8 +334,8 @@ class TestHistoryCommand:
         mock_client.chat.get_history = AsyncMock(return_value=pairs)
         mock_client.chat.get_conversation_id = AsyncMock(return_value=MOCK_CONV_ID)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -362,8 +365,8 @@ class TestHistoryCommand:
         mock_client.chat.get_history = AsyncMock(return_value=pairs)
         mock_client.chat.get_conversation_id = AsyncMock(return_value=MOCK_CONV_ID)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(cli, ["history", "-n", "nb_123"], obj=inject_client(mock_client))
@@ -384,8 +387,8 @@ class TestAskTimeout:
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
         calls: list = []
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -406,8 +409,8 @@ class TestAskTimeout:
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
         calls: list = []
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -433,8 +436,8 @@ class TestConfigureJsonOutput:
         mock_client = create_mock_client()
         mock_client.chat.set_mode = AsyncMock(return_value=None)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -456,8 +459,8 @@ class TestConfigureJsonOutput:
         mock_client = create_mock_client()
         mock_client.chat.configure = AsyncMock(return_value=None)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -498,8 +501,8 @@ class TestConfigureJsonOutput:
         mock_client = create_mock_client()
         mock_client.chat.configure = AsyncMock(return_value=None)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -542,11 +545,11 @@ class TestAskServerResumed:
         mock_client.chat.get_conversation_id = AsyncMock(return_value="conv-server-abc")
 
         with (
-            patch(
-                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            patch.object(
+                auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch,
-            patch("notebooklm.cli.helpers.get_context_path", return_value=context_file),
-            patch("notebooklm.cli.context.get_context_path", return_value=context_file),
+            patch.object(helpers_module, "get_context_path", return_value=context_file),
+            patch.object(context_module, "get_context_path", return_value=context_file),
         ):
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -575,11 +578,11 @@ class TestAskServerResumed:
         mock_client.chat.ask = AsyncMock(return_value=ask_result)
 
         with (
-            patch(
-                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            patch.object(
+                auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch,
-            patch("notebooklm.cli.helpers.get_context_path", return_value=context_file),
-            patch("notebooklm.cli.context.get_context_path", return_value=context_file),
+            patch.object(helpers_module, "get_context_path", return_value=context_file),
+            patch.object(context_module, "get_context_path", return_value=context_file),
         ):
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -623,11 +626,11 @@ class TestAskNewFlag:
         mock_client.chat.delete_conversation = AsyncMock(return_value=True)
 
         with (
-            patch(
-                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            patch.object(
+                auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch,
-            patch("notebooklm.cli.helpers.get_context_path", return_value=context_file),
-            patch("notebooklm.cli.context.get_context_path", return_value=context_file),
+            patch.object(helpers_module, "get_context_path", return_value=context_file),
+            patch.object(context_module, "get_context_path", return_value=context_file),
         ):
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -657,11 +660,11 @@ class TestAskNewFlag:
         mock_client.chat.delete_conversation = AsyncMock()
 
         with (
-            patch(
-                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            patch.object(
+                auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch,
-            patch("notebooklm.cli.helpers.get_context_path", return_value=context_file),
-            patch("notebooklm.cli.context.get_context_path", return_value=context_file),
+            patch.object(helpers_module, "get_context_path", return_value=context_file),
+            patch.object(context_module, "get_context_path", return_value=context_file),
         ):
             mock_fetch.return_value = ("csrf", "session")
             # User answers "n" at the prompt.
@@ -700,11 +703,11 @@ class TestAskNewFlag:
         mock_client.chat.delete_conversation = AsyncMock(return_value=True)
 
         with (
-            patch(
-                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            patch.object(
+                auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch,
-            patch("notebooklm.cli.helpers.get_context_path", return_value=context_file),
-            patch("notebooklm.cli.context.get_context_path", return_value=context_file),
+            patch.object(helpers_module, "get_context_path", return_value=context_file),
+            patch.object(context_module, "get_context_path", return_value=context_file),
         ):
             mock_fetch.return_value = ("csrf", "session")
             # No ``input=`` — if we prompted we'd hang.
@@ -725,8 +728,8 @@ class TestAskNewFlag:
         mock_client.chat.ask = AsyncMock(return_value=make_ask_result())
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -770,11 +773,11 @@ class TestAskNewFlag:
         mock_client.chat.delete_conversation = AsyncMock(return_value=True)
 
         with (
-            patch(
-                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            patch.object(
+                auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch,
-            patch("notebooklm.cli.helpers.get_context_path", return_value=context_file),
-            patch("notebooklm.cli.context.get_context_path", return_value=context_file),
+            patch.object(helpers_module, "get_context_path", return_value=context_file),
+            patch.object(context_module, "get_context_path", return_value=context_file),
         ):
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -808,8 +811,8 @@ class TestAskStdinDash:
         mock_client.chat.ask = AsyncMock(return_value=make_ask_result())
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -829,8 +832,8 @@ class TestAskStdinDash:
         mock_client.chat.ask = AsyncMock(return_value=make_ask_result())
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -850,8 +853,8 @@ class TestAskStdinDash:
         mock_client.chat.ask = AsyncMock(return_value=make_ask_result())
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             # Pass input that should be IGNORED — positional question wins.
@@ -870,7 +873,7 @@ class TestAskStdinDash:
 class TestChatJsonStdoutContract:
     """P1.T1 — chat ``--json`` modes emit pure JSON on stdout.
 
-    Audit-driven regression suite for `cli/chat.py`. Rich / text status
+    Audit-driven regression suite for ``cli/chat_cmd.py``. Rich / text status
     output is allowed on stderr in ``--json`` mode, but stdout must be
     parseable as a single JSON document end-to-end.
     """
@@ -878,9 +881,9 @@ class TestChatJsonStdoutContract:
     def test_ask_json_save_as_note_emits_pure_json(self, runner, mock_auth):
         """``ask --json --save-as-note`` (plain-text save path) keeps stdout valid JSON.
 
-        Pre-fix bug (`cli/chat.py:269`): the note-save branch ran
-        ``console.print(...)`` after ``json_output_response(...)``,
-        polluting stdout with Rich-styled status lines. Acceptance is
+        Pre-fix bug in the chat command: the note-save branch ran
+        ``console.print(...)`` after ``json_output_response(...)``, polluting
+        stdout with Rich-styled status lines. Acceptance is
         that ``json.loads(result.stdout)`` succeeds and the parsed
         envelope carries a ``note`` field describing the saved note.
 
@@ -896,8 +899,8 @@ class TestChatJsonStdoutContract:
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
         mock_client.notes.create = AsyncMock(return_value=make_note())
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -952,8 +955,8 @@ class TestChatJsonStdoutContract:
         )
         mock_client.notes.create = AsyncMock(return_value=make_note())
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -979,9 +982,9 @@ class TestChatJsonStdoutContract:
     def test_ask_json_save_as_note_plain_text_path_emits_pure_json(self, runner, mock_auth):
         """No-citations plain-text fallback also keeps stdout valid JSON.
 
-        Pre-fix bug: the ``[dim]No citations…[/dim]`` status line at
-        `cli/chat.py:285` printed to stdout. Acceptance is that the line
-        does not appear on stdout in ``--json`` mode.
+        Pre-fix bug: the ``[dim]No citations…[/dim]`` status line printed to
+        stdout. Acceptance is that the line does not appear on stdout in
+        ``--json`` mode.
         """
         import json
 
@@ -990,8 +993,8 @@ class TestChatJsonStdoutContract:
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
         mock_client.notes.create = AsyncMock(return_value=make_note())
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -1010,7 +1013,7 @@ class TestChatJsonStdoutContract:
         """Empty-answer warning routes to stderr; JSON envelope still parses.
 
         Pre-fix bug: the ``[yellow]Warning: No answer to save as note[/yellow]``
-        line at ``cli/chat.py:271`` printed to stdout and the function
+        line printed to stdout and the function
         returned without ever emitting JSON. Acceptance: stdout parses
         and ``note_save_error`` is recorded inside the envelope.
         """
@@ -1021,8 +1024,8 @@ class TestChatJsonStdoutContract:
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
         mock_client.notes.create = AsyncMock(return_value=make_note())
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -1042,9 +1045,9 @@ class TestChatJsonStdoutContract:
     def test_ask_json_save_as_note_failure_records_error_in_envelope(self, runner, mock_auth):
         """A note-save exception still leaves stdout parseable as JSON.
 
-        Pre-fix bug (`cli/chat.py:292`): the ``[yellow]Warning: Failed to
-        save note…[/yellow]`` line printed to stdout, breaking JSON. The
-        fix routes the warning to stderr and records the error inside the
+        Pre-fix bug in the chat command: the ``[yellow]Warning: Failed to
+        save note…[/yellow]`` line printed to stdout, breaking JSON. The fix
+        routes the warning to stderr and records the error inside the
         JSON envelope under ``note_save_error``.
         """
         import json
@@ -1054,8 +1057,8 @@ class TestChatJsonStdoutContract:
         mock_client.chat.get_conversation_id = AsyncMock(return_value=None)
         mock_client.notes.create = AsyncMock(side_effect=RuntimeError("boom"))
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -1073,7 +1076,7 @@ class TestChatJsonStdoutContract:
     def test_history_json_clear_emits_pure_json(self, runner, mock_auth):
         """``history --clear --json`` must emit JSON instead of Rich text.
 
-        Pre-fix bug (`cli/chat.py:454`): the clear-cache branch printed
+        Pre-fix bug in the chat command: the clear-cache branch printed
         ``[green]Chat history cleared[/green]`` and returned without any
         JSON emission at all. Acceptance is a parseable envelope on
         stdout with ``cleared`` and ``count`` fields.
@@ -1086,8 +1089,8 @@ class TestChatJsonStdoutContract:
         # can report how many conversations were dropped.
         mock_client.chat.cache_size = MagicMock(return_value=3)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -1112,8 +1115,8 @@ class TestChatJsonStdoutContract:
         mock_client.chat.clear_cache = MagicMock(return_value=False)
         mock_client.chat.cache_size = MagicMock(return_value=0)
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -1131,10 +1134,10 @@ class TestChatJsonStdoutContract:
     def test_history_json_save_emits_pure_json(self, runner, mock_auth):
         """``history --save --json`` must keep stdout valid JSON.
 
-        Pre-fix bug (`cli/chat.py:469`): the save branch ran before the
-        JSON branch at `cli/chat.py:480` and used ``console.print`` for
-        status, so stdout was Rich text and the JSON envelope was never
-        emitted. Acceptance: stdout is a single JSON envelope that
+        Pre-fix bug in the chat command: the save branch ran before the
+        JSON branch and used ``console.print`` for status, so stdout was Rich
+        text and the JSON envelope was never emitted. Acceptance: stdout is a
+        single JSON envelope that
         includes both the history payload and the note-save outcome.
         """
         import json
@@ -1146,8 +1149,8 @@ class TestChatJsonStdoutContract:
             return_value=make_note(id="note_xyz", title="Chat History")
         )
 
-        with patch(
-            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
         ) as mock_fetch:
             mock_fetch.return_value = ("csrf", "session")
             result = runner.invoke(
@@ -1211,11 +1214,11 @@ class TestAskQuietSuppressesStatusProse:
         mock_client.chat.ask = AsyncMock(return_value=ask_result)
         mock_client.chat.get_conversation_id = AsyncMock(return_value="conv-server-abc")
         with (
-            patch(
-                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            patch.object(
+                auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch,
-            patch("notebooklm.cli.helpers.get_context_path", return_value=context_file),
-            patch("notebooklm.cli.context.get_context_path", return_value=context_file),
+            patch.object(helpers_module, "get_context_path", return_value=context_file),
+            patch.object(context_module, "get_context_path", return_value=context_file),
         ):
             mock_fetch.return_value = ("csrf", "session")
             args = (["--quiet"] if quiet else []) + ["ask", "-n", "nb_123", "question"]

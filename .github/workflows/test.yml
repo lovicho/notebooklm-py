@@ -46,7 +46,23 @@ jobs:
         enable-cache: true
 
     - name: Install dependencies
-      run: uv sync --frozen --extra browser --extra dev --extra markdown
+      shell: bash
+      run: |
+        # Retry to ride out transient registry/network blips during dep
+        # resolution: a single PyPI/GitHub hiccup was hard-failing the leg.
+        # `uv sync` has no internal retry across the full resolve+download.
+        # A real lockfile problem fails all 3 attempts identically, so this
+        # only absorbs flakes — it never masks a genuine resolution error.
+        attempt=1; max=3
+        until uv sync --frozen --extra browser --extra dev --extra markdown; do
+          if [ "$attempt" -ge "$max" ]; then
+            echo "::error::uv sync failed after $max attempts" >&2
+            exit 1
+          fi
+          echo "::warning::uv sync attempt $attempt failed; retrying in $((attempt * 15))s" >&2
+          sleep $((attempt * 15))
+          attempt=$((attempt + 1))
+        done
 
     - name: Run pre-commit checks
       run: uv run pre-commit run --all-files
@@ -145,10 +161,35 @@ jobs:
         enable-cache: true
 
     - name: Install dependencies (mcp extra)
-      run: uv sync --frozen --extra dev --extra mcp
+      # Retried to ride out transient registry/network blips: a real lockfile
+      # problem fails all 3 attempts identically, so this only absorbs flakes
+      # — it never masks a genuine resolution error. (The windows leg of this
+      # job has flaked on the `Install uv` / dep-resolution network hop.)
+      shell: bash
+      run: |
+        attempt=1; max=3
+        until uv sync --frozen --extra dev --extra mcp; do
+          if [ "$attempt" -ge "$max" ]; then
+            echo "::error::uv sync failed after $max attempts" >&2
+            exit 1
+          fi
+          echo "::warning::uv sync attempt $attempt failed; retrying in $((attempt * 15))s" >&2
+          sleep $((attempt * 15))
+          attempt=$((attempt + 1))
+        done
 
     - name: Run MCP suite
-      run: uv run pytest tests/unit/mcp tests/integration/mcp_vcr -q
+      # The MCP package is invisible to the main coverage job: that job installs
+      # only browser+dev+markdown (no `mcp` extra), so every `tests/unit/mcp`
+      # test is skipped there and `src/notebooklm/mcp/**` lands in coverage.json
+      # at 0%. This job is the only one that exercises the adapter, so it owns
+      # the coverage gate too. The threshold is the project-wide 90% floor (the
+      # same value `scripts/check_coverage_thresholds.py` pins everywhere — keep
+      # it identical or that drift guard fails); the adapter currently sits at
+      # ~96%, so this gate catches a regression back toward the old 0% blind spot.
+      run: >-
+        uv run pytest tests/unit/mcp tests/integration/mcp_vcr -q
+        --cov=src/notebooklm/mcp --cov-report=term-missing --cov-fail-under=90
 
   server:
     # The REST server ships behind the optional ``server`` extra, so the
@@ -182,10 +223,32 @@ jobs:
         enable-cache: true
 
     - name: Install dependencies (server extra)
-      run: uv sync --frozen --extra dev --extra server
+      # Retried to ride out transient registry/network blips: a real lockfile
+      # problem fails all 3 attempts identically, so this only absorbs flakes
+      # — it never masks a genuine resolution error.
+      shell: bash
+      run: |
+        attempt=1; max=3
+        until uv sync --frozen --extra dev --extra server; do
+          if [ "$attempt" -ge "$max" ]; then
+            echo "::error::uv sync failed after $max attempts" >&2
+            exit 1
+          fi
+          echo "::warning::uv sync attempt $attempt failed; retrying in $((attempt * 15))s" >&2
+          sleep $((attempt * 15))
+          attempt=$((attempt + 1))
+        done
 
     - name: Run REST server suite
-      run: uv run pytest tests/server -q
+      # Same blind spot as the MCP job: the main coverage job omits the `server`
+      # extra, so `tests/server` is skipped there and `src/notebooklm/server/**`
+      # registers 0% in coverage.json. This dedicated job owns the server
+      # coverage gate. The threshold is the project-wide 90% floor (kept
+      # identical everywhere so `check_coverage_thresholds.py` stays green); the
+      # adapter currently sits at ~92%, so this catches a slide back toward 0%.
+      run: >-
+        uv run pytest tests/server -q
+        --cov=src/notebooklm/server --cov-report=term-missing --cov-fail-under=90
 
   test:
     name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
@@ -224,7 +287,24 @@ jobs:
         enable-cache: true
 
     - name: Install dependencies
-      run: uv sync --frozen --extra browser --extra dev --extra markdown
+      shell: bash
+      run: |
+        # Retry to ride out transient registry/network blips during dep
+        # resolution: a single PyPI/GitHub hiccup on one matrix entry was
+        # hard-failing the whole leg while the other 14 passed. `uv sync`
+        # has no internal retry across the full resolve+download. A real
+        # lockfile problem fails all 3 attempts identically, so this only
+        # absorbs flakes — it never masks a genuine resolution error.
+        attempt=1; max=3
+        until uv sync --frozen --extra browser --extra dev --extra markdown; do
+          if [ "$attempt" -ge "$max" ]; then
+            echo "::error::uv sync failed after $max attempts" >&2
+            exit 1
+          fi
+          echo "::warning::uv sync attempt $attempt failed; retrying in $((attempt * 15))s" >&2
+          sleep $((attempt * 15))
+          attempt=$((attempt + 1))
+        done
 
     - name: Get Playwright version
       id: playwright-version

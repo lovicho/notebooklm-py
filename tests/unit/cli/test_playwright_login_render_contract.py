@@ -1,15 +1,12 @@
 """Characterization net for the ``playwright_login`` render contract (#1391 PR-1).
-
 This is the **refactor-invariant baseline** for the planned drain of
 ``cli/services/playwright_login.py`` from the ADR-0008 services-boundary
 allowlist (#1391). It pins the *current* command-boundary render contract of
 the ``notebooklm login`` (Playwright) and ``notebooklm auth refresh`` flows so
 the later refactor (PR-2) — which inverts ``console.print`` / ``exit_with_code``
 / ``run_async`` into an injected ``LoginIO`` sink — can be diffed against green.
-
 Why the command boundary, not the helpers
 ==========================================
-
 PR-2 moves *where* the raise / render happens (out of ``validate`` /
 ``prepare`` and behind a service-local Protocol), but the ``login`` /
 ``auth refresh`` Click commands re-render byte-identically afterwards. Driving
@@ -19,13 +16,10 @@ the real commands through ``CliRunner().invoke`` and snapshotting
 would silently pass even if the refactor dropped or reordered a line, and they
 miss the two ``markup=False`` sites where Rich would otherwise eat ``[...]``
 brackets.
-
 Determinism (cross-OS)
 ======================
-
 The snapshots must be byte-identical on the ubuntu / macos / windows test
 matrix, so three host-dependent inputs are neutralised:
-
 * **Console width** — Rich derives its width from the (absent) terminal, and the
   no-TTY fallback differs per OS, so a message that reflows at 80 columns on
   Linux wraps elsewhere on Windows. The :func:`_fixed_console_width` autouse
@@ -37,7 +31,6 @@ matrix, so three host-dependent inputs are neutralised:
   (no OS-specific separator, no real I/O).
 * **Interpreter path** — ``sys.executable`` in the Chromium install-failure
   diagnostic is pinned to a fixed stub.
-
 These tests assert **current** behaviour: they are green on ``origin/main``
 with zero ``src/`` change and must stay green across PR-2.
 """
@@ -51,13 +44,18 @@ import time
 from contextlib import ExitStack
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+from rich.console import Console, ConsoleDimensions
 
 import notebooklm._auth.browser_capture as _bc
+import notebooklm.auth as auth_module
 import notebooklm.cli.services.playwright_login as _pl
+import notebooklm.cli.session_cmd as session_cmd_module
+import notebooklm.paths as paths_module
 from notebooklm.notebooklm_cli import cli
+from tests._fixtures import patch_session_login_dual
 
 # Fixed, synthetic paths keep the snapshots byte-stable across the OS test matrix
 # (ubuntu / macos / windows). They are rendered only through :func:`_fake_path`
@@ -74,7 +72,6 @@ _PROFILE_NAME = "default"
 @pytest.fixture(autouse=True)
 def _fixed_console_width():
     """Pin the shared Rich console to a wide, fixed width for every test here.
-
     Rich derives its line width from the terminal, and under ``CliRunner`` (no
     TTY) that fallback differs across the OS matrix — on Windows it does not land
     on the 80-column value Linux/macOS use, so messages that would reflow at 80
@@ -85,26 +82,22 @@ def _fixed_console_width():
     contract. The single shared ``console`` instance is reused by the service,
     ``session_cmd`` and the error paths, so pinning its size once covers every
     render site while still writing through to ``CliRunner``'s captured stdout.
-
-    Rich's ``Console.size`` only honours the pinned dimensions when **both**
-    ``_width`` and ``_height`` are set (otherwise it falls back to terminal /
-    ``COLUMNS`` detection — exactly the OS-divergent path being avoided), so both
-    are patched. The wide 400 keeps every rendered line on one physical row even
-    after the ``- legacy_windows`` adjustment Rich applies on Windows, so nothing
-    ever reflows.
+    Patching ``Console.size`` at the class level pins the dimensions observed by
+    every shared console. The wide 400 keeps every rendered line on one physical
+    row even after the ``- legacy_windows`` adjustment Rich applies on Windows,
+    so nothing ever reflows.
     """
-    from notebooklm.cli import rendering
-
-    with (
-        patch.object(rendering.console, "_width", 400),
-        patch.object(rendering.console, "_height", 100),
+    with patch.object(
+        Console,
+        "size",
+        new_callable=PropertyMock,
+        return_value=ConsoleDimensions(400, 100),
     ):
         yield
 
 
 def _fake_path(text: str, *, exists: bool = False) -> MagicMock:
     """A filesystem-free stand-in for a ``pathlib.Path``.
-
     ``prepare_login_paths`` and the storage write call ``.exists()`` / ``.mkdir()``
     / ``.chmod()`` / ``.parent.mkdir()`` on the resolved paths and render them via
     ``f"...{path}"``. Returning a configured ``MagicMock`` instead of a real
@@ -125,7 +118,6 @@ def _fake_path(text: str, *, exists: bool = False) -> MagicMock:
 
 def _wrapped_module(real_module: Any, **overrides: Any) -> MagicMock:
     """A ``MagicMock`` wrapping ``real_module`` with selected attrs overridden.
-
     Patching the *consumer's* module binding (e.g. ``_pl.subprocess``) with this
     instead of mutating the global stdlib object (``patch("subprocess.run", ...)``)
     keeps the override scoped to the service under test — the real ``subprocess``
@@ -177,15 +169,12 @@ def _drive_login(
     rmtree_side: Any = None,
 ):
     """Drive the real ``login`` command with a mocked Playwright + fixed paths.
-
     Returns ``(result, page)`` where ``page`` is the mocked initial ``Page`` so
     callers can tweak per-call ``side_effect`` after the fact if needed.
-
     ``wire`` (when given) is called as ``wire(page)`` immediately after the
     mock page is constructed, so a test can attach ``goto`` / ``wait_for_url``
     side effects that *mutate the live page* (e.g. flip ``page.url`` on a
     successful wait) without closing over a not-yet-bound name.
-
     The path patches (``get_storage_path`` / ``get_browser_profile_dir`` return
     filesystem-free :func:`_fake_path` stand-ins; ``resolve_profile`` is pinned)
     keep the rendered paths byte-stable, and the storage write
@@ -198,7 +187,6 @@ def _drive_login(
     """
     if storage_state is None:
         storage_state = {"cookies": [], "origins": []}
-
     with ExitStack() as stack:
         if patch_ensure:
             stack.enter_context(patch.object(_pl, "ensure_chromium_installed"))
@@ -246,7 +234,9 @@ def _drive_login(
                 return_value=_fake_path(profile_dir, exists=fresh_profile_exists),
             )
         )
-        stack.enter_context(patch("notebooklm.paths.resolve_profile", return_value=_PROFILE_NAME))
+        stack.enter_context(
+            patch.object(paths_module, "resolve_profile", return_value=_PROFILE_NAME)
+        )
         # Pin the base host so ``connection_error_help()`` (which reads
         # ``NOTEBOOKLM_BASE_URL`` via ``get_base_host()``) renders the default
         # host regardless of any env var set in the test runner. ``get_base_host``
@@ -255,17 +245,14 @@ def _drive_login(
         stack.enter_context(
             patch.object(_bc, "get_base_host", return_value="notebooklm.google.com")
         )
-        stack.enter_context(patch("notebooklm.cli.session_cmd._sync_server_language_to_config"))
+        stack.enter_context(patch_session_login_dual("_sync_server_language_to_config"))
         if patch_repair:
-            stack.enter_context(
-                patch("notebooklm.cli.services.playwright_login.repair_playwright_account_metadata")
-            )
+            stack.enter_context(patch.object(_pl, "repair_playwright_account_metadata"))
         # The synthetic ``_STORAGE`` path is never created on disk; stub the
         # atomic write so the success paths don't touch the filesystem. The
         # persist step moved into the neutral browser-capture core, so its
         # ``atomic_write_json`` binding now lives on ``_bc``.
         stack.enter_context(patch.object(_bc, "atomic_write_json"))
-
         mock_context = MagicMock()
         page = MagicMock()
         page.url = page_url
@@ -288,14 +275,12 @@ def _drive_login(
             launch.side_effect = launch_side
         else:
             launch.return_value = mock_context
-
         result = runner.invoke(cli, args or ["login"])
     return result, page
 
 
 def _drive_refresh(runner, *, enumerate_accounts: Any, args: list[str]):
     """Drive the real ``auth refresh`` keepalive path against synthetic storage.
-
     The keepalive-only path (no ``--browser-cookies``) fetches tokens, then —
     when the on-disk account metadata is missing / malformed — runs the real
     ``repair_playwright_account_metadata`` so its render lines are captured. The
@@ -310,29 +295,27 @@ def _drive_refresh(runner, *, enumerate_accounts: Any, args: list[str]):
     with ExitStack() as stack:
         stack.enter_context(patch.object(_pl, "get_storage_path", return_value=storage))
         stack.enter_context(
-            patch("notebooklm.cli.session_cmd.get_storage_path", return_value=storage)
+            patch.object(session_cmd_module, "get_storage_path", return_value=storage)
         )
         mock_fetch = stack.enter_context(
-            patch("notebooklm.cli.session_cmd.fetch_tokens_with_domains", new_callable=AsyncMock)
+            patch.object(session_cmd_module, "fetch_tokens_with_domains", new_callable=AsyncMock)
         )
         mock_fetch.return_value = ("csrf_ok", "session_ok")
-        stack.enter_context(patch("notebooklm.auth.read_account_metadata", return_value={}))
+        stack.enter_context(patch.object(auth_module, "read_account_metadata", return_value={}))
         # Repair collaborators (file-touching) stubbed; only enumeration varies.
-        stack.enter_context(patch("notebooklm.auth.enumerate_accounts", new=enumerate_accounts))
+        stack.enter_context(patch.object(auth_module, "enumerate_accounts", new=enumerate_accounts))
         stack.enter_context(
-            patch("notebooklm.auth.build_httpx_cookies_from_storage", return_value=MagicMock())
+            patch.object(auth_module, "build_httpx_cookies_from_storage", return_value=MagicMock())
         )
-        stack.enter_context(patch("notebooklm.auth.write_account_metadata"))
-        stack.enter_context(patch("notebooklm.auth.clear_account_metadata"))
-        stack.enter_context(patch("notebooklm.auth.extract_email_from_html", return_value=None))
+        stack.enter_context(patch.object(auth_module, "write_account_metadata"))
+        stack.enter_context(patch.object(auth_module, "clear_account_metadata"))
+        stack.enter_context(patch.object(auth_module, "extract_email_from_html", return_value=None))
         return runner.invoke(cli, args)
 
 
 # ---------------------------------------------------------------------------
 # Pre-flight: validate_login_flag_conflicts (4 conflicts) + login env block
 # ---------------------------------------------------------------------------
-
-
 class TestPreflightValidate:
     def test_account_requires_browser_cookies(self, runner):
         result = runner.invoke(cli, ["login", "--account", "bob@example.com"])
@@ -371,8 +354,6 @@ class TestPreflightValidate:
 # ---------------------------------------------------------------------------
 # Pre-flight: prepare_login_paths --fresh (success + OSError exit)
 # ---------------------------------------------------------------------------
-
-
 class TestPreflightPrepareFresh:
     @pytest.mark.requires_playwright
     def test_fresh_clears_profile_then_logs_in(self, runner):
@@ -413,8 +394,6 @@ class TestPreflightPrepareFresh:
 # Reached through the real ``login`` command's chromium pre-flight by patching
 # ``subprocess.run`` rather than stubbing out the helper.
 # ---------------------------------------------------------------------------
-
-
 def _dry_run_says_missing(stdout="chromium will download to ...") -> SimpleNamespace:
     return SimpleNamespace(stdout=stdout, stderr="", returncode=0)
 
@@ -443,8 +422,7 @@ class TestEnsureChromiumInstalled:
 
     @pytest.mark.requires_playwright
     def test_install_failure_exits_with_markup_false_diagnostic(self, runner):
-        """The install-failure path pins the ``markup=False`` site (``:524``).
-
+        """The install-failure path pins the ``markup=False`` site .
         The captured subprocess line ``install boom [err]`` keeps its literal
         ``[err]`` brackets, and the surrounding ``[dim]...[/dim]`` tags render
         verbatim (markup disabled) — a substring assert would miss both.
@@ -505,14 +483,11 @@ class TestEnsureChromiumInstalled:
 
 
 # ---------------------------------------------------------------------------
-# run_playwright_login — Playwright-not-installed (markup=False ``:747``)
+# run_playwright_login — Playwright-not-installed (markup=False )
 # ---------------------------------------------------------------------------
-
-
 class TestPlaywrightNotInstalled:
     def test_chromium_install_hint_keeps_browser_extra_and_playwright_line(self, runner):
-        """``:747`` ``markup=False`` keeps the literal ``[browser]`` extra.
-
+        """``markup=False`` keeps the literal ``[browser]`` extra.
         With markup enabled Rich would parse ``[browser]`` as a style tag and
         strip it, leaving ``pip install "notebooklm-py"`` (no extras). The
         chromium hint also carries the ``playwright install chromium`` line.
@@ -538,8 +513,6 @@ class TestPlaywrightNotInstalled:
 # ---------------------------------------------------------------------------
 # run_playwright_login — progress / success render
 # ---------------------------------------------------------------------------
-
-
 class TestLoginProgressSuccess:
     @pytest.mark.requires_playwright
     def test_already_logged_in_fast_path(self, runner):
@@ -590,7 +563,6 @@ class TestLoginProgressSuccess:
         recovered = MagicMock()
         recovered.url = "https://notebooklm.google.com/"
         recovered.goto.return_value = None
-
         calls = {"n": 0}
 
         def goto_side(url, **kwargs):
@@ -637,7 +609,6 @@ class TestLoginProgressSuccess:
     @pytest.mark.requires_playwright
     def test_single_account_metadata_is_written(self, runner):
         """End-to-end success including the real metadata-repair render lines.
-
         The repair runs for real (``patch_repair=False``) so its
         ``Identifying Google account...`` / ``Account: <email>`` lines are
         snapshotted, but its filesystem-touching ``auth`` collaborators are
@@ -649,10 +620,10 @@ class TestLoginProgressSuccess:
             return [Account(authuser=0, email="alice@example.com", is_default=True)]
 
         with (
-            patch("notebooklm.auth.enumerate_accounts", new=_enum),
-            patch("notebooklm.auth.build_httpx_cookies_from_storage", return_value=MagicMock()),
-            patch("notebooklm.auth.write_account_metadata"),
-            patch("notebooklm.auth.extract_email_from_html", return_value=None),
+            patch.object(auth_module, "enumerate_accounts", new=_enum),
+            patch.object(auth_module, "build_httpx_cookies_from_storage", return_value=MagicMock()),
+            patch.object(auth_module, "write_account_metadata"),
+            patch.object(auth_module, "extract_email_from_html", return_value=None),
         ):
             result, _ = _drive_login(
                 runner,
@@ -660,7 +631,6 @@ class TestLoginProgressSuccess:
                 page_content="<html></html>",
                 storage_state=_required_cookie_state(),
             )
-
         assert result.exit_code == 0
         assert result.output == (
             f"Profile: {_PROFILE_NAME}\n"
@@ -677,8 +647,6 @@ class TestLoginProgressSuccess:
 # ---------------------------------------------------------------------------
 # run_playwright_login — error render
 # ---------------------------------------------------------------------------
-
-
 class TestLoginErrorRender:
     @pytest.mark.requires_playwright
     def test_retry_exhausted_connection_error_help(self, runner):
@@ -763,6 +731,10 @@ class TestLoginErrorRender:
             "Waiting for login (up to 5 minutes)...\n"
             "Login not detected within 5 minutes.\n"
             "Try again with: notebooklm login\n"
+            "Already signed in to Google in Chrome? Retry with "
+            "notebooklm login --browser chrome to reuse that session "
+            "(often detects immediately; also avoids bundled-Chromium "
+            "issues on macOS).\n"
         )
 
     @pytest.mark.requires_playwright
@@ -830,8 +802,7 @@ class TestLoginErrorRender:
 
     @pytest.mark.requires_playwright
     def test_cookie_forcing_target_closed_recover_then_exit(self, runner):
-        """Pins the cookie-forcing recover-then-exit (``:897``/``:898``).
-
+        """Pins the cookie-forcing recover-then-exit (/).
         The stale page's cookie-forcing ``goto`` raises target-closed, a fresh
         page is recovered, and the recovered page's ``goto`` *also* raises
         target-closed — the inner branch surfaces the browser-closed help and
@@ -844,7 +815,6 @@ class TestLoginErrorRender:
         recovered.goto.side_effect = PlaywrightError(
             "Target page, context or browser has been closed"
         )
-
         calls = {"n": 0}
 
         def goto_side(url, **kwargs):
@@ -874,7 +844,6 @@ class TestLoginErrorRender:
     def test_recover_page_non_target_closed_reraises_to_unexpected_error(self, runner):
         """A non-target-closed failure inside ``recover_page`` propagates to
         ``handle_errors`` (exit 2 + the generic 'Unexpected error' line).
-
         Initial navigation hits target-closed → ``recover_page`` is invoked →
         ``context.new_page`` raises a NON-target error → it re-raises.
         """
@@ -927,8 +896,6 @@ class TestLoginErrorRender:
 # auth refresh — repair_playwright_account_metadata render (success / quiet /
 # ambiguous-clear / exception-clear), driven at the command boundary.
 # ---------------------------------------------------------------------------
-
-
 class TestAuthRefreshRepair:
     def test_repair_success_writes_account_line(self, runner):
         from notebooklm.auth import Account

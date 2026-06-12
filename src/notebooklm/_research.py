@@ -17,6 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 from . import research as _research_pub
 from ._notebook_metadata import NotebookSourceLister, create_default_source_lister
 from ._research_task_parser import parse_research_task_models
+from ._row_adapters.research import ImportedSourceRow, ResearchStartRow, unwrap_import_rows
 from ._runtime.contracts import RpcCaller
 from ._types.research import (
     ResearchSource,
@@ -52,34 +53,13 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# Sentinel marking "the canonical ``initial_interval`` keyword was not passed"
-# in ``wait_for_completion``. The default stays this ``object()`` sentinel (not a
-# literal ``5.0``) so the public-API compatibility audit's default-repr check
-# sees no changed-default break; when the caller leaves it unset we resolve the
-# cadence to ``_DEFAULT_RESEARCH_POLL_INTERVAL`` below.
+# Sentinel for "``initial_interval`` not passed" in ``wait_for_completion``. Kept
+# as ``object()`` (not literal ``5.0``) so the public-API compat default-repr
+# check sees no changed-default break; unset resolves to the default below.
 _INITIAL_INTERVAL_UNSET: Any = object()
 
-# Default poll cadence (seconds between status checks) used when
-# ``initial_interval`` is left unset. Preserved verbatim so default-shape callers
-# keep the same behavior.
+# Default poll cadence (seconds) when ``initial_interval`` is unset.
 _DEFAULT_RESEARCH_POLL_INTERVAL = 5.0
-
-
-# ---------------------------------------------------------------------------
-# IMPORT_RESEARCH timeout-verification helpers
-#
-# IMPORT_RESEARCH is classified NON_IDEMPOTENT_NO_RETRY in IDEMPOTENCY_REGISTRY
-# (see #808): the executor will surface the first 5xx/timeout to the caller
-# rather than retry blindly, because the wire protocol has no client-token
-# slot and a naive retry duplicates every source. ``ResearchAPI``'s
-# verification path sidesteps that constraint by snapshotting baseline
-# sources before the call and matching post-call ``sources.list`` URLs
-# against the request — disambiguating "server already committed but the
-# response was lost" from "request truly failed". These helpers mirror the
-# CLI-only logic that originally landed in PR #321 / #327; they live in the
-# library now so Python API consumers get the same deep-research fix the
-# CLI does (issue #315).
-# ---------------------------------------------------------------------------
 
 
 def _normalize_import_verification_url(url: str) -> str:
@@ -375,14 +355,15 @@ class ResearchAPI:
         )
 
         if result and isinstance(result, list) and len(result) > 0:
-            task_id = result[0]
+            start_row = ResearchStartRow(result)
+            task_id = start_row.task_id_raw
             # v0.8.0 (#1342): a falsey ``task_id`` means no task was created —
             # raise (mirrors ``_parse_generation_result``'s missing id).
             if not task_id:
                 raise DecodingError(
                     f"research.start returned no task id: {result!r}", method_id=rpc_id.value
                 )
-            report_id = result[1] if len(result) > 1 else None
+            report_id = start_row.report_id
             return ResearchStart(
                 task_id=task_id,
                 report_id=report_id,
@@ -448,23 +429,23 @@ class ResearchAPI:
             await self._poll_task_models(notebook_id),
             notebook_id=notebook_id,
             task_id=task_id,
-            # The ambiguity raise only applies to the unfiltered (task_id is
-            # None) path; when a discriminator is pinned, _select_polled_tasks
-            # filters before the raise branch. Gating it here matches
-            # wait_for_completion and keeps the intent explicit.
+            # Ambiguity raise applies only to the unfiltered (task_id is None)
+            # path; a pinned discriminator filters before the raise. Matches
+            # wait_for_completion.
             raise_on_ambiguous=task_id is None,
         )
 
         if parsed_tasks:
-            return self._public_poll_result(parsed_tasks[0], parsed_tasks)
+            # ``parsed_tasks`` is a typed ``list[ResearchTask]``; the unpack avoids
+            # a ``name[int]`` positional read on a decoded payload.
+            first_task, *_ = parsed_tasks
+            return self._public_poll_result(first_task, parsed_tasks)
 
-        # A concrete pinned ``task_id`` that matched nothing is a poll-observed
-        # absence of that specific task — a typed ``NOT_FOUND`` sentinel
-        # carrying the requested id. A falsy ``task_id`` (``None`` for the
-        # unfiltered poll, or the degenerate empty string) is not a meaningful
-        # discriminator, so it stays ``NO_RESEARCH`` ("nothing in flight") and
-        # preserves the legacy empty-poll dict shape. See ADR-0019 Rule 4
-        # (#1346).
+        # A pinned ``task_id`` that matched nothing is a poll-observed absence —
+        # a typed ``NOT_FOUND`` sentinel carrying the id. A falsy ``task_id``
+        # (``None`` or empty string) is no discriminator, so it stays
+        # ``NO_RESEARCH`` and preserves the legacy empty-poll shape (ADR-0019
+        # Rule 4, #1346).
         if task_id:
             return ResearchTask.not_found(task_id)
 
@@ -521,11 +502,9 @@ class ResearchAPI:
                 positive.
             TypeError: If the resolved poll interval is not a number.
         """
-        # The sentinel default means "``initial_interval`` was not supplied" —
-        # fall back to the default cadence. An *explicit* non-numeric value
-        # (e.g. initial_interval=None or initial_interval="1") is a caller bug;
-        # fail fast with TypeError rather than silently coercing it back to the
-        # default.
+        # Unset sentinel → default cadence. An *explicit* non-numeric value
+        # (``None``, ``"1"``) is a caller bug: fail fast with TypeError rather
+        # than silently coercing it back to the default.
         if initial_interval is _INITIAL_INTERVAL_UNSET:
             poll_interval = _DEFAULT_RESEARCH_POLL_INTERVAL
         elif isinstance(initial_interval, bool) or not isinstance(initial_interval, (int, float)):
@@ -549,7 +528,7 @@ class ResearchAPI:
                 task_id=pinned_task_id,
                 raise_on_ambiguous=pinned_task_id is None,
             )
-            selected_task = parsed_tasks[0] if parsed_tasks else None
+            selected_task = next(iter(parsed_tasks), None)
             if pinned_task_id is None and selected_task is not None:
                 pinned_task_id = selected_task.task_id
 
@@ -670,31 +649,22 @@ class ResearchAPI:
             self._build_web_import_entry(src.url, src.title) for src in valid_sources
         )
 
-        params = [None, [1], effective_task_id, notebook_id, source_array]
-
         result = await self._rpc.rpc_call(
             RPCMethod.IMPORT_RESEARCH,
-            params,
+            [None, [1], effective_task_id, notebook_id, source_array],
             source_path=f"/notebook/{notebook_id}",
         )
-
         imported = []
-        if result and isinstance(result, list):
-            # Unwrap an ``[[src1, ...]]`` envelope via ``first[0]`` (not chained).
-            if len(result) > 0 and isinstance(result[0], list) and len(result[0]) > 0:
-                first = result[0]
-                if isinstance(first[0], list):
-                    result = first
-
-            for src_data in result:
-                if isinstance(src_data, list) and len(src_data) >= 2:
-                    # Absent/non-list id envelope legitimately means "skip" (id None).
-                    id_envelope = src_data[0]
-                    src_id = (
-                        id_envelope[0] if id_envelope and isinstance(id_envelope, list) else None
-                    )
-                    if src_id:
-                        imported.append({"id": src_id, "title": src_data[1]})
+        # ``unwrap_import_rows`` centralises the ``[[src1, ...]]`` envelope probe
+        # behind the research row adapter; an unrecognised shape → ``[]``.
+        for src_data in unwrap_import_rows(result):
+            row = ImportedSourceRow(src_data)
+            if not row.is_well_formed:
+                continue
+            # An absent / non-list id envelope legitimately means "skip" (id None).
+            src_id = row.source_id
+            if src_id:
+                imported.append({"id": src_id, "title": row.title_slot})
 
         return imported
 
@@ -836,22 +806,14 @@ class ResearchAPI:
                                 source_inputs, source_models, strict=True
                             )
                         ]
-                        # Filter for retry: drop already-present URLs.
-                        # Additionally, when *any* URL was verified
-                        # committed, drop no-URL entries (deep-research
-                        # reports): reports are appended FIRST in the
-                        # IMPORT_RESEARCH payload (see
-                        # ``_build_report_import_entry`` usage in
-                        # ``import_sources``), so a URL newly observed after
-                        # this attempt implies the report committed too.
-                        # Pre-existing URLs only de-dupe URL entries; they do
-                        # not prove this request committed no-URL reports.
-                        # Without this guard,
-                        # each retry duplicates the report server-side.
-                        # When no URL committed, keep no-URL entries —
-                        # the report's fate is unknown and the
-                        # report-only attempt cap further down bounds
-                        # the worst case.
+                        # Filter for retry: drop already-present URLs. Also, when
+                        # *any* URL committed, drop no-URL entries (deep-research
+                        # reports are appended FIRST in the IMPORT_RESEARCH payload,
+                        # so a newly-observed URL implies the report committed too —
+                        # without this guard each retry duplicates it server-side).
+                        # Pre-existing URLs only de-dupe URL entries. When no URL
+                        # committed, keep no-URL entries (report fate unknown; the
+                        # report-only attempt cap below bounds the worst case).
                         drop_no_url_entries = bool(committed_urls_norm)
                         filtered_source_pairs = [
                             (source_input, source)

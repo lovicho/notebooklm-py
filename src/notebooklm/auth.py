@@ -24,7 +24,8 @@ Usage:
 
 Security Notes:
     - Storage state files contain sensitive session cookies
-    - Path traversal protection is enforced on all file operations
+    - Profile names are constrained by ``notebooklm.paths`` to prevent
+      profile-directory traversal; explicit storage paths are used as provided
 """
 
 import logging
@@ -110,7 +111,7 @@ _is_allowed_cookie_domain = _cookie_policy._is_allowed_cookie_domain
 # names externally imported by the package, tests, docs, and the CLI as of
 # 2026-05-17. Underscore-prefixed names remain accessible on the module — some
 # tests reach for them as whitebox affordances — but are intentionally NOT
-# blessed here. See ``tests/unit/test_public_surface.py``: two complementary
+# blessed here. See ``tests/_guardrails/test_public_surface.py``: two complementary
 # tests pin this list — ``test_auth_module_has_expected_all`` snapshot-checks
 # the exact ordering, and ``test_auth_all_matches_external_imports_audit``
 # AST-scans ``src/``, ``tests/``, ``docs/`` to fail if a new public name is
@@ -138,6 +139,7 @@ __all__ = [
     "extract_session_id_from_html",
     "extract_wiz_field",
     "fetch_tokens",
+    "fetch_tokens_passive",
     "fetch_tokens_with_domains",
     "format_authuser_value",
     "get_account_email_for_storage",
@@ -328,3 +330,4 @@ _fetch_tokens_with_refresh = _auth_refresh._fetch_tokens_with_refresh
 _fetch_tokens_with_jar = _auth_refresh._fetch_tokens_with_jar
 fetch_tokens = _auth_refresh.fetch_tokens
 fetch_tokens_with_domains = _auth_refresh.fetch_tokens_with_domains
+fetch_tokens_passive = _auth_refresh.fetch_tokens_passive

@@ -7,13 +7,12 @@ Commands:
     clear   Clear current notebook context
     auth    Authentication management (logout / inspect / check / refresh)
 
-This module is split into thin Click handlers over four service
-modules:
-
-* :mod:`notebooklm.cli.services.playwright_login` — Playwright login flow
-* :mod:`notebooklm.cli.services.session_context` — ``use`` / ``status``
-* :mod:`notebooklm.cli.services.auth_diagnostics` — ``auth check``
-* :mod:`notebooklm.cli.services.auth_source` — auth-source precedence
+This module is split into thin Click handlers over service modules for
+Playwright login, browser-cookie login/refresh, session context,
+auth diagnostics, and auth-source precedence. Command-side wrappers in
+:mod:`notebooklm.cli.playwright_login_io` provide the concrete rendering,
+exit, and async-runner seams for the Playwright and browser-cookie login
+services.
 
 Body-used names that *moved* into those services are re-imported here as
 the command layer's own bindings. A handful are also bound on the
@@ -108,6 +107,36 @@ async def fetch_tokens_with_domains(*args: Any, **kwargs: Any) -> Any:
     from ..auth import fetch_tokens_with_domains as auth_fetch_tokens_with_domains
 
     return await auth_fetch_tokens_with_domains(*args, **kwargs)
+
+
+async def fetch_tokens_passive(*args: Any, **kwargs: Any) -> Any:
+    """Patch-compatible forwarding wrapper for the read-only passive token fetch."""
+    from ..auth import fetch_tokens_passive as auth_fetch_tokens_passive
+
+    return await auth_fetch_tokens_passive(*args, **kwargs)
+
+
+def _verify_token_fetch_after_refresh(
+    storage_path: Path, profile: str | None, *, quiet: bool
+) -> None:
+    """Confirm a token fetch actually succeeds after ``auth refresh``.
+
+    Runs the strictly read-only passive probe (no NOTEBOOKLM_REFRESH_CMD, no
+    cookie rotation, no write). A successful ``auth refresh`` — especially the
+    ``--browser-cookies`` rewrite — does not by itself prove the resulting
+    cookies authenticate; ``--verify`` makes that an explicit, fail-loud gate
+    so unattended schedulers can rely on the exit code (issue #1569).
+    """
+    try:
+        run_async(fetch_tokens_passive(storage_path, profile))
+    except Exception as exc:  # noqa: BLE001 — surface any failure as a clean exit 1
+        click.echo(
+            f"Error: refresh completed but the post-refresh token fetch failed: {exc}",
+            err=True,
+        )
+        exit_with_code(1)
+    if not quiet:
+        console.print("[green]ok[/green] verified: token fetch succeeds after refresh")
 
 
 def _click_exception_from(exc: LoginConfigurationError) -> click.ClickException:
@@ -619,9 +648,17 @@ def register_session_commands(cli):
     @click.option(
         "--test", "test_fetch", is_flag=True, help="Test token fetch (makes network request)"
     )
+    @click.option(
+        "--passive",
+        is_flag=True,
+        help=(
+            "With --test, validate read-only: never run NOTEBOOKLM_REFRESH_CMD, "
+            "rotate cookies, or write to disk. For unattended health checks."
+        ),
+    )
     @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
     @click.pass_context
-    def auth_check(ctx, test_fetch, json_output):
+    def auth_check(ctx, test_fetch, passive, json_output):
         """Check authentication status and diagnose issues.
 
         Validates that authentication is properly configured by checking:
@@ -631,15 +668,32 @@ def register_session_commands(cli):
         - Cookie domains are correct
 
         Use --test to also verify tokens can be fetched from NotebookLM
-        (requires network access).
+        (requires network access). Add --passive so that token test is strictly
+        read-only — it never triggers NOTEBOOKLM_REFRESH_CMD, rotates cookies,
+        or writes storage, which is what a passive readiness probe wants.
+
+        Exits 0 only when every executed check passes; non-zero otherwise, in
+        both text and --json modes.
 
         \b
         Examples:
-          notebooklm auth check           # Quick local validation
-          notebooklm auth check --test    # Full validation with network test
-          notebooklm auth check --json    # Machine-readable output
+          notebooklm auth check                  # Quick local validation
+          notebooklm auth check --test           # Full validation with network test
+          notebooklm auth check --test --passive # Read-only probe (no refresh/no write)
+          notebooklm auth check --json           # Machine-readable output
         """
-        plan = plan_from_click_context(ctx, test_fetch=test_fetch, json_output=json_output)
+        if passive and not test_fetch:
+            # The local cookie checks are already side-effect-free, so --passive
+            # only changes the optional --test token fetch. Warn (don't fail) so
+            # a caller does not mistake a local-only run for a network probe.
+            click.echo(
+                "Note: --passive has no effect without --test "
+                "(the local cookie checks never run a refresh command or write to disk).",
+                err=True,
+            )
+        plan = plan_from_click_context(
+            ctx, test_fetch=test_fetch, json_output=json_output, passive=passive
+        )
         result = run_async(run_auth_check(plan))
         _render_auth_check_result(result)
 
@@ -673,30 +727,50 @@ def register_session_commands(cli):
     @click.option(
         "--quiet", "-q", is_flag=True, help="Suppress success output (only print on error)"
     )
+    @click.option(
+        "--verify",
+        is_flag=True,
+        help=(
+            "After refreshing, confirm a token fetch actually succeeds (read-only "
+            "passive probe). Exit non-zero if the post-refresh cookies still fail."
+        ),
+    )
     @click.pass_context
-    def auth_refresh(ctx, browser_cookies, include_domains_raw, quiet):
-        """Refresh stored cookies by exercising the auth path once.
+    def auth_refresh(ctx, browser_cookies, include_domains_raw, quiet, verify):
+        """Refresh stored cookies by exercising the auth path once or reading browser cookies.
 
-        One-shot keepalive: opens a session, runs the layer-1 poke against
-        ``accounts.google.com`` to elicit ``__Secure-1PSIDTS`` rotation,
-        fetches CSRF + session ID from ``notebooklm.google.com`` (discarded;
-        their side effect is the cookie jar), and persists the rotated jar
-        to ``storage_state.json`` on close. Designed to be scheduled by the
-        OS (launchd / systemd / cron) so that an otherwise-idle profile
-        does not stale out between user-driven calls.
+        Default mode is a one-shot keepalive: opens a session, runs the
+        layer-1 poke against ``accounts.google.com`` to elicit
+        ``__Secure-1PSIDTS`` rotation, fetches CSRF + session ID from
+        ``notebooklm.google.com`` (discarded; their side effect is the cookie
+        jar), and persists the rotated jar to ``storage_state.json`` on close.
 
-        Cadence: 15-20 minutes is the recommended interval. Tighter is
-        wasteful; significantly looser may cross the SIDTS server-side
-        validity window for your account/region.
+        With ``--browser-cookies``, re-extracts cookies from the selected
+        installed browser, matches the stored profile account, rewrites the
+        profile's ``storage_state.json``, and refreshes account metadata.
+
+        Designed to be scheduled by the OS (launchd / systemd / cron) so
+        that an otherwise-idle profile does not stale out between
+        user-driven calls.
+
+        Cadence: 15-20 minutes is the recommended interval for the default
+        keepalive path. Tighter is wasteful; significantly looser may cross
+        the SIDTS server-side validity window for your account/region.
 
         Transient errors (e.g. ``httpx.RequestError`` from a flaky network)
         are surfaced as exit 1 rather than retried in-process; the OS
         scheduler's next firing is the retry mechanism.
 
+        With ``--verify``, after the refresh completes a read-only passive token
+        fetch confirms the resulting cookies actually authenticate, exiting
+        non-zero if not. A successful refresh command alone does not prove the
+        post-refresh cookies work (they may still redirect to sign-in).
+
         \b
         Examples:
           notebooklm auth refresh                 # one-shot, exit 0/1
-          notebooklm auth refresh --browser-cookies chrome
+          notebooklm auth refresh --verify        # refresh, then confirm token fetch works
+          notebooklm auth refresh --browser-cookies chrome --verify
           notebooklm --profile work auth refresh  # against a named profile
           watch -n 1200 notebooklm auth refresh   # quick in-terminal loop
 
@@ -735,19 +809,21 @@ def register_session_commands(cli):
                     quiet=quiet,
                     include_domains=include_domains,
                 )
-                return
+            else:
+                run_async(fetch_tokens_with_domains(storage_path, profile))
 
-            run_async(fetch_tokens_with_domains(storage_path, profile))
+                from ..auth import read_account_metadata
 
-            from ..auth import read_account_metadata
+                if storage_path.exists():
+                    metadata = read_account_metadata(storage_path)
+                    if not _is_valid_account_metadata(metadata):
+                        repair_after_refresh(storage_path, quiet=quiet)
 
-            if storage_path.exists():
-                metadata = read_account_metadata(storage_path)
-                if not _is_valid_account_metadata(metadata):
-                    repair_after_refresh(storage_path, quiet=quiet)
+                if not quiet:
+                    console.print(f"[green]ok[/green] refreshed: {storage_path}")
 
-            if not quiet:
-                console.print(f"[green]ok[/green] refreshed: {storage_path}")
+            if verify:
+                _verify_token_fetch_after_refresh(storage_path, profile, quiet=quiet)
 
 
 # Backward-compat constant kept at module scope for tests that import it

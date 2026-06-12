@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Passive auth validation for unattended monitors** (#1569). New
+  `notebooklm.auth.fetch_tokens_passive(...)` validates the cookies on disk with
+  a strictly read-only token fetch — it never runs `NOTEBOOKLM_REFRESH_CMD`,
+  never fires the layer-1 keepalive rotation poke, and never writes
+  `storage_state.json` (additive public symbol; the active
+  `fetch_tokens_with_domains` is unchanged). `notebooklm auth check --test
+  --passive` routes the token probe through it, so a systemd/cron health check
+  can answer "do the cookies currently authenticate?" without mutating state,
+  spawning a subprocess, or racing real work. The transport-neutral
+  `run_auth_check(AuthCheckPlan(..., passive=True))` exposes the same probe to
+  the MCP/HTTP adapters.
+
+- **`notebooklm auth refresh --verify`** (#1569). After a refresh completes,
+  runs the passive token probe to confirm the resulting cookies actually
+  authenticate, exiting non-zero if they still redirect to sign-in. A successful
+  refresh command alone does not prove the post-refresh cookies work — this is
+  especially valuable with `--browser-cookies`, which rewrites the cookie jar
+  but does not otherwise verify it.
+
+- **macOS login recovery hint.** When the bundled-Chromium interactive login
+  times out (`Login not detected within 5 minutes`), the message now suggests
+  retrying with `notebooklm login --browser chrome` to reuse an already
+  signed-in system Chrome session — which often detects immediately and sidesteps
+  bundled-Chromium issues on macOS.
+
 - **Layer-3 headless re-auth: `client.refresh_auth(allow_headless=True)`** (#1525,
   P2; P1 was #1512). When NotebookLM's first-party cookies are fully dead — the
   homepage GET 302s to the Google login page and neither token refresh (L1) nor
@@ -76,6 +101,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   See [docs/mcp-guide.md](docs/mcp-guide.md).
 
 ### Fixed
+
+- **`notebooklm auth check` text mode now exits non-zero when an executed check
+  fails, matching `--json` mode** (#1569). Previously the Rich-table renderer
+  printed the failed checks but always exited `0`, so an unattended health check
+  using `auth check --test` (without `--json`) silently treated expired auth as
+  healthy — text and JSON modes had different process contracts. Both modes now
+  exit `0` only when every *executed* check passes (skipped checks — e.g. the
+  token fetch without `--test` — do not count as failures) and non-zero (`1`)
+  otherwise. Behavioral fix to the CLI exit-code contract; no API change.
 
 - **`Notebook.created_at` now reflects the true creation time instead of the
   last-modified time; `Notebook.modified_at` is newly exposed.** The notebook
@@ -896,7 +930,7 @@ None / kwarg-alias deprecation machinery — has been **removed** (#1365). See t
 > to the `RPCError` parent), matching the `NotebookNotFoundError` signature.
 > All positional call sites remain source-compatible.
 
-- **`notebooklm source stale <ID>` now follows the standard CLI exit-code convention by default.** Exit `0` indicates the freshness check succeeded (regardless of whether the source is fresh or stale); exit `1` indicates an error. Previously the command used an inverted predicate (`0` = stale, `1` = fresh) so the shell idiom `if notebooklm source stale ID; then refresh; fi` worked naturally. **Migration:** scripts that depended on the inverted predicate can opt back into the legacy semantics with the new `--exit-on-stale` flag (`if notebooklm source stale --exit-on-stale ID; then refresh; fi`). Scripts written for the new default should branch on the JSON `stale`/`fresh` fields or stdout text. See [`docs/cli-exit-codes.md`](docs/cli-exit-codes.md#notebooklm-source-stale-source_id--opt-in-inverted-predicate) for the full rationale + the new `Exit code semantics` summary.
+- **`notebooklm source stale <ID>` now follows the standard CLI exit-code convention by default.** Exit `0` indicates the freshness check succeeded (regardless of whether the source is fresh or stale); exit `1` indicates an error. Previously the command used an inverted predicate (`0` = stale, `1` = fresh) so the shell idiom `if notebooklm source stale ID; then refresh; fi` worked naturally. **Migration:** scripts that depended on the inverted predicate can opt back into the legacy semantics with the new `--exit-on-stale` flag (`if notebooklm source stale --exit-on-stale ID; then refresh; fi`). Scripts written for the new default should branch on the JSON `stale`/`fresh` fields or stdout text. See [`docs/cli-exit-codes.md`](docs/cli-exit-codes.md#source-stale-exit-on-stale) for the full rationale + the new `Exit code semantics` summary.
 - **`NotebookLMClient.rpc_call(...)` no longer accepts `source_path`, `_is_retry`, or `operation_variant`** — the three kwargs deprecated in v0.5.0 (`docs/deprecations.md`) were removed after one MINOR cycle. The public escape hatch's primary contract (`client.rpc_call(method, params)`) is unchanged and the default-shape call keeps working with no migration. Migration:
   - **Keyword callers**: drop the removed kwarg from the call. The previous default-shape behavior (`source_path="/"`, `_is_retry=False`, `operation_variant=None`) is now what every call gets unconditionally — `source_path` was a leaky internal seam, `_is_retry` was an internal retry-loop flag, and `operation_variant` is part of the mutating-RPC idempotency registry. Calls that genuinely needed a non-`"/"` `source_path` or a specific `operation_variant` were already on the wrong layer; build a typed method on a sub-client instead, or open an issue describing the workflow.
   - **Positional callers** (rare): the positional order of the remaining parameters is `(method, params, allow_null, *, disable_internal_retries=...)`, so a previously-positional `source_path` / `_is_retry` argument now binds to a different parameter slot. A pre-cut `client.rpc_call(method, params, "/", True)` (which passed `source_path="/"`, `allow_null=True`) becomes `client.rpc_call(method, params, allow_null=True)` after the cut — switch to keyword arguments for `allow_null` to avoid this footgun.

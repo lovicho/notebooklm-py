@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._row_adapters.notes import NoteRow
 from .exceptions import DecodingError, RPCError
+from .rpc import safe_index
 from .rpc.types import RPCMethod
 from .types import Note
 
@@ -60,9 +61,9 @@ class NoteRowKind(Enum):
     """Private classification of rows from ``GET_NOTES_AND_MIND_MAPS``.
 
     Not part of the public API — kept private so the wire-shape
-    classification can evolve without a SemVer hit. Further variants
-    (e.g. distinct treatment for saved-from-chat notes) can be added
-    without breaking external callers.
+    classification can evolve without a SemVer hit. ``SAVED_CHAT`` is reserved
+    for future reliable saved-from-chat detection; current saved-chat rows fall
+    back to ``NOTE``.
     """
 
     NOTE = "note"
@@ -136,7 +137,16 @@ class NoteService:
                 method_id=RPCMethod.GET_NOTES_AND_MIND_MAPS.value,
             )
 
-        first = result[0]
+        # ``result`` is a non-empty list here (guarded by the ``not result`` and
+        # ``isinstance(result, list)`` checks above), so this ``[0]`` read cannot
+        # fail; routing it through ``safe_index`` keeps the position knowledge on
+        # the sanctioned schema-drift seam without changing behaviour.
+        first = safe_index(
+            result,
+            0,
+            method_id=RPCMethod.GET_NOTES_AND_MIND_MAPS.value,
+            source="NoteService._extract_note_row_container",
+        )
         if self._is_note_row_like(first):
             return result
         if isinstance(first, list):
@@ -155,25 +165,45 @@ class NoteService:
         if not self._is_note_row_like(item):
             return None
 
-        if isinstance(item[0], str):
+        # ``_is_note_row_like`` guarantees ``item`` is a non-empty list; the
+        # ``None``-nested branch additionally guarantees ``len(item) > 1`` and a
+        # non-empty ``item[1]`` nested list, so every read below is on a slot the
+        # guard already proved present — ``safe_index`` routes the position
+        # knowledge through the schema-drift seam without changing behaviour.
+        method_id = RPCMethod.GET_NOTES_AND_MIND_MAPS.value
+        head = safe_index(item, 0, method_id=method_id, source="NoteService._normalize_note_row")
+        if isinstance(head, str):
             return item
 
-        nested = item[1]
-        return [nested[0], nested, *item[2:]]
+        nested = safe_index(item, 1, method_id=method_id, source="NoteService._normalize_note_row")
+        nested_head = safe_index(
+            nested, 0, method_id=method_id, source="NoteService._normalize_note_row"
+        )
+        return [nested_head, nested, *item[2:]]
 
     def _is_note_row_like(self, item: Any) -> bool:
         if not isinstance(item, list) or len(item) == 0:
             return False
-        if isinstance(item[0], str):
+        # ``item`` is a non-empty list here, so ``[0]`` cannot fail; the ``[1]``
+        # read below is gated by ``len(item) <= 1``. Both descents route through
+        # ``safe_index`` (the sanctioned schema-drift seam) without changing the
+        # historical shape-detection behaviour.
+        method_id = RPCMethod.GET_NOTES_AND_MIND_MAPS.value
+        head = safe_index(item, 0, method_id=method_id, source="NoteService._is_note_row_like")
+        if isinstance(head, str):
             return True
         # ``[None, [id, ...], ...]`` shape: bind the ``[1]`` nested row so the
-        # id-type check is a single-level ``nested[0]`` index instead of a
-        # chained ``item[1][0]`` descent. A non-list/empty nested row simply
-        # means "not a note row" (returns False).
-        if item[0] is not None or len(item) <= 1:
+        # id-type check is a single-level ``nested[0]`` read on the nested list.
+        # A non-list/empty nested row simply means "not a note row" (False).
+        if head is not None or len(item) <= 1:
             return False
-        nested = item[1]
-        return isinstance(nested, list) and len(nested) > 0 and isinstance(nested[0], str)
+        nested = safe_index(item, 1, method_id=method_id, source="NoteService._is_note_row_like")
+        nested_head = (
+            safe_index(nested, 0, method_id=method_id, source="NoteService._is_note_row_like")
+            if isinstance(nested, list) and len(nested) > 0
+            else None
+        )
+        return isinstance(nested, list) and len(nested) > 0 and isinstance(nested_head, str)
 
     def classify_row(self, row: list[Any]) -> NoteRowKind:
         """Identify what kind of row this is.
@@ -183,10 +213,9 @@ class NoteService:
           slot at position 2 is the soft-delete sentinel.
         * mind-map: content payload parses as JSON with ``"children":``
           or ``"nodes":`` keys (regardless of legacy vs current shape).
-        * saved-chat: a plain note row whose metadata flags chat mode.
-          That metadata is not reliably present on the wire, so when we
-          cannot positively confirm chat mode we fall through to
-          ``NOTE`` rather than ``UNKNOWN`` (refactor-history.md §Risks).
+        * saved-chat: reserved for future reliable saved-from-chat detection.
+          Current saved-chat rows do not carry a stable discriminator, so they
+          fall through to ``NOTE`` rather than ``UNKNOWN``.
         * plain note: default for any other content-bearing row.
 
         Position knowledge (the deletion sentinel and the
@@ -271,9 +300,16 @@ class NoteService:
             # a bare ``[id, ...]``. Bind the first element so the id read is a
             # single-level index rather than a chained ``result[0][0]`` descent;
             # a degenerate shape leaves note_id None and raises below.
-            first = result[0]
+            # ``result`` is a non-empty list here (guarded above), so this ``[0]``
+            # read cannot fail; ditto ``first[0]`` under its ``len(first) > 0``
+            # guard. ``safe_index`` keeps the position knowledge on the sanctioned
+            # schema-drift seam without changing behaviour.
+            method_id = RPCMethod.CREATE_NOTE.value
+            first = safe_index(result, 0, method_id=method_id, source="NoteService.create_note")
             if isinstance(first, list) and len(first) > 0:
-                note_id = first[0]
+                note_id = safe_index(
+                    first, 0, method_id=method_id, source="NoteService.create_note"
+                )
                 created_inner_row = first
             elif isinstance(first, str):
                 note_id = first

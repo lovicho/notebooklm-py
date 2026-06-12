@@ -62,9 +62,12 @@ from typing import Any, ClassVar
 from ..rpc import RPCMethod, safe_index
 
 __all__ = [
+    "ImportedSourceRow",
     "ResearchResultRow",
+    "ResearchStartRow",
     "ResearchTaskInfoRow",
     "ResearchTaskRow",
+    "unwrap_import_rows",
     "unwrap_poll_tasks",
 ]
 
@@ -301,3 +304,145 @@ class ResearchResultRow:
                 payload[ResearchResultRow._PAYLOAD_REPORT_POS],
             )
         return None
+
+
+@dataclass(frozen=True)
+class ResearchStartRow:
+    """Typed view of a ``START_FAST_RESEARCH`` / ``START_DEEP_RESEARCH`` result.
+
+    The kickoff RPCs return ``[task_id, report_id?, …]``. The caller guards the
+    row as a non-empty list before constructing this view, so the ``task_id``
+    slot is GUARANTEED present and descends through ``safe_index`` (an absent id
+    slot on a non-empty row is genuine drift). The ``report_id`` slot is
+    routinely-optional (a fast-research start omits it), so it is length-guarded
+    and short-circuits to ``None``.
+
+    Position knowledge is centralised here; ``_research.start`` reads named
+    properties instead of ``result[0]`` / ``result[1]``.
+    """
+
+    _raw: Any = field(repr=False)
+
+    _TASK_ID_POS: ClassVar[int] = 0
+    _REPORT_ID_POS: ClassVar[int] = 1
+
+    _TASK_ID_SOURCE: ClassVar[str] = "ResearchStartRow.task_id"
+
+    @property
+    def task_id_raw(self) -> Any:
+        """Raw value at ``result[0]`` (truthiness validated by the caller).
+
+        The caller guarantees a non-empty list before wrapping, so this descent
+        is a no-op on the happy path; ``safe_index`` only fires if the id slot
+        itself drifted out (genuine shape drift).
+        """
+        return safe_index(
+            self._raw,
+            self._TASK_ID_POS,
+            method_id=None,
+            source=self._TASK_ID_SOURCE,
+        )
+
+    @property
+    def report_id(self) -> Any:
+        """Optional value at ``result[1]`` — ``None`` when the slot is absent.
+
+        A fast-research start legitimately omits the report id, so this is a
+        length-guarded soft read (``[1]`` only when ``len(result) > 1``).
+        """
+        if len(self._raw) <= self._REPORT_ID_POS:
+            return None
+        return self._raw[self._REPORT_ID_POS]
+
+
+# ``IMPORT_RESEARCH`` returns either a wrapped envelope (``[[src1, …]]``) or an
+# already-flat list of imported-source rows. These positions centralise the
+# envelope probe + per-row reads ``import_sources`` previously open-coded.
+_IMPORT_ENVELOPE_OUTER_POS = 0
+_IMPORT_ENVELOPE_PROBE_POS = 0
+_IMPORT_ROW_ID_ENVELOPE_POS = 0
+_IMPORT_ROW_TITLE_POS = 1
+_IMPORT_ROW_MIN_LEN = 2
+
+
+def _looks_like_import_row(value: Any) -> bool:
+    """Whether ``value`` has the leading slots of an ``IMPORT_RESEARCH`` row."""
+    if not isinstance(value, list) or len(value) < _IMPORT_ROW_MIN_LEN:
+        return False
+    id_envelope = value[_IMPORT_ROW_ID_ENVELOPE_POS]
+    return id_envelope is None or isinstance(id_envelope, list)
+
+
+def unwrap_import_rows(result: Any) -> list[Any]:
+    """Return the flat list of imported-source rows from an ``IMPORT_RESEARCH`` result.
+
+    ``IMPORT_RESEARCH`` returns either a wrapped envelope (``[[src1, …]]``) or an
+    already-flat list of rows. This centralises the ``result[0]`` / ``result[0][0]``
+    envelope probe so ``import_sources`` stops open-coding it; the reads are soft
+    (an unrecognised shape falls through to ``result`` unchanged or ``[]``),
+    with one extra disambiguation: the wrap is recognised only when
+    ``result[0][0]`` itself looks like an imported-source row. That preserves
+    flat single-row responses like ``[[[id], title]]`` instead of mistaking the
+    row's id envelope for a wrapper.
+    """
+    if not result or not isinstance(result, list):
+        return []
+    first = result[_IMPORT_ENVELOPE_OUTER_POS]
+    if (
+        isinstance(first, list)
+        and len(first) > 0
+        and _looks_like_import_row(first[_IMPORT_ENVELOPE_PROBE_POS])
+    ):
+        return first
+    return result
+
+
+@dataclass(frozen=True)
+class ImportedSourceRow:
+    """Typed view of one ``IMPORT_RESEARCH`` imported-source row (``result[i]``).
+
+    Each row is ``[[id, …], title, …]``: the id sits inside an envelope at
+    ``[0][0]`` and the title at ``[1]``. Every read is routinely-optional (the
+    response is documented as incomplete — a row may legitimately omit its id
+    envelope), so the adapter length-guards each read and short-circuits to a
+    default, preserving ``import_sources``'s permissive "skip rows without an
+    id" contract (a malformed row is skipped, never raised). Position knowledge
+    is centralised here; the consumer reads named properties instead of
+    ``src_data[0]`` / ``id_envelope[0]`` / ``src_data[1]``.
+    """
+
+    _raw: Any = field(repr=False)
+
+    _ID_ENVELOPE_POS: ClassVar[int] = _IMPORT_ROW_ID_ENVELOPE_POS
+    _ID_POS: ClassVar[int] = 0
+    _TITLE_POS: ClassVar[int] = _IMPORT_ROW_TITLE_POS
+    # A usable row must carry at least ``[id_envelope, title]`` — mirrors the
+    # historical ``len(src_data) >= 2`` guard.
+    _MIN_LEN: ClassVar[int] = _IMPORT_ROW_MIN_LEN
+
+    @property
+    def is_well_formed(self) -> bool:
+        """Whether the row is a list long enough to carry id envelope + title."""
+        return isinstance(self._raw, list) and len(self._raw) >= self._MIN_LEN
+
+    @property
+    def source_id(self) -> Any:
+        """Imported source id at ``src_data[0][0]`` — ``None`` when absent.
+
+        An absent / falsy / non-list id envelope legitimately means "skip this
+        row" (the historical contract), so it short-circuits to ``None`` rather
+        than raising. The caller keeps the row only when this is truthy.
+        """
+        if not self.is_well_formed:
+            return None
+        envelope = self._raw[self._ID_ENVELOPE_POS]
+        if not envelope or not isinstance(envelope, list):
+            return None
+        return envelope[self._ID_POS]
+
+    @property
+    def title_slot(self) -> Any:
+        """Raw title at ``src_data[1]`` — ``None`` when the row is malformed."""
+        if not self.is_well_formed:
+            return None
+        return self._raw[self._TITLE_POS]
