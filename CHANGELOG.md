@@ -124,6 +124,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the server and its dependencies (`fastmcp`) arrive only with the `mcp` extra.
   See [docs/mcp-guide.md](docs/mcp-guide.md).
 
+### Changed
+
+- **`notebooklm.rpc` public surface narrowed to the two documented power-user
+  imports** (#1589). `notebooklm.rpc.__all__` now lists only `RPCMethod` and
+  `resolve_rpc_id`; the ~47 other names it used to advertise (the batchexecute
+  wire helpers `encode_rpc_request` / `decode_response` / `extract_rpc_result` /
+  …, the endpoint URL constants and helpers, `safe_index`, and the enum /
+  exception **re-exports** that remain public under their canonical names —
+  most enums as `notebooklm.<X>` / `notebooklm.types.<X>`, the exceptions as
+  `notebooklm.<X>` / `notebooklm.exceptions.<X>`, with `ArtifactStatus` /
+  `artifact_status_to_str` `notebooklm.types`-only and `ArtifactTypeCode` having
+  no public alias) are no longer part of the
+  blessed, compat-gated public surface. This aligns the audited surface with
+  `docs/stability.md`, which has always marked `notebooklm.rpc.*` internal. **Not
+  a removal:** every name stays importable as `notebooklm.rpc.<name>` for
+  back-compat — only the public-API *advertisement* shrank. New code should
+  import the canonical public name (or `RPCMethod` / `resolve_rpc_id` for
+  raw-RPC power use). See [docs/deprecations.md](docs/deprecations.md).
+
+- **`notebooklm.auth` public surface narrowed (PR-1)** (#1592). `auth.__all__`
+  drops 23 internal re-exports that only first-party `src`/tests imported (the
+  cookie-snapshot/storage helpers `save_cookies_to_storage` / `snapshot_cookie_jar`
+  / `CookieSnapshot*` / `CookieSaveResult` / `advance_cookie_snapshot_after_save`,
+  the WIZ-extraction helpers `extract_csrf_from_html` / `extract_session_id_from_html`
+  / `extract_wiz_field`, `authuser_query` / `format_authuser_value`,
+  `load_httpx_cookies` / `normalize_cookie_map`, `ALLOWED_COOKIE_DOMAINS` /
+  `MINIMUM_REQUIRED_COOKIES`, the env/URL constants `KEEPALIVE_ROTATE_URL` /
+  `NOTEBOOKLM_REFRESH_CMD_ENV` / `NOTEBOOKLM_REFRESH_CMD_USE_SHELL_ENV` /
+  `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV`, `load_auth_from_storage`, `fetch_tokens`,
+  and `recover_psidts_in_memory`). These were migration leftovers from the
+  `_auth/*` extraction (ADR-0003 → ADR-0014); `docs/stability.md` has always marked
+  `notebooklm.auth.*` internal. **Not a removal:** every name stays importable as
+  `notebooklm.auth.<name>` for back-compat — first-party code now imports them from
+  their `notebooklm._auth.<sub>` home. The documented imports (`AuthTokens`,
+  `convert_rookiepy_cookies_to_storage_state`, the cookie-domain constants) and the
+  cohesive operations (`enumerate_accounts`, `fetch_tokens_with_domains`,
+  `fetch_tokens_passive`, …) are unchanged. See
+  [docs/deprecations.md](docs/deprecations.md).
+
 ### Fixed
 
 - **`notebooklm auth check` text mode now exits non-zero when an executed check

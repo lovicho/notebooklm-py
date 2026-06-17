@@ -18,9 +18,9 @@ from urllib.parse import ParseResult, urlparse
 
 import httpx
 
+from .._auth.cookies import load_httpx_cookies
 from .._mind_maps_api import extract_interactive_tree_leaf
 from .._row_adapters.notes import NoteRow
-from ..auth import load_httpx_cookies
 from ..exceptions import UnknownRPCMethodError, ValidationError
 from ..rpc import ArtifactTypeCode, RPCMethod, safe_index
 from ..types import (
@@ -201,7 +201,11 @@ class ArtifactDownloadService:
         )
 
     async def _get_artifact_content(self, notebook_id: str, artifact_id: str) -> str | None:
-        """Fetch interactive artifact HTML through the runtime RPC seam."""
+        """Fetch interactive artifact HTML through the runtime RPC seam.
+
+        ``GET_INTERACTIVE_HTML`` is the live generic ``GetArtifact`` getter; here
+        we read the HTML body at ``[0][9][0]`` (quiz / flashcard content).
+        """
         result = await self._rpc.rpc_call(
             RPCMethod.GET_INTERACTIVE_HTML,
             [artifact_id],

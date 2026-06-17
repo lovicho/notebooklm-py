@@ -56,6 +56,42 @@ migration for each is in
 > `notebooklm source add --mime-type` are likewise **not** deprecated —
 > `mime_type` sets the resumable-upload content-type header.
 
+> **`notebooklm.rpc` public surface tightened — not a removal (v0.8.0,
+> [#1589](https://github.com/teng-lin/notebooklm-py/issues/1589)).**
+> `notebooklm.rpc.__all__` now advertises only the two documented power-user
+> imports, `RPCMethod` and `resolve_rpc_id`. The ~47 other names it used to list
+> — the batchexecute wire helpers (`encode_rpc_request`, `decode_response`,
+> `extract_rpc_result`, `safe_index`, …), the endpoint URL constants/helpers, and
+> the enum / exception **re-exports** — are **not removed**: they remain
+> importable as `notebooklm.rpc.<name>` for back-compat. They were never part of
+> the supported public API (`docs/stability.md` has always marked
+> `notebooklm.rpc.*` internal); this change only stops the compat gate from
+> advertising them. New code should import the canonical public name where one
+> exists: most enums as `notebooklm.<X>` / `notebooklm.types.<X>`, but
+> `ArtifactStatus` and `artifact_status_to_str` only as `notebooklm.types.<X>`;
+> the exceptions as `notebooklm.<X>` / `notebooklm.exceptions.<X>`. The wire
+> helpers, the endpoint URL constants/helpers, `safe_index`, `ArtifactTypeCode`,
+> and `RPCErrorCode` are internal with **no** blessed public alias and stay
+> importable only as `notebooklm.rpc.<name>`. For raw-RPC power use, import
+> `from notebooklm.rpc import RPCMethod, resolve_rpc_id`.
+
+> **`notebooklm.auth` public surface tightened — not a removal (v0.8.0,
+> [#1592](https://github.com/teng-lin/notebooklm-py/issues/1592)).**
+> `auth.__all__` no longer advertises 23 internal re-exports that only first-party
+> `src`/tests imported (cookie-snapshot/storage helpers, the WIZ-extraction helpers,
+> `authuser_query`/`format_authuser_value`, `load_httpx_cookies`/`normalize_cookie_map`,
+> `ALLOWED_COOKIE_DOMAINS`/`MINIMUM_REQUIRED_COOKIES`, the keepalive/refresh env +
+> URL constants, `load_auth_from_storage`, `fetch_tokens`, `recover_psidts_in_memory`).
+> These were migration leftovers from the `_auth/*` extraction (ADR-0003 → ADR-0014).
+> They are **not removed**: each remains importable as `notebooklm.auth.<name>` for
+> back-compat — first-party code now imports them from their `notebooklm._auth.<sub>`
+> home. `notebooklm.auth.*` has always been internal (`docs/stability.md`) except the
+> documented imports (`AuthTokens`, `convert_rookiepy_cookies_to_storage_state`, the
+> cookie-domain constants) and the cohesive operations (`enumerate_accounts`,
+> `fetch_tokens_with_domains`, `fetch_tokens_passive`, …), which are unchanged. A
+> deeper service-interface refactor of the remaining cli/_app-forced names was
+> evaluated and deferred (limited encapsulation payoff while names stay importable).
+
 
 ## Removed in v0.7.0
 
