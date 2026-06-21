@@ -53,6 +53,19 @@ def register_default_policies(registry: IdempotencyRegistry) -> None:
         IdempotencyPolicy.NON_IDEMPOTENT_NO_RETRY,
         notes=_IMPORT_RESEARCH_NOT_IDEMPOTENT_NOTE,
     )
+    # CANCEL_RESEARCH drives an in-flight run to its terminal (FAILED) state. The
+    # server returns [] unconditionally and never validates the run id, so a
+    # blind transport retry is safe: re-cancelling a now-terminal (or unknown)
+    # run is a no-op with the same observable result. Retry-safe set-op
+    # semantics, like DELETE_SOURCE / DELETE_ARTIFACT.
+    registry.register(
+        RPCMethod.CANCEL_RESEARCH,
+        IdempotencyPolicy.IDEMPOTENT_SET_OP,
+        notes=(
+            "research run cancel is idempotent — final-state set-op; server "
+            "returns [] unconditionally (no id validation), so a retry is a no-op"
+        ),
+    )
 
     # CREATE_NOTE has two operation variants on the wire:
     #   * ``"plain"`` — 5-element params from ``NoteService.create_note``
@@ -382,6 +395,11 @@ def register_default_policies(registry: IdempotencyRegistry) -> None:
         # (the web UI "Delete history" action), idempotent set-op.
         RPCMethod.DELETE_CONVERSATION: (
             "server-side chat-turn delete is idempotent (set-op semantics)"
+        ),
+        # Live method GeneratePromptSuggestions: response-only prompt-suggestion
+        # generation (same family as GET_SUGGESTED_REPORTS); persists nothing.
+        RPCMethod.SUGGEST_PROMPTS: (
+            "response-only prompt suggestion generation; no persisted resource is created by replay"
         ),
         RPCMethod.GET_SHARE_STATUS: "read-only share status fetch; replay does not mutate ACL state",
         RPCMethod.REMOVE_RECENTLY_VIEWED: (

@@ -128,6 +128,7 @@ class RPCMethod(str, Enum):
     START_DEEP_RESEARCH = "QA9ei"  # -> DiscoverSourcesAsync
     POLL_RESEARCH = "e3bVqc"  # -> ListDiscoverSourcesJob
     IMPORT_RESEARCH = "LBwxtb"  # -> FinishDiscoverSourcesRun
+    CANCEL_RESEARCH = "Zbrupe"  # -> CancelDiscoverSourcesJob
 
     # Note and mind map operations
     # -> ActOnSources (generic source-action op; we use it to generate a mind map)
@@ -144,6 +145,8 @@ class RPCMethod(str, Enum):
     GET_CONVERSATION_TURNS = "khqZz"  # -> ListChatTurns. Returns full Q&A turns for a conversation
     # -> DeleteChatTurns (deletes the chat turns; web UI's "Delete history")
     DELETE_CONVERSATION = "J7Gthc"
+    # -> GeneratePromptSuggestions. AI-suggested questions/prompts to ask a notebook
+    SUGGEST_PROMPTS = "otmP3b"
 
     # Sharing operations (notebook-level)
     SHARE_NOTEBOOK = "QDyure"  # -> LabsTailwindSharingService.ShareProject. Set notebook visibility

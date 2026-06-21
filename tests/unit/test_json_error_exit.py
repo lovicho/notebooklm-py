@@ -217,6 +217,10 @@ def _fail_chat_ask(client: MagicMock) -> None:
     client.chat.ask = AsyncMock(side_effect=RuntimeError("network unreachable"))
 
 
+def _fail_suggest_prompts(client: MagicMock) -> None:
+    client.notebooks.suggest_prompts = AsyncMock(side_effect=RuntimeError("network unreachable"))
+
+
 def _fail_artifact_list(client: MagicMock) -> None:
     client.artifacts.list = AsyncMock(side_effect=RuntimeError("auth: 401 Unauthorized"))
 
@@ -240,6 +244,13 @@ def _fail_notebook_list(client: MagicMock) -> None:
 def _research_no_research(client: MagicMock) -> None:
     # research wait + status both surface "no_research" as a failure.
     client.research.poll = AsyncMock(return_value={"status": "no_research"})
+
+
+def _fail_research_cancel(client: MagicMock) -> None:
+    # `research cancel` is fire-and-forget and never raises on an unknown id,
+    # but a genuine transport failure from the cancel RPC must still surface as
+    # the typed JSON error envelope (not a bare traceback).
+    client.research.cancel = AsyncMock(side_effect=RuntimeError("net down"))
 
 
 def _source_add_research_start_failed(client: MagicMock) -> None:
@@ -467,6 +478,12 @@ JSON_ERROR_CASES: list[tuple[str, list[str], object]] = [
         ["research", "wait", "-n", "abc123def456ghi789jkl", "--json"],
         _research_no_research,
     ),
+    # research cancel: a transport failure surfaces as the typed JSON envelope.
+    (
+        "research_cancel_rpc_failure_json",
+        ["research", "cancel", "run_456", "-n", "abc123def456ghi789jkl", "--json"],
+        _fail_research_cancel,
+    ),
     # source add-research failure-to-start: ADR-0015 typed envelope on the
     # `start_failed` outcome from services/source_research.py.
     (
@@ -576,6 +593,11 @@ JSON_ERROR_CASES: list[tuple[str, list[str], object]] = [
     ("share_status_failure", ["share", "status", "-n", "abc", "--json"], _fail_share_status),
     ("notebook_list_failure", ["list", "--json"], _fail_notebook_list),
     ("chat_ask_failure", ["ask", "hi", "-n", "abc", "--json"], _fail_chat_ask),
+    (
+        "suggest_prompts_failure",
+        ["suggest-prompts", "-n", "abc", "--json"],
+        _fail_suggest_prompts,
+    ),
     # notebook create: with_client + RuntimeError -> UNEXPECTED_ERROR envelope.
     (
         "notebook_create_failure",

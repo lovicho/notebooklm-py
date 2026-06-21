@@ -41,6 +41,7 @@ from notebooklm.types import (
     Label,
     Note,
     Notebook,
+    PromptSuggestion,
     ResearchSource,
     ResearchStart,
     ResearchStatus,
@@ -298,6 +299,15 @@ def _customize_chat_ask(client: MagicMock) -> None:
     )
 
 
+def _customize_suggest_prompts(client: MagicMock) -> None:
+    client.notebooks.suggest_prompts = AsyncMock(
+        return_value=[
+            PromptSuggestion(title="Briefing", prompt="Give me a briefing."),
+            PromptSuggestion(title="Risks", prompt="What are the key risks?"),
+        ]
+    )
+
+
 def _customize_share_public(client: MagicMock) -> None:
     client.sharing.set_public = AsyncMock(return_value=_stub_share_status())
 
@@ -353,6 +363,12 @@ def _customize_research_wait(client: MagicMock) -> None:
             }
         )
     )
+
+
+def _customize_research_cancel(client: MagicMock) -> None:
+    # `research cancel <run_id> --json` is fire-and-forget: ``cancel`` returns
+    # None and the command emits a fixed JSON acknowledgement.
+    client.research.cancel = AsyncMock(return_value=None)
 
 
 def _customize_notebook_create(client: MagicMock) -> None:
@@ -485,6 +501,11 @@ JSON_COMMANDS: list[tuple[str, list[str], object]] = [
         ["research", "wait", "-n", "abc123def456ghi789jkl", "--json"],
         _customize_research_wait,
     ),
+    (
+        "research_cancel",
+        ["research", "cancel", "run_456", "-n", "abc123def456ghi789jkl", "--json"],
+        _customize_research_cancel,
+    ),
     # share group
     ("share_status", ["share", "status", "-n", "abc123def456ghi789jkl", "--json"], None),
     (
@@ -598,6 +619,11 @@ JSON_COMMANDS: list[tuple[str, list[str], object]] = [
         "history_cmd",
         ["history", "-n", "abc123def456ghi789jkl", "--json"],
         None,
+    ),
+    (
+        "suggest_prompts_cmd",
+        ["suggest-prompts", "-n", "abc123def456ghi789jkl", "--json"],
+        _customize_suggest_prompts,
     ),
     # doctor / profile / notebook-create coverage (meta-audit G9 + I7 + I9):
     # `doctor` and `profile list` read NOTEBOOKLM_HOME directly and don't

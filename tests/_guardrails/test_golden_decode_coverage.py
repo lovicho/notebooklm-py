@@ -89,6 +89,7 @@ _GOLDEN_VCR = "tests/integration/test_golden_decoded_vcr.py"
 _GOLDEN_EXPANSION = "tests/integration/test_golden_decoded_vcr_expansion.py"
 _COMPREHENSIVE = "tests/integration/test_vcr_comprehensive.py"
 _GAP_BACKFILL = "tests/integration/test_rpc_gap_backfill_vcr.py"
+_SUGGEST_PROMPTS_VCR = "tests/integration/test_notebooks_suggest_prompts_vcr.py"
 
 GoldenPointer = tuple[str, str]
 
@@ -206,6 +207,9 @@ GOLDEN_COVERAGE: dict[RPCMethod, tuple[GoldenPointer, ...]] = {
     RPCMethod.GET_SUGGESTED_REPORTS: (
         (_GOLDEN_EXPANSION, "TestArtifactsWriteGoldenDecoded::test_suggest_reports_decoded_golden"),
     ),
+    RPCMethod.SUGGEST_PROMPTS: (
+        (_SUGGEST_PROMPTS_VCR, "TestSuggestPromptsVCR::test_suggest_prompts_decoded_golden"),
+    ),
     RPCMethod.EXPORT_ARTIFACT: (
         (_GOLDEN_EXPANSION, "TestArtifactsWriteGoldenDecoded::test_export_report_decoded_golden"),
     ),
@@ -244,6 +248,9 @@ GOLDEN_EXEMPT: dict[RPCMethod, str] = {
     RPCMethod.DELETE_LABEL: _REASON_NONE_CONTRACT,
     RPCMethod.DELETE_CONVERSATION: _REASON_NONE_CONTRACT,
     RPCMethod.REMOVE_RECENTLY_VIEWED: _REASON_NONE_CONTRACT,
+    # ``research.cancel`` is fire-and-forget: the server returns [] (decodes to
+    # None-equivalent) and is not branched on — there is no decoded field to pin.
+    RPCMethod.CANCEL_RESEARCH: _REASON_NONE_CONTRACT,
     # ``sources.refresh`` returns None on success (v0.8.0, #1290).
     RPCMethod.REFRESH_SOURCE: _REASON_NONE_CONTRACT,
     # ``notes.update`` returns None (the UPDATE_NOTE echo is not decoded).

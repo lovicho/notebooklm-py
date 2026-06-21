@@ -8,6 +8,6 @@ NO ``click`` / ``rich`` / ``cli``.
 
 from __future__ import annotations
 
-from . import artifacts, chat, notebooks, sources
+from . import artifacts, chat, notebooks, notes, share, sources
 
-__all__ = ["artifacts", "chat", "notebooks", "sources"]
+__all__ = ["artifacts", "chat", "notebooks", "notes", "share", "sources"]
