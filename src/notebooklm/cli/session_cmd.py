@@ -14,12 +14,8 @@ auth diagnostics, and auth-source precedence. Command-side wrappers in
 exit, and async-runner seams for the Playwright and browser-cookie login
 services.
 
-Body-used names that *moved* into those services are re-imported here as
-the command layer's own bindings. A handful are also bound on the
-``notebooklm.cli.session_cmd`` namespace by tests that pre-date ADR-0008's
-services-side patching convention (e.g. ``_sync_server_language_to_config``,
-``_login_browser_cookies_single``); those names stay because they are
-referenced from this module's body.
+Body-used names that moved into services are re-imported here as command-layer
+bindings and legacy patch seams.
 """
 
 from __future__ import annotations
@@ -35,9 +31,10 @@ import httpx
 from ..exceptions import AuthError, NotebookNotFoundError
 from ..paths import get_storage_path
 
-# Render helpers live in a sibling module to keep this file small; they are
-# imported back so ``register_session_commands`` calls them through this
-# module's own namespace (see ADR-0008).
+# Cookie-JSON import helpers (split out to keep this module under the size budget).
+from ._cookie_import import _import_cookie_json, _read_auth_json_input
+
+# Render helpers stay in a sibling module; command registration calls them here.
 from ._session_render import (
     _render_auth_check_result,
     _render_auth_inspect,
@@ -62,15 +59,9 @@ from .services.auth_diagnostics import (
     plan_from_click_context,
     run_auth_check,
 )
-from .services.auth_source import AUTH_JSON_ENV_NAME, has_env_auth_json
+from .services.auth_source import AUTH_JSON_ENV_NAME, auth_source_from_ctx, has_env_auth_json
 
 # Direct imports replace the D1-PR-3-retired forwarding wrappers; see ADR-0008.
-# These names are all called from this module's body. Several also serve as
-# ``notebooklm.cli.session_cmd.*`` monkeypatch surfaces for tests that pre-date
-# ADR-0008's services-side patching convention (e.g.
-# ``_sync_server_language_to_config``, ``_login_browser_cookies_single``,
-# ``_refresh_from_browser_cookies``, ``_enumerate_browser_accounts``); those
-# patches keep working because the body-used name stays bound here.
 from .services.login import (
     _enumerate_browser_accounts,
     _login_all_accounts_from_browser,
@@ -78,9 +69,7 @@ from .services.login import (
     _refresh_from_browser_cookies,
     _sync_server_language_to_config,
 )
-from .services.login import (
-    cookie_domains as _cookie_domains,
-)
+from .services.login import cookie_domains as _cookie_domains
 from .services.login.exceptions import LoginConfigurationError
 from .services.login.outcomes import BrowserCookieOutcome, NetworkFailure
 from .services.playwright_login import (
@@ -643,6 +632,84 @@ def register_session_commands(cli):
             _render_auth_inspect_error(enum_result, json_output=json_output)
         _, accounts = enum_result
         _render_auth_inspect(browser_name, list(accounts), json_output=json_output, verbose=verbose)
+
+    @auth_group.command("import-cookies")
+    @click.argument("json_path", type=click.Path(exists=False))
+    @click.option(
+        "--include-domains",
+        "include_domains_raw",
+        multiple=True,
+        default=(),
+        help=(
+            "Opt in to persisting sibling-product cookies. Same syntax as "
+            "'notebooklm login --include-domains': youtube, docs, myaccount, "
+            "mail, all. By default, only required Google auth/Drive/NotebookLM "
+            "cookie domains are kept."
+        ),
+    )
+    @click.option(
+        "--include-optional",
+        is_flag=True,
+        default=False,
+        help="Persist all optional sibling-product cookie domains.",
+    )
+    @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+    @click.option("--quiet", "quiet", is_flag=True, help="Suppress success output")
+    @click.pass_context
+    def auth_import_cookies(
+        ctx, json_path, include_domains_raw, include_optional, json_output, quiet
+    ):
+        """Import authentication cookies from JSON and save them persistently.
+
+        Accepts either a Playwright ``storage_state`` object (``{"cookies": [...]}``)
+        or a bare JSON list of cookie objects, including JSON exported from many
+        browser-cookie tools. Use ``-`` to read JSON from stdin.
+
+        The imported cookies are filtered through the same domain allowlist used
+        by browser login, validated locally for NotebookLM-required cookies, and
+        written atomically to the active profile's ``storage_state.json`` (or the
+        root ``--storage`` override) with private file permissions.
+
+        Examples:
+          notebooklm auth import-cookies cookies.json
+          notebooklm -p work auth import-cookies playwright-storage-state.json
+          cat cookies.json | notebooklm auth import-cookies -
+        """
+        with handle_errors(json_output=json_output):
+            auth_source = auth_source_from_ctx(ctx)
+            if auth_source.has_env_auth:
+                raise click.ClickException(  # cli-input-validation: import-cookies env-auth conflict
+                    f"'auth import-cookies' is incompatible with {AUTH_JSON_ENV_NAME}. "
+                    "Unset the env var first so the imported cookies can be used "
+                    "from storage_state.json."
+                )
+
+            include_domains = _parse_include_domains(include_domains_raw)
+            storage_path = auth_source.storage_path_for_diagnostics()
+
+            imported, backup_path = _import_cookie_json(
+                payload=_read_auth_json_input(json_path),
+                storage_path=storage_path,
+                include_domains=include_domains,
+                include_optional=include_optional,
+            )
+
+            if json_output:
+                json_output_response(
+                    {
+                        "success": True,
+                        "storage_path": str(storage_path),
+                        "cookie_count": len(imported.get("cookies", [])),
+                        "backup_path": str(backup_path) if backup_path else None,
+                    }
+                )
+            elif not quiet:
+                console.print(
+                    f"[green]ok[/green] imported {len(imported.get('cookies', []))} "
+                    f"cookies to: {storage_path}"
+                )
+                if backup_path:
+                    console.print(f"[dim]previous session backed up to: {backup_path}[/dim]")
 
     @auth_group.command("check")
     @click.option(
