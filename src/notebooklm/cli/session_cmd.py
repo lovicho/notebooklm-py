@@ -23,7 +23,7 @@ from __future__ import annotations
 import functools
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import click
 import httpx
@@ -43,16 +43,22 @@ from ._session_render import (
     _render_status,
     _use_notebook_table,
 )
-from .auth_runtime import handle_auth_error, resolve_client_factory, run_client_workflow
+from .auth_runtime import (
+    auth_check_notebook_count,
+    handle_auth_error,
+    resolve_client_factory,
+    run_client_workflow,
+)
 from .context import clear_context, set_current_notebook
 from .error_handler import _output_error, exit_with_code, handle_errors
 from .playwright_login_io import (
+    _verify_token_fetch_after_refresh,
     prepare_paths_or_exit,
     repair_after_refresh,
     run_login,
     validate_flags_or_exit,
 )
-from .rendering import console, json_output_response
+from .rendering import console, json_error_response, json_output_response
 from .resolve import resolve_notebook_id
 from .runtime import run_async
 from .services.auth_diagnostics import (
@@ -96,36 +102,6 @@ async def fetch_tokens_with_domains(*args: Any, **kwargs: Any) -> Any:
     from ..auth import fetch_tokens_with_domains as auth_fetch_tokens_with_domains
 
     return await auth_fetch_tokens_with_domains(*args, **kwargs)
-
-
-async def fetch_tokens_passive(*args: Any, **kwargs: Any) -> Any:
-    """Patch-compatible forwarding wrapper for the read-only passive token fetch."""
-    from ..auth import fetch_tokens_passive as auth_fetch_tokens_passive
-
-    return await auth_fetch_tokens_passive(*args, **kwargs)
-
-
-def _verify_token_fetch_after_refresh(
-    storage_path: Path, profile: str | None, *, quiet: bool
-) -> None:
-    """Confirm a token fetch actually succeeds after ``auth refresh``.
-
-    Runs the strictly read-only passive probe (no NOTEBOOKLM_REFRESH_CMD, no
-    cookie rotation, no write). A successful ``auth refresh`` — especially the
-    ``--browser-cookies`` rewrite — does not by itself prove the resulting
-    cookies authenticate; ``--verify`` makes that an explicit, fail-loud gate
-    so unattended schedulers can rely on the exit code (issue #1569).
-    """
-    try:
-        run_async(fetch_tokens_passive(storage_path, profile))
-    except Exception as exc:  # noqa: BLE001 — surface any failure as a clean exit 1
-        click.echo(
-            f"Error: refresh completed but the post-refresh token fetch failed: {exc}",
-            err=True,
-        )
-        exit_with_code(1)
-    if not quiet:
-        console.print("[green]ok[/green] verified: token fetch succeeds after refresh")
 
 
 def _click_exception_from(exc: LoginConfigurationError) -> click.ClickException:
@@ -234,7 +210,8 @@ def register_session_commands(cli):
         default=None,
         help=(
             "Pick a signed-in Google account by email when several are present "
-            "in the browser. Only valid with --browser-cookies."
+            "in the browser. Required with --master-token; otherwise only valid "
+            "with --browser-cookies."
         ),
     )
     @click.option(
@@ -290,6 +267,51 @@ def register_session_commands(cli):
             "labels: youtube, docs, myaccount, mail, all."
         ),
     )
+    @click.option(
+        "--master-token",
+        "master_token",
+        is_flag=True,
+        default=False,
+        help=(
+            "Headless auth: bootstrap a durable Google master token (one browser "
+            "sign-in), then mint web cookies from it with no per-session browser. "
+            "Requires --account EMAIL. Needs pip install 'notebooklm-py[headless]'; "
+            "the browser oauth_token capture also needs [browser] — or skip it by "
+            "passing --oauth-token. See docs/installation.md#headless."
+        ),
+    )
+    @click.option(
+        "--master-token-refresh",
+        "master_token_refresh",
+        is_flag=True,
+        default=False,
+        help="Re-mint web cookies from the stored master token (no prompt). For recovery / cron.",
+    )
+    @click.option(
+        "--oauth-token",
+        "oauth_token",
+        default=None,
+        help="Single-use EmbeddedSetup oauth_token for --master-token (else captured via browser).",
+    )
+    @click.option(
+        "--android-id",
+        "android_id",
+        default=None,
+        help="Override the per-install Android id for --master-token (default: generated/persisted).",
+    )
+    @click.option(
+        "--cdp-url",
+        "cdp_url",
+        default=None,
+        help="Attach oauth_token capture to a running Chrome via CDP (e.g. http://localhost:9222).",
+    )
+    @click.option(
+        "--force",
+        "force",
+        is_flag=True,
+        default=False,
+        help="With --master-token: overwrite even if the profile belongs to a different account.",
+    )
     @click.pass_context
     def login(
         ctx,
@@ -302,6 +324,12 @@ def register_session_commands(cli):
         profile_name,
         fresh,
         include_domains_raw,
+        master_token,
+        master_token_refresh,
+        oauth_token,
+        android_id,
+        cdp_url,
+        force,
     ):
         """Log in to NotebookLM via browser.
 
@@ -329,6 +357,22 @@ def register_session_commands(cli):
                     f"  2. Continue using {AUTH_JSON_ENV_NAME} for authentication"
                 )
                 exit_with_code(1)
+
+            if master_token or master_token_refresh:
+                from .master_token_login import run_master_token_login
+
+                run_master_token_login(
+                    ctx,
+                    storage=storage,
+                    browser=browser,
+                    account_email=account_email,
+                    oauth_token=oauth_token,
+                    android_id=android_id,
+                    cdp_url=cdp_url,
+                    refresh=master_token_refresh,
+                    force=force,
+                )
+                return
 
             validate_flags_or_exit(
                 browser_cookies=browser_cookies,
@@ -527,9 +571,17 @@ def register_session_commands(cli):
         _render_status(report, json_output=json_output)
 
     @cli.command("clear")
-    def clear_cmd():
+    @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+    def clear_cmd(json_output):
         """Clear current notebook context."""
-        clear_context()
+        cleared = clear_context()
+        if json_output:
+            # Preserve the actual outcome so automation can tell a real clear
+            # from a no-op (the text path stays idempotent for humans).
+            json_output_response(
+                {"status": "cleared" if cleared else "already_clear", "cleared": cleared}
+            )
+            return
         console.print("[green]Context cleared[/green]")
 
     @cli.group("auth")
@@ -538,8 +590,9 @@ def register_session_commands(cli):
         pass
 
     @auth_group.command("logout")
+    @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
     @click.pass_context
-    def auth_logout(ctx):
+    def auth_logout(ctx, json_output):
         """Log out by clearing saved authentication.
 
         Removes both the saved cookie file (storage_state.json) and the
@@ -553,7 +606,7 @@ def register_session_commands(cli):
           notebooklm --storage A.json auth logout      # Clear the override auth file
         """
         outcome = execute_logout(ctx)
-        _render_logout_outcome(outcome)
+        _render_logout_outcome(outcome, json_output=json_output)
 
     @auth_group.command("inspect")
     @click.option(
@@ -762,6 +815,19 @@ def register_session_commands(cli):
             ctx, test_fetch=test_fetch, json_output=json_output, passive=passive
         )
         result = run_async(run_auth_check(plan))
+
+        # Live notebook count: a "the API really accepts this session" signal
+        # beyond the homepage token round-trip. Computed here (not in the neutral
+        # core, which never opens a client) and only when the token fetch already
+        # passed. Skipped for --passive: opening a client may rotate/persist
+        # cookies, which the read-only contract (issue #1569) forbids.
+        if test_fetch and not passive and result.checks["token_fetch"] is True:
+            # cli-rpc-unenveloped: the notebook count is a best-effort liveness
+            # probe whose failures degrade to null, so this RPC must NOT route
+            # through the error envelope (a failed count must not fail the auth
+            # check or hijack its exit code).
+            result.details["notebook_count"] = auth_check_notebook_count(ctx)
+
         _render_auth_check_result(result)
 
     @auth_group.command("refresh")
@@ -802,8 +868,9 @@ def register_session_commands(cli):
             "passive probe). Exit non-zero if the post-refresh cookies still fail."
         ),
     )
+    @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
     @click.pass_context
-    def auth_refresh(ctx, browser_cookies, include_domains_raw, quiet, verify):
+    def auth_refresh(ctx, browser_cookies, include_domains_raw, quiet, verify, json_output):
         """Refresh stored cookies by exercising the auth path once or reading browser cookies.
 
         Default mode is a one-shot keepalive: opens a session, runs the
@@ -844,26 +911,44 @@ def register_session_commands(cli):
         See docs/troubleshooting.md ("Cookie freshness for long-running /
         unattended use") for launchd / systemd / cron recipes.
         """
-        with handle_errors():
+
+        def _fail(code: str, message: str) -> NoReturn:
+            # --json -> envelope on stdout (NoReturn); else human stderr. Both exit 1.
+            if json_output:
+                json_error_response(code, message)
+            click.echo(f"Error: {message}", err=True)
+            exit_with_code(1)
+
+        with handle_errors(json_output=json_output):
             if has_env_auth_json():
-                click.echo(
-                    f"Error: 'auth refresh' is incompatible with {AUTH_JSON_ENV_NAME}. "
+                _fail(
+                    "auth_json_env_conflict",
+                    f"'auth refresh' is incompatible with {AUTH_JSON_ENV_NAME}. "
                     "The keepalive needs a writable storage_state.json to persist "
                     "rotated cookies. Either unset the env var for this "
                     "process and use a profile-backed storage file, or arrange for "
                     "the env var to be refreshed externally.",
-                    err=True,
                 )
-                exit_with_code(1)
 
             include_domains = _parse_include_domains(include_domains_raw)
             if include_domains and browser_cookies is None:
-                click.echo(
-                    "Error: --include-domains only applies when --browser-cookies "
+                _fail(
+                    "include_domains_without_browser_cookies",
+                    "--include-domains only applies when --browser-cookies "
                     "is also set (the keepalive-only path does not re-extract cookies).",
-                    err=True,
                 )
-                exit_with_code(1)
+
+            # --json is keepalive-only (--browser-cookies prints to stdout) — refuse.
+            if json_output and browser_cookies is not None:
+                _fail(
+                    "json_unsupported_with_browser_cookies",
+                    "--json is not supported with --browser-cookies; use the "
+                    "default keepalive refresh with --json instead.",
+                )
+
+            # --json suppresses human status lines (like --quiet); a verify failure
+            # emits the error envelope on stdout in --json mode, else on stderr.
+            quiet = quiet or json_output
 
             profile = ctx.obj.get("profile") if ctx.obj else None
             storage_path = get_storage_path(profile=profile)
@@ -890,7 +975,14 @@ def register_session_commands(cli):
                     console.print(f"[green]ok[/green] refreshed: {storage_path}")
 
             if verify:
-                _verify_token_fetch_after_refresh(storage_path, profile, quiet=quiet)
+                _verify_token_fetch_after_refresh(
+                    storage_path, profile, quiet=quiet, json_output=json_output
+                )
+
+            if json_output:
+                json_output_response(
+                    {"status": "ok", "storage_path": str(storage_path), "verified": verify}
+                )
 
 
 # Backward-compat constant kept at module scope for tests that import it

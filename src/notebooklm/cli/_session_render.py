@@ -15,7 +15,7 @@ from rich.markup import render as render_markup
 from rich.table import Table
 
 from .error_handler import _output_error, exit_with_code
-from .rendering import console, json_output_response
+from .rendering import console, json_error_response, json_output_response
 from .services.auth_diagnostics import AuthCheckResult
 from .services.auth_source import AUTH_JSON_ENV_NAME
 from .services.login.outcomes import BrowserCookieOutcome
@@ -140,7 +140,7 @@ def _render_status(report: StatusReport, *, json_output: bool) -> None:
     console.print(table)
 
 
-def _render_logout_outcome(outcome: LogoutOutcome) -> None:
+def _render_logout_outcome(outcome: LogoutOutcome, *, json_output: bool = False) -> None:
     """Render a :class:`LogoutOutcome` and apply its exit policy.
 
     Owns the presentation + exit policy for the ``run_logout`` flow,
@@ -148,7 +148,32 @@ def _render_logout_outcome(outcome: LogoutOutcome) -> None:
     :class:`OSError` failures, prints the diagnostic and then exits 1; on
     success prints either the green "Logged out." line or the yellow
     "No active session found." no-op line and returns normally.
+
+    With ``json_output`` the same outcomes are emitted as a single JSON
+    document (success) or the ``{"error": true, ...}`` envelope (failure,
+    exit 1) so automation can consume the result.
     """
+    if json_output:
+        failure = outcome.failure
+        # ``json_error_response`` is NoReturn (exits 1); the explicit ``else``
+        # makes it structurally impossible to emit both the error envelope and
+        # the success payload — one JSON document per invocation, always.
+        if failure is not None:
+            json_error_response(
+                f"logout_{failure.kind}_failed",
+                failure.error_message,
+                {"path": str(failure.path), "env_auth_remains": outcome.env_auth_remains},
+            )
+        else:
+            json_output_response(
+                {
+                    "status": "logged_out" if outcome.removed_any else "already_logged_out",
+                    "removed": outcome.removed_any,
+                    "env_auth_remains": outcome.env_auth_remains,
+                }
+            )
+        return
+
     if outcome.env_auth_remains:
         console.print(
             f"[yellow]Note: {AUTH_JSON_ENV_NAME} is set — env-based auth will "
@@ -203,13 +228,24 @@ def _render_auth_check_result(result: AuthCheckResult) -> None:
     details = result.details
 
     if plan.json_output:
-        json_output_response(
-            {
-                "status": "ok" if all_passed else "error",
-                "checks": checks,
-                "details": details,
-            }
-        )
+        # Promote the identity/location facts to top-level keys for CI gates
+        # (the same values the Rich table shows — sourced from one ``details``
+        # so the two surfaces can't disagree, issue #1640). ``notebook_count`` is
+        # only meaningful with --test, so it is emitted only then (null if the
+        # probe could not run).
+        payload = {
+            "status": "ok" if all_passed else "error",
+            "account": details.get("account"),
+            "profile": details.get("profile"),
+            "storage_path": details.get("storage_path"),
+            "master_token": details.get("master_token"),
+            "psidts": details.get("psidts"),
+            "checks": checks,
+            "details": details,
+        }
+        if plan.test_fetch:
+            payload["notebook_count"] = details.get("notebook_count")
+        json_output_response(payload)
         if not all_passed:
             exit_with_code(1)
         return
@@ -224,6 +260,46 @@ def _render_auth_check_result(result: AuthCheckResult) -> None:
         if val is None:
             return "[dim]⊘ skipped[/dim]"
         return "[green]✓ pass[/green]" if val else "[red]✗ fail[/red]"
+
+    # Identity + location rows (mirror the --json top-level fields). Present only
+    # once the storage JSON parsed; ``account`` is the sentinel for that.
+    if "account" in details:
+        account = details["account"] or {}
+        email = account.get("email")
+        account_text = (
+            f"{email} (authuser {account.get('authuser', 0)})" if email else "[dim]unknown[/dim]"
+        )
+        table.add_row("Account", "", account_text)
+        table.add_row("Profile", "", details.get("profile") or "[dim]default[/dim]")
+        table.add_row("Storage", "", details.get("storage_path", ""))
+
+        master = details.get("master_token") or {}
+        mt_path = master.get("path")
+        if master.get("present"):
+            mt_account = master.get("account")
+            mt_text = mt_path or ""
+            if mt_account:
+                mt_text = f"{mt_text} (account: {mt_account})"
+            table.add_row("Master token", "[green]✓ present[/green]", mt_text)
+        else:
+            # Name where we looked (matches the --json master_token.path), so the
+            # diagnostic is actionable even when the file is absent.
+            absent = f"[dim]not present ({mt_path})[/dim]" if mt_path else "[dim]not present[/dim]"
+            table.add_row("Master token", "", absent)
+
+        psidts = details.get("psidts") or {}
+        expires_at = psidts.get("expires_at")
+        # ``expires_at`` is None for a genuine session cookie AND for a corrupt /
+        # unreadable epoch — "no expiry recorded" is accurate for both and avoids
+        # mislabeling an unparseable cookie as session-scoped.
+        psidts_detail = f"expires {expires_at}" if expires_at else "no expiry recorded"
+        table.add_row(
+            # Literal duplicated rather than imported — cli/ must not import
+            # notebooklm._* privates (CLI-boundary gate).
+            "__Secure-1PSIDTS",
+            status_icon(bool(psidts.get("present"))),
+            psidts_detail if psidts.get("present") else "",
+        )
 
     table.add_row(
         "Storage exists",
@@ -246,6 +322,13 @@ def _render_auth_check_result(result: AuthCheckResult) -> None:
         status_icon(checks["token_fetch"]),
         "use --test to check" if checks["token_fetch"] is None else "",
     )
+    if plan.test_fetch:
+        count = details.get("notebook_count")
+        table.add_row(
+            "Notebooks",
+            "",
+            str(count) if count is not None else "[dim]n/a[/dim]",
+        )
 
     console.print(table)
 
