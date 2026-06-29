@@ -23,9 +23,10 @@ than imported from ``cli/_download_specs.py``.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastmcp import Context
 from fastmcp.server.dependencies import get_http_request
@@ -40,32 +41,16 @@ from ..._app.language import is_supported_language
 from ..._app.serialize import to_jsonable
 from ...exceptions import ValidationError
 from ...types import ArtifactType
+from .._coerce import coerce_list
 from .._confirm import READ_ONLY
 from .._context import get_client, get_file_transfer
 from .._errors import mcp_errors
 from .._filelink import DOWNLOAD_TTL, FileTransferConfig
-from .._resolve import resolve_notebook
+from .._resolve import resolve_notebook, resolve_source
 from ._passthrough import passthrough_notebook_id
 
 if TYPE_CHECKING:
     from ...client import NotebookLMClient
-
-#: The generation kinds an agent may request via ``artifact_generate``. Mirrors
-#: the neutral ``generate`` core's :data:`~notebooklm._app.generate.GenerationKind`
-#: (minus ``revise-slide``, which mutates an existing slide deck rather than
-#: producing a fresh artifact — not a from-scratch generation).
-_GENERATE_TYPES = (
-    "audio",
-    "video",
-    "cinematic-video",
-    "slide-deck",
-    "quiz",
-    "flashcards",
-    "infographic",
-    "data-table",
-    "mind-map",
-    "report",
-)
 
 #: Per-kind default option values mirroring the CLI ``generate`` Click ``Choice``
 #: defaults, so a bare ``artifact_generate(notebook, type=…)`` succeeds without
@@ -84,18 +69,81 @@ _KIND_DEFAULTS: dict[str, dict[str, Any]] = {
     "report": {"report_format": "briefing-doc"},
 }
 
-#: Accepted values for the agent-facing per-kind options. Validated up front so a
-#: bad choice surfaces as a clean ``VALIDATION`` error rather than a raw
-#: ``KeyError`` from a generate-core display-name lookup that runs before its own
-#: choice validation (the CLI never hits this because Click validates the
-#: ``Choice`` first; the neutral core's per-kind validation is incomplete for
-#: ``report_format``). The agent may still pass any of these by keyword.
-_OPTION_CHOICES: dict[str, tuple[str, ...]] = {
-    "report_format": ("briefing-doc", "study-guide", "blog-post", "custom"),
-    "audio_format": ("deep-dive", "brief", "critique", "debate"),
-    "audio_length": ("short", "default", "long"),
-    "quantity": ("fewer", "standard", "more"),
-    "difficulty": ("easy", "medium", "hard"),
+#: Per-kind agent-settable options → their accepted choices. ``None`` choices mean
+#: free text (only ``style_prompt``). This single table drives all three things the
+#: agent-facing override path needs:
+#:
+#: * **Choice validation** up front, so a bad value surfaces as a clean ``VALIDATION``
+#:   error rather than a raw ``KeyError`` from a generate-core display-name lookup that
+#:   runs before its own choice validation (the CLI never hits this — Click validates
+#:   the ``Choice`` first).
+#: * **The ``style`` collision** — ``video`` and ``infographic`` both take a ``style``
+#:   kwarg but with DIFFERENT choice sets (overlapping only on ``auto``/``anime``/
+#:   ``kawaii``); keying choices by ``artifact_type`` keeps them apart.
+#: * **Wrong-kind rejection** — an option valid for some other kind (e.g. ``orientation``
+#:   passed to ``quiz``) is rejected here, because the neutral core silently *ignores*
+#:   irrelevant extras (``build_generation_plan`` "picks the relevant subset"), which
+#:   would otherwise be a confusing silent no-op for an agent.
+#:
+#: The literal choice tuples are DUPLICATED from the neutral core's private ``_*_MAP``
+#: maps (MCP must not import them — the CLI/MCP boundary rule); a guardrail test pins
+#: these tuples equal to the core maps so they can't silently drift. ``map_kind`` has no
+#: core map (the core reads it raw and any non-``interactive`` value routes note-backed),
+#: so it is validated here ONLY.
+_KIND_OPTIONS: dict[str, dict[str, tuple[str, ...] | None]] = {
+    "audio": {
+        "audio_format": ("deep-dive", "brief", "critique", "debate"),
+        "audio_length": ("short", "default", "long"),
+    },
+    "video": {
+        "video_format": ("explainer", "brief", "cinematic"),
+        "style": (
+            "auto",
+            "custom",
+            "classic",
+            "whiteboard",
+            "kawaii",
+            "anime",
+            "watercolor",
+            "retro-print",
+            "heritage",
+            "paper-craft",
+        ),
+        "style_prompt": None,
+    },
+    "cinematic-video": {},
+    "slide-deck": {
+        "deck_format": ("detailed", "presenter"),
+        "deck_length": ("default", "short"),
+    },
+    "quiz": {
+        "quantity": ("fewer", "standard", "more"),
+        "difficulty": ("easy", "medium", "hard"),
+    },
+    "flashcards": {
+        "quantity": ("fewer", "standard", "more"),
+        "difficulty": ("easy", "medium", "hard"),
+    },
+    "infographic": {
+        "orientation": ("landscape", "portrait", "square"),
+        "detail": ("concise", "standard", "detailed"),
+        "style": (
+            "auto",
+            "sketch-note",
+            "professional",
+            "bento-grid",
+            "editorial",
+            "instructional",
+            "bricks",
+            "clay",
+            "anime",
+            "kawaii",
+            "scientific",
+        ),
+    },
+    "data-table": {},
+    "mind-map": {"map_kind": ("interactive", "note-backed")},
+    "report": {"report_format": ("briefing-doc", "study-guide", "blog-post", "custom")},
 }
 
 #: Download type registry, rebuilt from the neutral ``_app.download`` types so this
@@ -301,8 +349,19 @@ def register(mcp: Any) -> None:
     async def artifact_generate(
         ctx: Context,
         notebook: str,
-        artifact_type: str,
-        source_ids: list[str] | None = None,
+        artifact_type: Literal[
+            "audio",
+            "video",
+            "cinematic-video",
+            "slide-deck",
+            "quiz",
+            "flashcards",
+            "infographic",
+            "data-table",
+            "mind-map",
+            "report",
+        ],
+        source_ids: list[str] | str | None = None,
         instructions: str = "",
         language: str | None = None,
         report_format: str | None = None,
@@ -310,6 +369,14 @@ def register(mcp: Any) -> None:
         audio_length: str | None = None,
         quantity: str | None = None,
         difficulty: str | None = None,
+        video_format: str | None = None,
+        style: str | None = None,
+        style_prompt: str | None = None,
+        deck_format: str | None = None,
+        deck_length: str | None = None,
+        orientation: str | None = None,
+        detail: str | None = None,
+        map_kind: str | None = None,
     ) -> dict[str, Any]:
         """Start generating a studio artifact. Accepts a notebook name or ID.
 
@@ -321,71 +388,128 @@ def register(mcp: Any) -> None:
 
         * ``audio``        — podcast-style overview (``audio_format``:
           deep-dive|brief|critique|debate, ``audio_length``: short|default|long).
-        * ``video`` / ``cinematic-video`` — video overview.
-        * ``slide-deck``   — slide deck.
+        * ``video``        — video overview (``video_format``:
+          explainer|brief|cinematic, ``style``: auto|custom|classic|whiteboard|
+          kawaii|anime|watercolor|retro-print|heritage|paper-craft, ``style_prompt``:
+          free-text custom-style prompt — requires ``style=custom``).
+        * ``cinematic-video`` — AI-generated documentary video (no per-kind options).
+        * ``slide-deck``   — slide deck (``deck_format``: detailed|presenter,
+          ``deck_length``: default|short).
         * ``quiz`` / ``flashcards`` — study aids (``quantity``:
           fewer|standard|more, ``difficulty``: easy|medium|hard).
-        * ``infographic``  — single-image infographic.
-        * ``data-table``   — extracted data table.
-        * ``mind-map``     — interactive mind map.
+        * ``infographic``  — single-image infographic (``orientation``:
+          landscape|portrait|square, ``detail``: concise|standard|detailed,
+          ``style``: auto|sketch-note|professional|bento-grid|editorial|
+          instructional|bricks|clay|anime|kawaii|scientific).
+        * ``data-table``   — extracted data table (no per-kind options).
+        * ``mind-map``     — mind map (``map_kind``: interactive|note-backed).
         * ``report``       — text report (``report_format``:
           briefing-doc|study-guide|blog-post|custom).
 
-        Only the options listed above are agent-controllable: ``audio``
-        (``audio_format``/``audio_length``), ``quiz``/``flashcards``
-        (``quantity``/``difficulty``), and ``report`` (``report_format``). The
-        other kinds — ``video``, ``cinematic-video``, ``slide-deck``,
-        ``infographic``, ``data-table``, and ``mind-map`` — use FIXED internal
-        defaults for their per-kind options (video format/style, deck
-        format/length, infographic orientation/detail, mind-map kind) and do NOT
-        expose them as settable parameters.
+        Each per-kind option is valid ONLY for the kind(s) listed above; passing one
+        to a different ``artifact_type`` (e.g. ``orientation`` to ``quiz``) is a
+        validation error rather than a silent no-op. Options default to the standard
+        choice when omitted. Note ``style`` is shared by ``video`` and ``infographic``
+        but accepts each kind's own set of values.
 
         ``source_ids`` (optional) scopes generation to specific sources; omit it
-        to use every source. ``instructions`` is free-text guidance for kinds
-        that accept it. Each agent-controllable option defaults to the standard
-        choice when omitted.
+        to use every source. It accepts a real list, a JSON-array string, or a
+        comma-separated string (the comma form cannot carry a source title that
+        itself contains a comma — use a JSON array or a real list for those).
+        ``instructions`` is free-text guidance for kinds that accept it
+        (including ``mind-map``).
         """
         client = get_client(ctx)
         with mcp_errors():
-            if artifact_type not in _GENERATE_TYPES:
-                raise ValidationError(
-                    f"Unknown artifact type {artifact_type!r}; "
-                    f"expected one of {list(_GENERATE_TYPES)}"
-                )
+            # Tolerate ``source_ids`` sent as a JSON-array string / comma string /
+            # scalar (some MCP clients + LLM tool-callers do); normalize to a
+            # ``list[str]`` up front. ``None`` stays ``None`` (=> all sources, the
+            # #1652 contract); ``""``/``[]`` collapse to all sources downstream.
+            source_ids = coerce_list(source_ids)
+            # ``artifact_type`` is a Literal — FastMCP/Pydantic rejects an unknown
+            # kind at the schema boundary, so no runtime membership check is needed.
             # Validate ``language`` up front: the neutral generate core's default
             # language resolver returns the raw string unchecked (the CLI
             # validates via SUPPORTED_LANGUAGES first), so a bad code would be
             # forwarded raw to the backend. Fail with a clean VALIDATION instead.
             if language is not None and not is_supported_language(language):
                 raise ValidationError(f"Unsupported language {language!r}")
-            nb_id = await resolve_notebook(client, notebook)
-            raw_args: dict[str, Any] = dict(_KIND_DEFAULTS[artifact_type])
-            raw_args.update(
-                {
-                    "notebook_id": nb_id,
-                    "description": instructions or "",
-                    "source_ids": tuple(source_ids or ()),
-                    "language": language,
-                    "wait": False,
-                    "json_output": True,
-                }
-            )
-            # Apply caller-supplied per-kind overrides over the defaults,
-            # validating each against its choice set first.
+
+            # Validate caller-supplied per-kind overrides FIRST — before resolving the
+            # notebook — so a wrong-kind or invalid option fails fast without a wasted
+            # notebook-resolution round-trip. Each option is validated against the choice
+            # set for THIS ``artifact_type`` (see ``_KIND_OPTIONS``): an option not accepted
+            # by this kind is rejected (the core would otherwise silently ignore it), and a
+            # bad value surfaces a clean VALIDATION error. ``style_prompt`` (choices
+            # ``None``) is free text — the core enforces the ``style=custom`` ⇔
+            # ``style_prompt`` combination rules.
+            allowed = _KIND_OPTIONS[artifact_type]
+            overrides: dict[str, Any] = {}
             for key, value in (
                 ("report_format", report_format),
                 ("audio_format", audio_format),
                 ("audio_length", audio_length),
                 ("quantity", quantity),
                 ("difficulty", difficulty),
+                ("video_format", video_format),
+                ("style", style),
+                ("style_prompt", style_prompt),
+                ("deck_format", deck_format),
+                ("deck_length", deck_length),
+                ("orientation", orientation),
+                ("detail", detail),
+                ("map_kind", map_kind),
             ):
-                if value is not None:
-                    choices = _OPTION_CHOICES[key]
-                    if value not in choices:
-                        raise ValidationError(
-                            f"Invalid {key} {value!r}; expected one of {list(choices)}"
-                        )
-                    raw_args[key] = value
+                if value is None:
+                    continue
+                if key not in allowed:
+                    accepts = (
+                        f"this kind accepts {sorted(allowed)}"
+                        if allowed
+                        else "this kind accepts no per-kind options"
+                    )
+                    raise ValidationError(
+                        f"option {key!r} is not valid for artifact_type {artifact_type!r}; "
+                        f"{accepts}"
+                    )
+                choices = allowed[key]
+                if choices is not None and value not in choices:
+                    raise ValidationError(
+                        f"Invalid {key} {value!r}; expected one of {list(choices)}"
+                    )
+                overrides[key] = value
+
+            nb_id = await resolve_notebook(client, notebook)
+            # Resolve each source ref the same way every other source-accepting tool
+            # does (full-UUID fast-path, 12-char prefix, exact title) instead of
+            # forwarding raw — so an agent that passed a prefix/title (the style that
+            # works elsewhere) or an empty string gets it validated/resolved, not
+            # forwarded to the backend. Omitted/empty stays None (= all sources, #1652).
+            resolved_source_ids = (
+                list(
+                    await asyncio.gather(
+                        *(resolve_source(client, nb_id, ref) for ref in source_ids)
+                    )
+                )
+                if source_ids
+                else None
+            )
+            raw_args: dict[str, Any] = dict(_KIND_DEFAULTS[artifact_type])
+            raw_args.update(
+                {
+                    "notebook_id": nb_id,
+                    "description": instructions or "",
+                    # ``mind-map`` reads ``raw_args["instructions"]`` (every other kind
+                    # reads ``description``); set it so mind-map instructions actually
+                    # reach the client — the extra key is ignored by the other builders.
+                    "instructions": instructions or None,
+                    "source_ids": tuple(resolved_source_ids or ()),
+                    "language": language,
+                    "wait": False,
+                    "json_output": True,
+                }
+            )
+            raw_args.update(overrides)
 
             plan = generate_core.build_generation_plan(artifact_type, raw_args)
             result = await generate_core.execute_generation(
@@ -415,7 +539,17 @@ def register(mcp: Any) -> None:
     async def artifact_download(
         ctx: Context,
         notebook: str,
-        artifact_type: str,
+        artifact_type: Literal[
+            "audio",
+            "video",
+            "slide-deck",
+            "infographic",
+            "report",
+            "mind-map",
+            "data-table",
+            "quiz",
+            "flashcards",
+        ],
         path: str | None = None,
         output_format: str | None = None,
     ) -> Any:

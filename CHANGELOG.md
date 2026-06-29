@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Live-API e2e coverage for the MCP server and the CLI binary.** The nightly
+  E2E job now installs `--extra mcp`, so the MCP/CLI layers run against the real
+  NotebookLM API once per release instead of being silently `importorskip`-ped.
+  New suites: per-domain MCP tool round-trips plus a 26-tool→test matrix
+  (`tests/e2e/test_mcp.py`); the HTTP transport, bearer gate, `.well-known`
+  discovery, and signed-URL upload/download routes driven in-process over
+  `httpx.ASGITransport` (`tests/e2e/test_mcp_http.py`); live-only contract
+  checks — the `source_ids` omitted-`==`-`[]`-`==`-all collapse (#1652),
+  not-found resolution, destructive confirm-gating, and the MCP error shape
+  (`tests/e2e/test_mcp_contracts.py`); and a CLI-binary `--json` smoke including
+  stdout-purity on a live failure (`tests/e2e/test_cli_live.py`). A standalone
+  `scripts/mcp_live_smoke.py` runs the upload+download round-trip against a
+  deployed server (PASS/FAIL) to bootstrap the new per-release manual
+  "MCP connector smoke" checklist in `docs/releasing.md`.
 - **Remote MCP file upload & download** (ADR-0024). Over the remote (HTTP)
   connector — where the claude.ai browser can't carry the MCP credential and the
   JSON-RPC channel can't carry bytes — `source_add type=file` and
@@ -142,6 +156,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **MCP `source_wait` now returns one unified per-source aggregate** (#1669).
+  Both modes — waiting for a single `source` or for every source in the notebook
+  — return the same shape: `{notebook_id, ok, ready, timed_out, failed,
+  not_found}`. `ready` carries the sources that reached READY (with
+  `kind`/`status_label` labels); the three error buckets carry
+  `{source_id, error}` entries; `ok` is `true` iff all error buckets are empty.
+  Previously the single-source mode returned `{status: ready|not_found|failed|
+  timeout}` while the all-sources mode **threw on the first failure and discarded
+  every source that had already become ready** — the all-sources mode now reports
+  **partial progress** instead. (A `source` reference that does not resolve still
+  raises NOT_FOUND before the wait — an input error, distinct from a resolved
+  source the backend reports missing/failed/slow.)
 - **Regenerable test baselines (Phase 1; contributor-facing, no public API
   change).** Frozen public-surface snapshots that were hand-typed copies of
   values the code already derives — `_FROZEN_TYPES_ALL` and

@@ -236,12 +236,20 @@ conversation unless you pass a `conversation_id`.
 task = artifact_generate(notebook="Quantum Computing", artifact_type="audio")
 artifact_status(notebook="Quantum Computing", task_id="<task_id from above>")   # poll until complete
 artifact_download(notebook="Quantum Computing", artifact_type="audio", path="podcast.mp3")
+
+# Per-kind styling options are agent-settable, e.g. a custom-styled video:
+artifact_generate(notebook="Quantum Computing", artifact_type="video",
+                  style="custom", style_prompt="hand-drawn diagrams")
 ```
 
 `artifact_type` is one of `audio`, `video`, `cinematic-video`, `slide-deck`, `quiz`, `flashcards`,
-`infographic`, `data-table`, `mind-map`, `report`. Agent-settable options are `audio_format` /
-`audio_length` (audio), `quantity` / `difficulty` (quiz, flashcards), and `report_format` (report);
-the other kinds use fixed defaults.
+`infographic`, `data-table`, `mind-map`, `report`. Each kind's styling options are agent-settable
+(matching the CLI flags): `audio_format` / `audio_length` (audio); `video_format` / `style` /
+`style_prompt` (video); `deck_format` / `deck_length` (slide-deck); `quantity` / `difficulty`
+(quiz, flashcards); `orientation` / `detail` / `style` (infographic); `map_kind` (mind-map);
+and `report_format` (report). `cinematic-video` and `data-table` take no per-kind options. An
+option is valid only for its own kind — passing one to a different `artifact_type` is a
+validation error, not a silent no-op.
 
 ### Run deep research and import the findings
 
@@ -261,8 +269,8 @@ a single in-flight task.
 | Domain | Tools |
 |--------|-------|
 | **Notebooks** | `notebook_list` · `notebook_create(title)` · `notebook_describe(notebook)` · `notebook_rename(notebook, new_title)` · `notebook_delete(notebook, confirm)` |
-| **Sources** | `source_list(notebook)` · `source_get_content(notebook, source)` · `source_rename(notebook, source, new_title)` · `source_delete(notebook, source, confirm)` · `source_wait(notebook, source?, timeout, interval)` · `source_add(notebook, source_type, ..., allow_internal?)` |
-| **Chat** | `chat_ask(notebook, question, conversation_id?)` · `chat_configure(notebook, goal?, response_length?)` |
+| **Sources** | `source_list(notebook)` (each source has string `kind`/`status_label`) · `source_get_content(notebook, source, output_format?, max_chars?, offset?)` (metadata **+ full indexed text**, windowable via `max_chars`/`offset` → `content` slice + `truncated` flag, with full `char_count`; `output_format`: text\|markdown) · `source_rename(notebook, source, new_title)` · `source_delete(notebook, source, confirm)` · `source_wait(notebook, source?, timeout, interval)` · `source_add(notebook, source_type, ..., allow_internal?)` |
+| **Chat** | `chat_ask(notebook, question, conversation_id?, references?, source_ids?)` (`references`: lite\|full; never returns the raw debug blob; `source_ids` scopes to specific sources — list, JSON-array string, or comma string; omit for all) · `chat_configure(notebook, goal?, response_length?)` |
 | **Notes** | `note_create(notebook, title, content)` · `note_list(notebook)` · `note_update(notebook, note, content)` · `note_delete(notebook, note, confirm)` |
 | **Artifacts** | `artifact_list(notebook)` · `artifact_generate(notebook, artifact_type, …)` · `artifact_status(notebook, task_id)` · `artifact_download(notebook, artifact_type, path, output_format?)` |
 | **Research** | `research_start(notebook, query, source, mode)` · `research_status(notebook, task_id?)` · `research_import(notebook, task_id)` |

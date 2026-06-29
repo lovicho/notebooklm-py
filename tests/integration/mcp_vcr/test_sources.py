@@ -14,9 +14,9 @@ Tools covered and the cassette each replays:
   ``sources_add_file.yaml`` (``ADD_SOURCE_FILE`` → ``o4cbdc`` + upload POSTs);
   ``drive`` over ``sources_add_drive.yaml`` (``ADD_SOURCE`` → ``izAoDd``).
 * ``source_rename`` over ``sources_rename.yaml`` (``UPDATE_SOURCE`` → ``b7Wfje``).
-* ``source_get_content`` over ``sources_get_fulltext.yaml`` — only the leading
-  ``GET_NOTEBOOK`` (``rLM1Ne``) is consumed (``execute_source_get`` filters the
-  source list); the trailing ``hizoJc`` interaction is left unplayed.
+* ``source_get_content`` over ``sources_get_fulltext.yaml`` — consumes BOTH the
+  leading ``GET_NOTEBOOK`` (``rLM1Ne``, metadata via ``execute_source_get``) and
+  the trailing ``hizoJc`` (``GET_SOURCE``, full text via ``execute_source_fulltext``).
 * ``source_wait`` (single + all) over ``sources_list.yaml`` — the poller probes
   source status via the same ``GET_NOTEBOOK`` list, and every recorded source is
   already ``READY`` so it resolves on the first poll.
@@ -73,7 +73,7 @@ RENAME_ECHOED_SOURCE_ID = "b1b9efdd-b2af-4974-ad97-16025c05f1d7"
 RENAME_ECHOED_TITLE = "VCR Test Renamed Source"
 
 # ``sources_get_fulltext.yaml`` GET_NOTEBOOK was recorded against this notebook;
-# ``source_get_content`` consumes only that leading ``rLM1Ne`` interaction.
+# ``source_get_content`` consumes its ``rLM1Ne`` (metadata) + ``hizoJc`` (full text).
 GET_CONTENT_NOTEBOOK_ID = "167481cd-23a3-4331-9a45-c8948900bf91"
 
 
@@ -349,14 +349,14 @@ async def test_mcp_source_rename_over_vcr() -> None:
 @pytest.mark.asyncio
 @notebooklm_vcr.use_cassette("sources_get_fulltext.yaml")
 async def test_mcp_source_get_content_over_vcr() -> None:
-    """``source_get_content`` returns the resolved source through the real client.
+    """``source_get_content`` returns the resolved source metadata AND its full text.
 
-    ``execute_source_get`` calls ``client.sources.get_or_none``, which filters the
-    notebook's ``GET_NOTEBOOK`` (``rLM1Ne``) source list — so only the cassette's
-    leading ``rLM1Ne`` interaction is consumed (the trailing ``hizoJc`` fulltext
-    interaction is left unplayed). The full-UUID source ref skips the resolver's
-    own list preflight, and the id must exist in the recorded list for the lookup
-    to return a (non-``None``) source rather than NOT_FOUND.
+    ``execute_source_get`` calls ``client.sources.get_or_none`` (filters the
+    notebook's ``GET_NOTEBOOK`` / ``rLM1Ne`` source list), then
+    ``execute_source_fulltext`` issues ``GET_SOURCE`` (``hizoJc``) — so both
+    cassette interactions are consumed. The full-UUID source ref skips the
+    resolver's own list preflight, and the id must exist in the recorded list for
+    the lookup to return a (non-``None``) source rather than NOT_FOUND.
     """
     async with build_mcp_client() as mcp_client:
         result = await mcp_client.call_tool(
@@ -369,8 +369,16 @@ async def test_mcp_source_get_content_over_vcr() -> None:
 
     structured = result.structured_content
     assert isinstance(structured, dict)
-    # ``execute_source_get`` projects to {"notebook_id", "source_id", "source"}.
-    assert set(structured) == {"notebook_id", "source_id", "source"}
+    # Now projects metadata PLUS the full-text fields.
+    assert set(structured) == {
+        "notebook_id",
+        "source_id",
+        "source",
+        "content",
+        "char_count",
+        "truncated",
+        "output_format",
+    }
     assert structured["notebook_id"] == GET_CONTENT_NOTEBOOK_ID
     assert structured["source_id"] == SOURCES_LIST_SOURCE_ID
     source = structured["source"]
@@ -379,6 +387,14 @@ async def test_mcp_source_get_content_over_vcr() -> None:
     assert source["title"] == SOURCES_LIST_SOURCE_TITLE
     assert source["url"] == "https://github.com/shareAI-lab/learn-claude-code"
     assert source["status"] == 2  # SourceStatus.READY
+    # String labels accompany the raw codes (agent-readable).
+    assert source["kind"] == "web_page"
+    assert source["status_label"] == "ready"
+    # Full text came back from the recorded GET_SOURCE interaction.
+    assert structured["output_format"] == "text"
+    assert structured["truncated"] is False
+    assert isinstance(structured["content"], str) and structured["content"]
+    assert structured["char_count"] == len(structured["content"])
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +410,8 @@ async def test_mcp_source_wait_single_over_vcr() -> None:
     ``execute_source_wait`` drives ``client.sources.wait_until_ready``, whose
     poller probes source status via the same ``GET_NOTEBOOK`` (``rLM1Ne``) list.
     The recorded source is already ``READY``, so it resolves on the first poll
-    and the tool returns the ``"ready"`` outcome wire shape.
+    and the tool returns the unified aggregate (``ok`` True, the source in
+    ``ready``, all error buckets empty).
     """
     async with build_mcp_client() as mcp_client:
         result = await mcp_client.call_tool(
@@ -409,14 +426,17 @@ async def test_mcp_source_wait_single_over_vcr() -> None:
 
     structured = result.structured_content
     assert isinstance(structured, dict)
-    # Single-source ready outcome: {"notebook_id", "status", "source"}.
-    assert set(structured) == {"notebook_id", "status", "source"}
+    # Unified aggregate shape, shared with the all-sources branch.
+    assert set(structured) == {"notebook_id", "ok", "ready", "timed_out", "failed", "not_found"}
     assert structured["notebook_id"] == SOURCES_LIST_NOTEBOOK_ID
-    assert structured["status"] == "ready"
-    source = structured["source"]
-    assert isinstance(source, dict)
+    assert structured["ok"] is True
+    assert structured["timed_out"] == structured["failed"] == structured["not_found"] == []
+    ready = structured["ready"]
+    assert len(ready) == 1
+    source = ready[0]
     assert source["id"] == SOURCES_LIST_SOURCE_ID
     assert source["status"] == 2  # SourceStatus.READY
+    assert source["status_label"] == "ready"
 
 
 @pytest.mark.asyncio
@@ -425,10 +445,11 @@ async def test_mcp_source_wait_all_over_vcr() -> None:
     """``source_wait`` (no ``source``) waits for every source in the notebook.
 
     The all-sources branch lists sources (``GET_NOTEBOOK`` → ``rLM1Ne``) then
-    waits on each id. Every recorded source is already ``READY``, so they all
-    resolve on the first poll and the tool returns the ``{"notebook_id",
-    "ready": [...]}`` wire shape. ``allow_playback_repeats`` lets the per-source
-    polls re-match the single recorded ``rLM1Ne`` interaction.
+    fans out a per-source wait on each id. Every recorded source is already
+    ``READY``, so they all resolve on the first poll and the tool returns the
+    unified aggregate (``ok`` True, the sources in ``ready``, error buckets
+    empty). ``allow_playback_repeats`` lets the per-source polls re-match the
+    single recorded ``rLM1Ne`` interaction.
     """
     async with build_mcp_client() as mcp_client:
         result = await mcp_client.call_tool(
@@ -442,8 +463,10 @@ async def test_mcp_source_wait_all_over_vcr() -> None:
 
     structured = result.structured_content
     assert isinstance(structured, dict)
-    assert set(structured) == {"notebook_id", "ready"}
+    assert set(structured) == {"notebook_id", "ok", "ready", "timed_out", "failed", "not_found"}
     assert structured["notebook_id"] == SOURCES_LIST_NOTEBOOK_ID
+    assert structured["ok"] is True
+    assert structured["timed_out"] == structured["failed"] == structured["not_found"] == []
     ready = structured["ready"]
     assert isinstance(ready, list)
     assert ready, "expected at least one ready source from the cassette"
