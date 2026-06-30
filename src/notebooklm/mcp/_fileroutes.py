@@ -45,10 +45,12 @@ from starlette.responses import (
 
 from .._app import download as download_core
 from .._app import source_add as add_core
-from ..exceptions import ValidationError
+from .._app.errors import ErrorCategory, classify
+from ..exceptions import NotebookLMError, ValidationError
 from ._context import get_client_from_app
+from ._errors import redact
 from ._filelink import FileLinkError, FileTransferConfig
-from .tools.artifacts import _DOWNLOAD_SPECS
+from .tools.artifacts import _DOWNLOAD_SPECS, _resolve_artifact_id
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -81,6 +83,57 @@ _HTML_SECURITY_HEADERS = {
         "connect-src 'self'; form-action 'none'; base-uri 'none'"
     ),
 }
+
+
+#: HTTP status each neutral :class:`ErrorCategory` projects onto for the
+#: ``/files/*`` routes. Covers EVERY category (pinned by ``test_fileroutes.py``).
+#: This mirrors the REST server's ``CATEGORY_STATUS`` but is defined locally — the
+#: MCP layer must NOT import ``notebooklm.server`` (it pulls ``fastapi``; the
+#: boundary is enforced by ``tests/_guardrails/test_mcp_boundary.py``). Deliberate
+#: deviations from the REST table (because these routes are a *gateway* to the
+#: NotebookLM backend, not the backend itself): ``AUTH`` / ``CONFIG`` → **502**, not
+#: 401/500 — they are authenticated by the signed token, so a *server-side* broken
+#: Google session is an upstream-dependency failure (Bad Gateway) the token-bearing
+#: caller cannot fix by re-authenticating (401 would be misleading); and
+#: ``LIBRARY`` → **502**, not 500, for the same gateway reason (an unclassified
+#: library error reaching here is still an upstream failure, not an internal bug of
+#: the route). ``UNEXPECTED`` stays 500 (a genuine route bug) but is unreachable via
+#: :func:`_upstream_error_response`, which only takes ``NotebookLMError``.
+_FILE_ROUTE_STATUS: dict[ErrorCategory, int] = {
+    ErrorCategory.NOT_FOUND: 404,
+    ErrorCategory.AUTH: 502,
+    ErrorCategory.RATE_LIMITED: 429,
+    ErrorCategory.VALIDATION: 400,
+    ErrorCategory.CONFIG: 502,
+    ErrorCategory.NETWORK: 502,
+    ErrorCategory.NOTEBOOK_LIMIT: 409,
+    ErrorCategory.ARTIFACT_TIMEOUT: 504,
+    ErrorCategory.TIMEOUT: 504,
+    ErrorCategory.SERVER: 502,
+    ErrorCategory.RPC: 502,
+    ErrorCategory.SOURCE_MUTATION: 422,
+    ErrorCategory.LIBRARY: 502,
+    ErrorCategory.UNEXPECTED: 500,
+}
+
+
+def _upstream_error_response(exc: NotebookLMError) -> PlainTextResponse:
+    """Project an upstream ``NotebookLMError`` onto a classified, redacted response.
+
+    A ``NotebookLMError`` raised inside a ``/files/*`` handler (e.g. the artifact
+    ``list`` RPC inside ``execute_download``, which is not wrapped by the core, or
+    ``execute_source_add``) would otherwise escape to a raw Starlette 500. Classify
+    it via the shared :func:`_app.errors.classify`, map the category to an HTTP
+    status, and return the secret-scrubbed message (the same :func:`redact`
+    chokepoint the MCP tool errors use). ``.get(..., 502)`` is defense-in-depth —
+    every category is in the table (pinned by a coverage test).
+    """
+    status = _FILE_ROUTE_STATUS.get(classify(exc).category, 502)
+    return PlainTextResponse(
+        f"Upstream NotebookLM error: {redact(str(exc))}",
+        status_code=status,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
 
 
 def _safe_upload_name(filename: str | None) -> str:
@@ -182,14 +235,29 @@ def register_file_routes(mcp: FastMCP, config: FileTransferConfig) -> None:
         except RuntimeError:
             return PlainTextResponse("Server is not ready.", status_code=500)
 
+        # ``aid`` rides inside the HMAC-signed token, so a non-string value should be
+        # unreachable in practice — but the route treats the token as its source of
+        # truth, and a non-string ``aid`` would make ``_resolve_artifact_id`` raise a
+        # raw ``AttributeError`` (not ``ValidationError``) → a 500. Guard the shape so
+        # a malformed token fails as a clean 400 like any other bad ``aid``.
+        aid = payload.get("aid")
+        if aid is not None and not isinstance(aid, str):
+            return PlainTextResponse(
+                "This download link is invalid.",
+                status_code=400,
+                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+            )
+
         temp_dir = tempfile.mkdtemp(prefix="nblm-mcp-dl-")
         temp_path = os.path.join(temp_dir, f"artifact{spec.extension}")
         try:
             args: dict[str, object] = {
                 "notebook_id": payload.get("nb"),
                 "output_path": temp_path,
-                "latest": True,
+                "latest": aid is None,
             }
+            if aid is not None:
+                args["artifact_id"] = aid
             fmt = payload.get("fmt")
             if fmt is not None:
                 args[spec.format_param_name] = fmt
@@ -198,10 +266,31 @@ def register_file_routes(mcp: FastMCP, config: FileTransferConfig) -> None:
                 plan,
                 client,
                 notebook_resolver=_passthrough_notebook,
-                # download selects by ``latest``, so the artifact resolver is never
-                # invoked — supply the required identity stub inline.
-                artifact_resolver=lambda _artifacts, artifact_id: artifact_id,
+                artifact_resolver=_resolve_artifact_id,
             )
+        except ValidationError as exc:
+            # A bad ``aid`` in the token — a no-match id (full UUID or prefix) or an
+            # ambiguous prefix (AmbiguousIdError) — surfaces here from
+            # ``_resolve_artifact_id``. The catch also covers ``build_download_plan``'s
+            # ``DownloadPlanValidationError`` (a ValidationError subclass), which a
+            # broker-minted token won't trigger but is correctly a 400 too. Map it to a
+            # clean 400 instead of letting it bubble up as a Starlette 500. (The 409
+            # below stays for the latest-by-type path when no completed artifact of that
+            # type exists yet.)
+            _cleanup(temp_dir)
+            return PlainTextResponse(
+                str(exc),
+                status_code=400,
+                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+            )
+        except NotebookLMError as exc:
+            # An upstream error raised out of the core (e.g. the artifact ``list``
+            # RPC inside ``execute_download`` is not wrapped) would otherwise become
+            # a raw 500. Classify + redact it instead. (Failures that the core
+            # *returns* as a non-success ``DownloadResult`` fall through to the
+            # generic 409 below — that path already leaks nothing.)
+            _cleanup(temp_dir)
+            return _upstream_error_response(exc)
         except BaseException:
             _cleanup(temp_dir)
             raise
@@ -334,7 +423,18 @@ def register_file_routes(mcp: FastMCP, config: FileTransferConfig) -> None:
                     headers=_HTML_SECURITY_HEADERS,
                 )
             except ValidationError as exc:
-                return PlainTextResponse(f"Upload rejected: {exc}", status_code=400)
+                # ValidationError ⊂ NotebookLMError, so this MUST precede the
+                # NotebookLMError handler. ``validate_upload_path`` rejections can
+                # embed the local file path, so the detail is redacted.
+                return PlainTextResponse(
+                    f"Upload rejected: {redact(str(exc))}",
+                    status_code=400,
+                    headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+                )
+            except NotebookLMError as exc:
+                # An upstream auth/server/rate-limit error from execute_source_add
+                # (add_file → RPC) would otherwise escape as a raw 500.
+                return _upstream_error_response(exc)
             except OSError:
                 # A bad filename / fs error (e.g. a name that survives sanitization
                 # but the fs rejects) is a clean 400, not a bare 500.
