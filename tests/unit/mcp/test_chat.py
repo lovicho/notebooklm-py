@@ -272,6 +272,74 @@ async def test_chat_ask_whitespace_question_rejected(mcp_call, mock_client) -> N
 
 
 @dataclass
+class FakePromptSuggestion:
+    title: str
+    prompt: str
+
+
+async def test_chat_ask_default_no_suggest_followups(mcp_call, mock_client) -> None:
+    """Default chat_ask omits suggested_prompts and never calls suggest_prompts."""
+    mock_client.chat.ask = AsyncMock(
+        return_value=FakeAskResult(answer="42", conversation_id=CONV_ID)
+    )
+    mock_client.notebooks.suggest_prompts = AsyncMock()
+    result = await mcp_call("chat_ask", {"notebook": NB_ID, "question": "what?"})
+    assert "suggested_prompts" not in result.structured_content
+    mock_client.notebooks.suggest_prompts.assert_not_called()
+
+
+async def test_chat_ask_suggest_followups_with_question(mcp_call, mock_client) -> None:
+    """suggest_followups=True with a question returns the answer AND suggestions."""
+    mock_client.chat.ask = AsyncMock(
+        return_value=FakeAskResult(answer="42", conversation_id=CONV_ID)
+    )
+    mock_client.notebooks.suggest_prompts = AsyncMock(
+        return_value=[
+            FakePromptSuggestion(title="T1", prompt="P1"),
+            FakePromptSuggestion(title="T2", prompt="P2"),
+        ]
+    )
+    result = await mcp_call(
+        "chat_ask", {"notebook": NB_ID, "question": "what?", "suggest_followups": True}
+    )
+    sc = result.structured_content
+    assert sc["answer"] == "42"
+    assert sc["suggested_prompts"] == [
+        {"title": "T1", "prompt": "P1"},
+        {"title": "T2", "prompt": "P2"},
+    ]
+    # Keyword-only args (positional would TypeError against the real signature).
+    mock_client.notebooks.suggest_prompts.assert_awaited_once_with(
+        NB_ID, source_ids=None, mode=4, query="what?"
+    )
+
+
+async def test_chat_ask_suggest_only_no_question(mcp_call, mock_client) -> None:
+    """No question + suggest_followups=True returns suggestions without raising."""
+    mock_client.chat.ask = AsyncMock()
+    mock_client.notebooks.suggest_prompts = AsyncMock(
+        return_value=[FakePromptSuggestion(title="T", prompt="P")]
+    )
+    result = await mcp_call("chat_ask", {"notebook": NB_ID, "suggest_followups": True})
+    sc = result.structured_content
+    assert sc["suggested_prompts"] == [{"title": "T", "prompt": "P"}]
+    assert "answer" not in sc
+    # No question => no ask, and the suggest query is unsteered (None).
+    mock_client.chat.ask.assert_not_awaited()
+    mock_client.notebooks.suggest_prompts.assert_awaited_once_with(
+        NB_ID, source_ids=None, mode=4, query=None
+    )
+
+
+async def test_chat_ask_all_three_absent_still_rejected(mcp_call, mock_client) -> None:
+    """No question, history=0, suggest_followups=False remains a validation error."""
+    mock_client.notebooks.suggest_prompts = AsyncMock()
+    with pytest.raises(ToolError):
+        await mcp_call("chat_ask", {"notebook": NB_ID, "suggest_followups": False})
+    mock_client.notebooks.suggest_prompts.assert_not_called()
+
+
+@dataclass
 class FakeSource:
     id: str
     title: str | None
@@ -296,6 +364,45 @@ async def test_chat_ask_two_title_refs_list_once_order_preserved(mcp_call, mock_
     assert mock_client.chat.ask.await_args.kwargs["source_ids"] == [_SRC_B, _SRC_A]
 
 
+async def test_chat_ask_suggest_followups_resolves_source_ids(mcp_call, mock_client) -> None:
+    """suggest_prompts is called with resolved source ids, not the raw title."""
+    mock_client.sources.list = AsyncMock(return_value=[FakeSource(id=_SRC_A, title="Alpha")])
+    mock_client.chat.ask = AsyncMock(
+        return_value=FakeAskResult(answer="42", conversation_id=CONV_ID)
+    )
+    mock_client.notebooks.suggest_prompts = AsyncMock(
+        return_value=[FakePromptSuggestion(title="T", prompt="P")]
+    )
+    await mcp_call(
+        "chat_ask",
+        {
+            "notebook": NB_ID,
+            "question": "what?",
+            "source_ids": "Alpha",
+            "suggest_followups": True,
+        },
+    )
+    assert mock_client.notebooks.suggest_prompts.await_args.kwargs["source_ids"] == [_SRC_A]
+    # The ask path shares the same resolved ids (resolution happens once, up front).
+    assert mock_client.chat.ask.await_args.kwargs["source_ids"] == [_SRC_A]
+    # Resolve-once: a single sources.list snapshot feeds both the ask + suggest paths.
+    mock_client.sources.list.assert_awaited_once_with(NB_ID)
+
+
+async def test_chat_ask_recall_only_ignores_source_ids(mcp_call, mock_client) -> None:
+    """A recall-only turn (history>0, no question, no suggest) does NOT resolve
+    source_ids — no sources.list round-trip, and a stale ref can't fail the recall."""
+    mock_client.sources.list = AsyncMock(return_value=[])
+    mock_client.chat.get_conversation_id = AsyncMock(return_value=CONV_ID)
+    mock_client.chat.get_history = AsyncMock(return_value=[("q", "a")])
+    result = await mcp_call(
+        "chat_ask",
+        {"notebook": NB_ID, "history": 1, "source_ids": "Nonexistent-Title"},
+    )
+    assert result.structured_content["history"] == [{"question": "q", "answer": "a"}]
+    mock_client.sources.list.assert_not_called()  # source refs ignored in pure recall
+
+
 async def test_chat_configure_goal_and_length(mcp_call, mock_client) -> None:
     mock_client.chat.configure = AsyncMock(return_value=None)
     result = await mcp_call(
@@ -317,6 +424,65 @@ async def test_chat_configure_no_goal(mcp_call, mock_client) -> None:
     assert sc["notebook_id"] == NB_ID
     assert sc["goal_name"] is None
     mock_client.chat.configure.assert_awaited_once()
+
+
+async def test_chat_configure_mode_applies_preset(mcp_call, mock_client) -> None:
+    """A chat_mode selects the predefined preset via set_mode (not the custom branch)."""
+    mock_client.chat.set_mode = AsyncMock(return_value=None)
+    mock_client.chat.configure = AsyncMock(return_value=None)
+    result = await mcp_call("chat_configure", {"notebook": NB_ID, "chat_mode": "learning-guide"})
+    sc = result.structured_content
+    assert sc["notebook_id"] == NB_ID
+    assert sc["mode"] == "learning-guide"
+    assert sc["persona"] is None and sc["response_length"] is None
+    mock_client.chat.set_mode.assert_awaited_once()
+    # The preset path must not also write the custom settings block.
+    mock_client.chat.configure.assert_not_called()
+
+
+async def test_chat_configure_mode_rejects_goal_combination(mcp_call, mock_client) -> None:
+    """chat_mode + a (truthy) goal is rejected, not silently dropped."""
+    mock_client.chat.set_mode = AsyncMock(return_value=None)
+    mock_client.chat.configure = AsyncMock(return_value=None)
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_call("chat_configure", {"notebook": NB_ID, "chat_mode": "concise", "goal": "x"})
+    assert "chat_mode" in str(excinfo.value)
+    mock_client.chat.set_mode.assert_not_called()
+    mock_client.chat.configure.assert_not_called()
+
+
+async def test_chat_configure_mode_rejects_response_length_combination(
+    mcp_call, mock_client
+) -> None:
+    """chat_mode + response_length (a real setting, incl. 'default') is rejected."""
+    mock_client.chat.set_mode = AsyncMock(return_value=None)
+    mock_client.chat.configure = AsyncMock(return_value=None)
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_call(
+            "chat_configure",
+            {"notebook": NB_ID, "chat_mode": "detailed", "response_length": "longer"},
+        )
+    assert "chat_mode" in str(excinfo.value)
+    mock_client.chat.set_mode.assert_not_called()
+    mock_client.chat.configure.assert_not_called()
+
+
+async def test_chat_configure_mode_with_empty_goal_ok(mcp_call, mock_client) -> None:
+    """An empty goal ("") is a no-op, so it does NOT block a chat_mode preset."""
+    mock_client.chat.set_mode = AsyncMock(return_value=None)
+    result = await mcp_call(
+        "chat_configure", {"notebook": NB_ID, "chat_mode": "concise", "goal": ""}
+    )
+    assert result.structured_content["mode"] == "concise"
+    mock_client.chat.set_mode.assert_awaited_once()
+
+
+async def test_chat_configure_rejects_bad_mode(mcp_call, mock_client) -> None:
+    """An out-of-enum chat_mode is rejected at the Literal schema boundary, no RPC."""
+    mock_client.chat.set_mode = AsyncMock(return_value=None)
+    with pytest.raises(ToolError):
+        await mcp_call("chat_configure", {"notebook": NB_ID, "chat_mode": "podcast"})
+    mock_client.chat.set_mode.assert_not_called()
 
 
 async def test_chat_ask_strips_raw_response_and_lite_references(mcp_call, mock_client) -> None:
@@ -383,3 +549,67 @@ async def test_chat_ask_error_projects_tool_error(mcp_call, mock_client) -> None
         await mcp_call("chat_ask", {"notebook": NB_ID, "question": "q"})
     # ChatError classifies under the LIBRARY ladder -> the generic ERROR code.
     assert "ERROR" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# suggest_prompts (dedicated tool)
+# ---------------------------------------------------------------------------
+
+
+async def test_suggest_prompts_default_ask(mcp_call, mock_client) -> None:
+    """Default surface=ask maps to mode 4 and returns {suggestions:[...]}."""
+    mock_client.notebooks.suggest_prompts = AsyncMock(
+        return_value=[FakePromptSuggestion(title="T1", prompt="P1")]
+    )
+    result = await mcp_call("suggest_prompts", {"notebook": NB_ID})
+    assert result.structured_content["suggestions"] == [{"title": "T1", "prompt": "P1"}]
+    mock_client.notebooks.suggest_prompts.assert_awaited_once_with(
+        NB_ID, source_ids=None, mode=4, query=None
+    )
+
+
+@pytest.mark.parametrize(
+    ("surface", "mode"),
+    [
+        ("ask", 4),
+        ("audio-deep-dive", 1),
+        ("audio-brief", 2),
+        ("audio-critique", 5),
+        ("audio-debate", 6),
+        ("video-explainer", 3),
+        ("video-short", 10),
+        ("quiz", 8),
+        ("flashcards", 9),
+    ],
+)
+async def test_suggest_prompts_surface_maps_to_mode(mcp_call, mock_client, surface, mode) -> None:
+    """Each surface Literal maps to its verified otmP3b mode int (incl. video-short=10)."""
+    mock_client.notebooks.suggest_prompts = AsyncMock(return_value=[])
+    await mcp_call("suggest_prompts", {"notebook": NB_ID, "surface": surface})
+    assert mock_client.notebooks.suggest_prompts.await_args.kwargs["mode"] == mode
+
+
+async def test_suggest_prompts_source_ids_and_query(mcp_call, mock_client) -> None:
+    """source_ids resolved once; empty query normalizes to None."""
+    mock_client.notebooks.suggest_prompts = AsyncMock(return_value=[])
+    await mcp_call(
+        "suggest_prompts",
+        {"notebook": NB_ID, "surface": "quiz", "source_ids": [_SRC_A], "query": "risks"},
+    )
+    kwargs = mock_client.notebooks.suggest_prompts.await_args.kwargs
+    assert kwargs["source_ids"] == [_SRC_A]
+    assert kwargs["query"] == "risks"
+    # Omitted source_ids => None (all); explicit null query is accepted at the
+    # schema boundary (query is str | None) and reaches the client as None.
+    mock_client.notebooks.suggest_prompts = AsyncMock(return_value=[])
+    await mcp_call("suggest_prompts", {"notebook": NB_ID, "query": None})
+    kwargs = mock_client.notebooks.suggest_prompts.await_args.kwargs
+    assert kwargs["source_ids"] is None and kwargs["query"] is None
+
+
+async def test_suggest_prompts_rejects_bad_surface(mcp_call, mock_client) -> None:
+    """An out-of-enum surface is rejected at the Literal schema boundary, no RPC."""
+    mock_client.notebooks.suggest_prompts = AsyncMock()
+    with pytest.raises(ToolError):
+        await mcp_call("suggest_prompts", {"notebook": NB_ID, "surface": "podcast"})
+    mock_client.notebooks.suggest_prompts.assert_not_called()
