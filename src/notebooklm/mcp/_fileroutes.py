@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import html
 import os
-import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -160,36 +159,11 @@ def _upstream_error_response(exc: NotebookLMError, *, note: str = "") -> PlainTe
     )
 
 
-def _safe_upload_name(filename: str | None) -> str:
-    """Return a safe basename for the spooled upload file.
-
-    The browser's ``fetch(body: file)`` does NOT send the filename, so the page
-    passes it as ``?filename=``; NotebookLM 400s on an extensionless name and the
-    source-id extraction keys off the real basename+extension, so we must keep the
-    caller's name. :func:`os.path.basename` strips directory components (the
-    path-traversal guard), and the file lands in a private ``mkdtemp`` dir so an odd
-    basename is isolated. An empty/extensionless-default falls back to
-    ``"upload.bin"`` (never extensionless). Re-implemented locally on purpose — the
-    REST route's twin lives behind the ``server`` extra (``fastapi``), which this
-    ``mcp``-only module must not import.
-    """
-    # Strip control chars (NUL would make ``os.open`` raise ``ValueError``; the rest
-    # are never legitimate in a filename), normalize ``\`` so a Windows-style
-    # ``C:\dir\x.pdf`` from a sandbox PUT yields its real leaf, then take the
-    # basename (the path-traversal guard). Reject the directory-cursor names
-    # ``.``/``..`` (which would target an existing dir and fail ``O_EXCL`` → 500) —
-    # fall back to a safe extensioned default.
-    cleaned = re.sub(r"[\x00-\x1f]", "", filename or "").replace("\\", "/")
-    base = os.path.basename(cleaned)
-    if not base or base in (".", ".."):
-        return "upload.bin"
-    if len(base) > 255:
-        # Truncate the STEM, not the whole name — lopping a pathological 300-char
-        # name to 255 could drop the extension, and NotebookLM 400s on an
-        # extensionless upload. Keep the suffix.
-        suffix = Path(base).suffix[:255]
-        base = Path(base).stem[: 255 - len(suffix)] + suffix
-    return base
+#: Safe-basename sanitizer for a spooled upload. Aliased to the shared neutral
+#: helper (:func:`notebooklm._app.source_add.safe_upload_name`) so the MCP
+#: ``/files/ul`` route and the REST ``add_file`` route sanitize identically
+#: (strip control chars, reject ``.``/``..``, basename the path, stem-truncate).
+_safe_upload_name = add_core.safe_upload_name
 
 
 def _cleanup(path: str) -> None:
@@ -329,7 +303,21 @@ def register_file_routes(mcp: FastMCP, config: FileTransferConfig) -> None:
         temp_dir: str | None = None
         success = False
         try:
-            temp_dir = tempfile.mkdtemp(prefix="nblm-mcp-dl-")
+            try:
+                temp_dir = tempfile.mkdtemp(prefix="nblm-mcp-dl-")
+            except OSError:
+                # Temp-dir creation failed (e.g. ENOSPC) — the exact temp-disk
+                # exhaustion this cap defends against. Scoped to mkdtemp ONLY (not the
+                # whole try) so it stays distinct from the post-fetch paths; without it
+                # the OSError escapes as a RAW Starlette 500 (the outer finally still
+                # releases the slot, but the response is bare). Return a clean 500,
+                # mirroring the upload route. No dir was created, so the outer finally's
+                # temp_dir cleanup is a no-op and success stays False → slot released.
+                return PlainTextResponse(
+                    "Download could not be prepared (server storage error).",
+                    status_code=500,
+                    headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+                )
             temp_path = os.path.join(temp_dir, f"artifact{spec.extension}")
             try:
                 args: dict[str, object] = {
@@ -481,7 +469,23 @@ def register_file_routes(mcp: FastMCP, config: FileTransferConfig) -> None:
                 raw_mime = payload.get("mime") or request.headers.get("content-type")
                 mime = raw_mime.split(";")[0].strip() if raw_mime else None
 
-                temp_dir = tempfile.mkdtemp(prefix="nblm-mcp-ul-")  # mkdtemp is 0o700
+                try:
+                    temp_dir = tempfile.mkdtemp(prefix="nblm-mcp-ul-")  # mkdtemp is 0o700
+                except OSError:
+                    # Temp-dir creation failed (e.g. ENOSPC) — the exact temp-disk
+                    # exhaustion the concurrency cap guards against. mkdtemp sits OUTSIDE
+                    # the spool ``try`` below (whose ``except OSError`` maps a bad
+                    # *filename* to a 400), so without this its OSError would escape as a
+                    # raw Starlette 500. A failed dir-create is a SERVER storage problem,
+                    # not bad input, so 500 (mirrors the download route's status) — kept
+                    # distinct from the 400 os.open path. Accounting stays safe: the outer
+                    # finallys release the slot + roll back the jti; no dir was made, so
+                    # nothing to clean.
+                    return PlainTextResponse(
+                        "Upload could not be stored (server storage error).",
+                        status_code=500,
+                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+                    )
                 temp_path = os.path.join(temp_dir, filename)
                 try:
                     fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
