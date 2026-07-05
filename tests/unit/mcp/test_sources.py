@@ -30,6 +30,9 @@ from notebooklm.exceptions import (  # noqa: E402 - after importorskip guard
     SourceTimeoutError,
 )
 from notebooklm.mcp._errors import tool_error_payload  # noqa: E402 - after importorskip guard
+from notebooklm.mcp.tools._content_sanity import (  # noqa: E402 - after importorskip guard
+    _THIN_SOURCE_CHAR_THRESHOLD,
+)
 from notebooklm.rpc.types import SourceStatus  # noqa: E402 - after importorskip guard
 from notebooklm.types import Label  # noqa: E402 - after importorskip guard
 
@@ -259,6 +262,86 @@ async def test_source_list_resolves_notebook_by_name(mcp_call, mock_client) -> N
     result = await mcp_call("source_list", {"notebook": "My Notebook"})
     assert result.structured_content["notebook_id"] == NB_ID
     mock_client.sources.list.assert_awaited_with(NB_ID)
+
+
+async def test_source_list_compact(mcp_call, mock_client) -> None:
+    """``detail="compact"`` projects each source to a 5-field roster row.
+
+    Uses a real ``Source`` so ``created_at`` (dropped by the minimal fakes)
+    actually serializes: the row is exactly ``{id, title, kind, status_label,
+    created_at}`` — no ``url`` / raw ``status`` / ``_type_code`` — for a low-token
+    listing with no extra read.
+    """
+    from datetime import datetime, timezone
+
+    from notebooklm.types import Source
+
+    src = Source(
+        id=SRC_ID,
+        title="Doc",
+        _type_code=3,  # pdf
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        status=SourceStatus.READY,
+    )
+    mock_client.sources.list = AsyncMock(return_value=[src])
+    result = await mcp_call("source_list", {"notebook": NB_ID, "detail": "compact"})
+    assert result.structured_content == {
+        "notebook_id": NB_ID,
+        "sources": [
+            {
+                "id": SRC_ID,
+                "title": "Doc",
+                "kind": "pdf",
+                "status_label": "ready",
+                "created_at": "2024-01-01T00:00:00+00:00",
+            }
+        ],
+        "total": 1,
+        "offset": 0,
+        "has_more": False,
+    }
+
+
+async def test_source_list_compact_composes_with_status_filter(mcp_call, mock_client) -> None:
+    """``detail="compact"`` still honors the ``status`` filter (shaping is orthogonal)."""
+    mock_client.sources.list = AsyncMock(
+        return_value=[
+            FakeSource(id=SRC_ID, title="Ready Doc"),
+            FakeFailedSource(id=SRC2_ID, title="Broken Import"),
+        ]
+    )
+    result = await mcp_call(
+        "source_list", {"notebook": NB_ID, "detail": "compact", "status": "error"}
+    )
+    rows = result.structured_content["sources"]
+    assert [r["id"] for r in rows] == [SRC2_ID]
+    assert set(rows[0]) == {"id", "title", "kind", "status_label", "created_at"}
+    assert rows[0]["status_label"] == "error"
+
+
+async def test_source_list_compact_null_created_at(mcp_call, mock_client) -> None:
+    """A still-processing source (no decoded ``created_at``) serializes ``created_at``
+    to ``None`` in the compact row — the field is always present, never omitted."""
+    from notebooklm.types import Source
+
+    src = Source(
+        id=SRC_ID, title="Importing", _type_code=3, created_at=None, status=SourceStatus.PROCESSING
+    )
+    mock_client.sources.list = AsyncMock(return_value=[src])
+    result = await mcp_call("source_list", {"notebook": NB_ID, "detail": "compact"})
+    row = result.structured_content["sources"][0]
+    assert set(row) == {"id", "title", "kind", "status_label", "created_at"}
+    assert row["created_at"] is None
+    assert row["status_label"] == "processing"
+
+
+async def test_source_list_default_is_full_unchanged(mcp_call, mock_client) -> None:
+    """The default call (no ``detail``) is byte-identical to before (full projection)."""
+    mock_client.sources.list = AsyncMock(return_value=[FakeSource(id=SRC_ID, title="Doc")])
+    result = await mcp_call("source_list", {"notebook": NB_ID})
+    assert result.structured_content["sources"] == [
+        {"id": SRC_ID, "title": "Doc", "kind": "web_page", "status_label": "ready"}
+    ]
 
 
 async def test_source_read(mcp_call, mock_client) -> None:
@@ -886,6 +969,40 @@ async def test_source_wait_ample_web_page_no_warning(mcp_call, mock_client) -> N
     assert sc["ready"][0].get("warning") is None
 
 
+@pytest.mark.parametrize(
+    ("char_count", "expect_warning"),
+    [
+        (_THIN_SOURCE_CHAR_THRESHOLD - 1, True),  # just under → char-thin warning
+        (_THIN_SOURCE_CHAR_THRESHOLD, False),  # exactly at → not flagged (gate is ``<``)
+    ],
+)
+async def test_source_wait_thin_threshold_boundary(
+    mcp_call, mock_client, char_count: int, expect_warning: bool
+) -> None:
+    """Pin the char-thin boundary to the documented threshold constant, so the number
+    in ``docs/mcp-guide.md`` (and the copyable trigger downstream users build against)
+    can't silently drift from :data:`_THIN_SOURCE_CHAR_THRESHOLD`. The gate is ``<``:
+    ``threshold - 1`` warns, exactly ``threshold`` does not."""
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeSource(id=SRC_ID, title="Boundary")
+    )
+    mock_client.sources.get_fulltext = AsyncMock(
+        return_value=FakeFulltext(content="x" * char_count, char_count=char_count)
+    )
+    result = await mcp_call("source_wait", {"notebook": NB_ID, "source": SRC_ID})
+    warning = result.structured_content["ready"][0].get("warning")
+    if expect_warning:
+        assert warning is not None
+        # Pin the char-thin branch specifically (not merely "some warning"): the
+        # message reports the count and points at source_read — the exact shape the
+        # doc tells downstream integrators to assert against.
+        assert f"{char_count} chars" in warning
+        assert "little/no text extracted" in warning
+        assert 'source_read (detail="full")' in warning
+    else:
+        assert warning is None
+
+
 async def test_source_wait_zero_char_web_page_warns(mcp_call, mock_client) -> None:
     """A READY web_page with 0 extracted chars warns too — the wording covers the
     not-yet-indexed / empty case rather than asserting a false 'dead link'."""
@@ -1140,6 +1257,7 @@ async def test_source_add_text(mcp_call, mock_client) -> None:
         {"notebook": NB_ID, "source_type": "text", "text": "hello world", "title": "Notes"},
     )
     assert result.structured_content == {
+        "notebook_id": NB_ID,
         "status": "added",
         "source": {"id": SRC_ID, "title": "Notes", "kind": "web_page", "status_label": "ready"},
     }
@@ -1152,6 +1270,7 @@ async def test_source_add_url(mcp_call, mock_client) -> None:
         "source_add", {"notebook": NB_ID, "source_type": "url", "url": "https://example.com/a"}
     )
     assert result.structured_content == {
+        "notebook_id": NB_ID,
         "status": "added",
         "source": {"id": SRC_ID, "title": "Page", "kind": "web_page", "status_label": "ready"},
     }
@@ -1319,6 +1438,7 @@ async def test_source_add_single_metadata_not_rejected(mcp_call, mock_client) ->
         },
     )
     assert result.structured_content == {
+        "notebook_id": NB_ID,
         "status": "added",
         "source": {"id": SRC_ID, "title": "Page", "kind": "web_page", "status_label": "ready"},
     }
@@ -1365,6 +1485,7 @@ async def test_source_add_youtube_accepts_youtube_url(mcp_call, mock_client) -> 
     mock_client.sources.add_url = AsyncMock(return_value=FakeSource(id=SRC_ID, title="Vid"))
     result = await mcp_call("source_add", {"notebook": NB_ID, "source_type": "youtube", "url": yt})
     assert result.structured_content == {
+        "notebook_id": NB_ID,
         "status": "added",
         "source": {"id": SRC_ID, "title": "Vid", "kind": "web_page", "status_label": "ready"},
     }
@@ -1848,3 +1969,311 @@ async def test_source_list_ambiguous_label_raises(mcp_call, mock_client) -> None
         await mcp_call("source_list", {"notebook": NB_ID, "label": "Work"})
     assert "matches 2 labels" in str(excinfo.value)
     assert "Use a label id instead" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# source_add_and_wait — composes single-mode source_add + source_wait in one
+# call. Returns the source_wait aggregate PLUS a top-level ``source_id`` (always
+# present, since the source persists even when the wait fails / times out).
+# ---------------------------------------------------------------------------
+
+
+async def test_source_add_and_wait_url_ready(mcp_call, mock_client) -> None:
+    """URL add then wait → ready aggregate carrying the resolved source_id."""
+    mock_client.sources.add_url = AsyncMock(return_value=FakeSource(id=SRC_ID, title="Page"))
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeSource(id=SRC_ID, title="Page")
+    )
+    # FakeSource is a READY web_page → thin-content check fetches its body; ample
+    # content means NO warning is added (so the ready row asserts exactly).
+    mock_client.sources.get_fulltext = AsyncMock(
+        return_value=FakeFulltext(content="x" * 500, char_count=500)
+    )
+    result = await mcp_call(
+        "source_add_and_wait",
+        {"notebook": NB_ID, "source_type": "url", "url": "https://example.com/a"},
+    )
+    sc = result.structured_content
+    assert set(sc) == _AGGREGATE_KEYS | {"source_id"}
+    assert sc["source_id"] == SRC_ID
+    assert sc["ok"] is True
+    assert sc["ready"] == [
+        {"id": SRC_ID, "title": "Page", "kind": "web_page", "status_label": "ready"}
+    ]
+    assert sc["timed_out"] == sc["failed"] == sc["not_found"] == []
+    mock_client.sources.add_url.assert_awaited_once_with(NB_ID, "https://example.com/a")
+    # The wait polls the id returned by the add.
+    assert mock_client.sources.wait_until_ready.await_args.args[1] == SRC_ID
+
+
+async def test_source_add_and_wait_text_ready(mcp_call, mock_client) -> None:
+    """Text add then wait → ready; a pasted-text source is never thin-checked."""
+    mock_client.sources.add_text = AsyncMock(
+        return_value=FakeReadyTextSource(id=SRC_ID, title="Notes")
+    )
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeReadyTextSource(id=SRC_ID, title="Notes")
+    )
+    result = await mcp_call(
+        "source_add_and_wait",
+        {"notebook": NB_ID, "source_type": "text", "text": "hello world", "title": "Notes"},
+    )
+    sc = result.structured_content
+    assert sc["source_id"] == SRC_ID
+    assert sc["ok"] is True
+    assert sc["ready"] == [
+        {"id": SRC_ID, "title": "Notes", "kind": "pasted_text", "status_label": "ready"}
+    ]
+    mock_client.sources.add_text.assert_awaited_once_with(NB_ID, "Notes", "hello world")
+    mock_client.sources.get_fulltext.assert_not_called()
+
+
+async def test_source_add_and_wait_drive_ready(mcp_call, mock_client) -> None:
+    """Drive add then wait → ready aggregate + source_id (no drive provenance keys)."""
+    mock_client.sources.add_drive = AsyncMock(
+        return_value=FakeReadyTextSource(id=SRC_ID, title="Sheet")
+    )
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeReadyTextSource(id=SRC_ID, title="Sheet")
+    )
+    result = await mcp_call(
+        "source_add_and_wait",
+        {
+            "notebook": NB_ID,
+            "source_type": "drive",
+            "document_id": "drivefile123",
+            "mime_type": "google-sheets",
+        },
+    )
+    sc = result.structured_content
+    assert set(sc) == _AGGREGATE_KEYS | {"source_id"}
+    assert sc["source_id"] == SRC_ID
+    assert sc["ok"] is True
+    mock_client.sources.add_drive.assert_awaited_once()
+
+
+async def test_source_add_and_wait_stdio_file_ready(mcp_call, mock_client, tmp_path) -> None:
+    """A stdio (local-path) file add-and-wait reaches READY — pins the file branch."""
+    doc = tmp_path / "doc.pdf"
+    doc.write_text("hello")
+    mock_client.sources.add_file = AsyncMock(
+        return_value=FakeReadyTextSource(id=SRC_ID, title="doc.pdf")
+    )
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeReadyTextSource(id=SRC_ID, title="doc.pdf")
+    )
+    result = await mcp_call(
+        "source_add_and_wait",
+        {"notebook": NB_ID, "source_type": "file", "path": str(doc)},
+    )
+    sc = result.structured_content
+    assert sc["source_id"] == SRC_ID
+    assert sc["ok"] is True
+    mock_client.sources.add_file.assert_awaited_once()
+
+
+async def test_source_add_and_wait_import_failure_lands_in_failed(mcp_call, mock_client) -> None:
+    """An add that processes to ERROR → wait raises SourceProcessingError → ``failed``
+    bucket, ``ok`` False, and the source_id is still surfaced so the caller can delete it."""
+    mock_client.sources.add_url = AsyncMock(return_value=FakeSource(id=SRC_ID, title="Bad"))
+    mock_client.sources.wait_until_ready = AsyncMock(side_effect=SourceProcessingError(SRC_ID))
+    result = await mcp_call(
+        "source_add_and_wait",
+        {"notebook": NB_ID, "source_type": "url", "url": "https://example.com/bad"},
+    )
+    sc = result.structured_content
+    assert sc["source_id"] == SRC_ID
+    assert sc["ok"] is False
+    assert sc["ready"] == []
+    assert sc["failed"] == [{"source_id": SRC_ID, "error": str(SourceProcessingError(SRC_ID))}]
+
+
+async def test_source_add_and_wait_timeout_lands_in_timed_out(mcp_call, mock_client) -> None:
+    """A slow import → wait raises SourceTimeoutError → ``timed_out`` bucket + source_id."""
+    mock_client.sources.add_url = AsyncMock(return_value=FakeSource(id=SRC_ID, title="Slow"))
+    mock_client.sources.wait_until_ready = AsyncMock(side_effect=SourceTimeoutError(SRC_ID, 5.0))
+    result = await mcp_call(
+        "source_add_and_wait",
+        {"notebook": NB_ID, "source_type": "url", "url": "https://example.com/slow", "timeout": 5},
+    )
+    sc = result.structured_content
+    assert sc["source_id"] == SRC_ID
+    assert sc["ok"] is False
+    assert sc["timed_out"] == [{"source_id": SRC_ID, "error": str(SourceTimeoutError(SRC_ID, 5.0))}]
+
+
+async def test_source_add_and_wait_thin_web_page_warns(mcp_call, mock_client) -> None:
+    """A READY web page with thin text carries the same non-blocking warning source_wait adds."""
+    mock_client.sources.add_url = AsyncMock(return_value=FakeSource(id=SRC_ID, title="Dead"))
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeSource(id=SRC_ID, title="Dead")
+    )
+    mock_client.sources.get_fulltext = AsyncMock(
+        return_value=FakeFulltext(content="", char_count=_THIN_SOURCE_CHAR_THRESHOLD - 1)
+    )
+    result = await mcp_call(
+        "source_add_and_wait",
+        {"notebook": NB_ID, "source_type": "url", "url": "https://example.com/dead"},
+    )
+    sc = result.structured_content
+    assert sc["ok"] is True
+    assert "warning" in sc["ready"][0]
+
+
+async def test_source_add_and_wait_remote_file_rejected(mcp_call, mock_client, monkeypatch) -> None:
+    """A remote (http) file add-and-wait is rejected up front — the upload is a
+    separate step, so there is no source to wait on. No add call is made."""
+    import notebooklm.mcp.tools.sources as sources_mod
+
+    monkeypatch.setattr(sources_mod, "_is_http_transport", lambda: True)
+    mock_client.sources.add_file = AsyncMock()
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_call(
+            "source_add_and_wait",
+            {"notebook": NB_ID, "source_type": "file", "path": "/tmp/doc.pdf"},
+        )
+    assert "VALIDATION" in str(excinfo.value)
+    mock_client.sources.add_file.assert_not_called()
+
+
+async def test_source_add_and_wait_negative_timeout_is_validation_error(
+    mcp_call, mock_client
+) -> None:
+    """A negative timeout is rejected before any add/wait I/O."""
+    mock_client.sources.add_url = AsyncMock()
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_call(
+            "source_add_and_wait",
+            {"notebook": NB_ID, "source_type": "url", "url": "https://x.example", "timeout": -1},
+        )
+    assert "timeout" in str(excinfo.value)
+    mock_client.sources.add_url.assert_not_called()
+
+
+async def test_source_add_and_wait_zero_interval_is_validation_error(mcp_call, mock_client) -> None:
+    """A zero interval is rejected before any add/wait I/O."""
+    mock_client.sources.add_url = AsyncMock()
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_call(
+            "source_add_and_wait",
+            {"notebook": NB_ID, "source_type": "url", "url": "https://x.example", "interval": 0},
+        )
+    assert "interval" in str(excinfo.value)
+    mock_client.sources.add_url.assert_not_called()
+
+
+async def test_source_add_and_wait_rejects_foreign_content_scalar(mcp_call, mock_client) -> None:
+    """A content scalar the source_type does not consume is rejected (mirrors source_add)."""
+    mock_client.sources.add_url = AsyncMock()
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_call(
+            "source_add_and_wait",
+            {
+                "notebook": NB_ID,
+                "source_type": "url",
+                "url": "https://example.com/a",
+                "text": "smuggled",
+            },
+        )
+    assert "VALIDATION" in str(excinfo.value)
+    mock_client.sources.add_url.assert_not_called()
+
+
+async def test_source_add_and_wait_drive_missing_document_id(mcp_call, mock_client) -> None:
+    """drive add-and-wait with no document_id is a VALIDATION error, no add call."""
+    mock_client.sources.add_drive = AsyncMock()
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_call("source_add_and_wait", {"notebook": NB_ID, "source_type": "drive"})
+    assert "VALIDATION" in str(excinfo.value)
+    mock_client.sources.add_drive.assert_not_called()
+
+
+async def test_source_add_and_wait_allow_internal_passthrough(mcp_call, mock_client) -> None:
+    """allow_internal lets an internal-host URL through the add SSRF guard, then waits."""
+    internal = "http://127.0.0.1:8080/x"
+    mock_client.sources.add_url = AsyncMock(return_value=FakeReadyTextSource(id=SRC_ID))
+    mock_client.sources.wait_until_ready = AsyncMock(return_value=FakeReadyTextSource(id=SRC_ID))
+    result = await mcp_call(
+        "source_add_and_wait",
+        {
+            "notebook": NB_ID,
+            "source_type": "url",
+            "url": internal,
+            "allow_internal": True,
+        },
+    )
+    assert result.structured_content["ok"] is True
+    mock_client.sources.add_url.assert_awaited_once_with(NB_ID, internal)
+
+
+async def test_source_add_and_wait_internal_rejected_without_allow_internal(
+    mcp_call, mock_client
+) -> None:
+    """Without allow_internal the SSRF guard rejects an internal-host URL before any add."""
+    mock_client.sources.add_url = AsyncMock()
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_call(
+            "source_add_and_wait",
+            {"notebook": NB_ID, "source_type": "url", "url": "http://127.0.0.1:8080/x"},
+        )
+    assert "VALIDATION" in str(excinfo.value)
+    mock_client.sources.add_url.assert_not_called()
+
+
+async def test_source_add_and_wait_youtube_ready(mcp_call, mock_client) -> None:
+    """A youtube add-and-wait dispatches through the YouTube-host guard, then waits."""
+    yt = "https://www.youtube.com/watch?v=abc"
+    mock_client.sources.add_url = AsyncMock(
+        return_value=FakeReadyTextSource(id=SRC_ID, title="Vid")
+    )
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeReadyTextSource(id=SRC_ID, title="Vid")
+    )
+    result = await mcp_call(
+        "source_add_and_wait",
+        {"notebook": NB_ID, "source_type": "youtube", "url": yt},
+    )
+    sc = result.structured_content
+    assert sc["source_id"] == SRC_ID
+    assert sc["ok"] is True
+    mock_client.sources.add_url.assert_awaited_once_with(NB_ID, yt)
+
+
+async def test_source_add_and_wait_youtube_rejects_non_youtube_url(mcp_call, mock_client) -> None:
+    """source_type='youtube' with a non-YouTube URL is a VALIDATION error, no add."""
+    mock_client.sources.add_url = AsyncMock()
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_call(
+            "source_add_and_wait",
+            {"notebook": NB_ID, "source_type": "youtube", "url": "https://example.com/x"},
+        )
+    assert "VALIDATION" in str(excinfo.value)
+    mock_client.sources.add_url.assert_not_called()
+
+
+async def test_source_add_and_wait_not_found_bucket(mcp_call, mock_client) -> None:
+    """A wait that raises SourceNotFoundError → ``not_found`` bucket + top-level source_id."""
+    mock_client.sources.add_url = AsyncMock(return_value=FakeSource(id=SRC_ID, title="Ghost"))
+    mock_client.sources.wait_until_ready = AsyncMock(side_effect=SourceNotFoundError(SRC_ID))
+    result = await mcp_call(
+        "source_add_and_wait",
+        {"notebook": NB_ID, "source_type": "url", "url": "https://example.com/ghost"},
+    )
+    sc = result.structured_content
+    assert sc["source_id"] == SRC_ID
+    assert sc["ok"] is False
+    assert sc["not_found"] == [{"source_id": SRC_ID, "error": f"Source not found: {SRC_ID}"}]
+
+
+async def test_source_add_and_wait_add_failure_raises_no_bucket(mcp_call, mock_client) -> None:
+    """When the ADD itself fails (e.g. an RPCError), no source exists to wait on: the
+    error flows through mcp_errors() as a tool error — it does NOT land in a wait
+    bucket, and no source_id is returned. The wait is never reached."""
+    mock_client.sources.add_url = AsyncMock(side_effect=RPCError("boom"))
+    mock_client.sources.wait_until_ready = AsyncMock()
+    with pytest.raises(ToolError):
+        await mcp_call(
+            "source_add_and_wait",
+            {"notebook": NB_ID, "source_type": "url", "url": "https://example.com/a"},
+        )
+    mock_client.sources.wait_until_ready.assert_not_called()

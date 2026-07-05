@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **MCP research tools now accept the poll id under one name, `poll_task_id`.**
+  `research_status`, `research_import`, and `research_cancel` previously took the
+  value that `research_start` / `research_status` surface as `poll_task_id` under
+  mismatched parameter names (`task_id` on status/import, `run_id` on cancel),
+  forcing docstring warnings about which id goes where and inviting copy-paste
+  mistakes. All three now accept it as `poll_task_id`, so the value pastes
+  verbatim from one tool's output into the next. The old `task_id` / `run_id`
+  names still work as **deprecated aliases** (removed in v0.9.0): passing one
+  emits a `DeprecationWarning` and adds a `deprecation` note to the result;
+  passing both names with different values is a validation error.
+  ([#1789](https://github.com/teng-lin/notebooklm-py/issues/1789))
+
+### Fixed
+
+- **The `.mcpb` desktop bundle now ships for pre-releases and launches the
+  pinned pre-release.** The bundled launcher (`run_server.py`) always ran
+  `uvx --from "notebooklm-py[mcp]"`, which resolves the latest *stable* server —
+  so a pre-release bundle would have run the stable release, not the
+  pre-release (which is why `publish-mcpb.yml` skipped pre-releases). The
+  launcher now reads its version from the bundled `manifest.json` and, for a
+  `vX.Y.ZaN` bundle, pins the exact version (`uvx --from
+  "notebooklm-py[mcp]==X.Y.ZaN"` — the explicit `==` pin resolves the pre-release
+  under uv's default resolver, without loosening transitive dependency
+  resolution); stable bundles stay unpinned and track the latest stable server.
+  `publish-mcpb.yml` now ships a bundle for pre-releases too.
+
 ## [0.8.0]
 
 The headline of 0.8.0 is **integrations**: NotebookLM is now reachable from AI

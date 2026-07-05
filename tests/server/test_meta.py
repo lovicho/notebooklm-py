@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
+from notebooklm.server.app import create_app
 from notebooklm.server.routes import meta as meta_route
 
+from .conftest import TEST_TOKEN
 from .fakes import FakeClient
 
 
@@ -53,6 +57,89 @@ def test_server_info_does_not_leak_storage_path(
     # No absolute on-disk storage path anywhere in the response (MCP scrubs it too).
     assert "storage_path" not in body["auth"]
     assert "/" not in str(body["auth"].get("profile", ""))
+
+
+def test_server_info_profile_is_resolved_not_null(
+    authed_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``auth.profile`` reports the resolved profile, never ``None`` (#1790).
+
+    The server never sets a module-level active profile, so the field used to come
+    back ``null`` even on a healthy session. It must name the profile the auth probe
+    ran against (``"default"`` when no named profile is configured).
+    """
+    from notebooklm import paths
+
+    _patch_auth(monkeypatch, all_passed=True)
+    monkeypatch.delenv("NOTEBOOKLM_PROFILE", raising=False)
+    monkeypatch.setattr(paths, "_active_profile", None)
+    body = authed_client.get("/v1/server/info").json()
+    assert body["auth"]["profile"] == "default"
+
+
+def test_server_info_uses_bound_profile_for_probe(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``create_app(profile=X)`` makes server_info probe that same profile (#1791)."""
+    from notebooklm import paths
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_run(plan: Any, *, read_env_auth_json: Any) -> _FakeAuthResult:
+        seen["profile"] = plan.profile
+        seen["storage_path"] = plan.storage_path
+        return _FakeAuthResult(all_passed=True)
+
+    @asynccontextmanager
+    async def factory() -> AsyncIterator[FakeClient]:
+        yield FakeClient()
+
+    monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
+    monkeypatch.delenv("NOTEBOOKLM_PROFILE", raising=False)
+    monkeypatch.setattr(paths, "_active_profile", None)
+    monkeypatch.setattr(meta_route, "run_auth_check", _fake_run)
+
+    app = create_app(profile="work", client_factory=factory)
+    headers = {"Authorization": f"Bearer {TEST_TOKEN}", "Host": "127.0.0.1"}
+    with TestClient(app, headers=headers, client=("127.0.0.1", 5555)) as client:
+        body = client.get("/v1/server/info").json()
+
+    assert body["auth"]["profile"] == "work"
+    assert seen == {"profile": "work", "storage_path": paths.get_storage_path("work")}
+    assert paths.get_active_profile() is None
+
+
+def test_server_info_locks_resolved_profile_for_lifespan(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``profile=None`` resolves once at startup, matching the lifespan-bound client."""
+    from notebooklm import paths
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_run(plan: Any, *, read_env_auth_json: Any) -> _FakeAuthResult:
+        seen["profile"] = plan.profile
+        seen["storage_path"] = plan.storage_path
+        return _FakeAuthResult(all_passed=True)
+
+    @asynccontextmanager
+    async def factory() -> AsyncIterator[FakeClient]:
+        yield FakeClient()
+
+    monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
+    monkeypatch.setenv("NOTEBOOKLM_PROFILE", "work")
+    monkeypatch.setattr(paths, "_active_profile", None)
+    monkeypatch.setattr(meta_route, "run_auth_check", _fake_run)
+
+    app = create_app(client_factory=factory)
+    headers = {"Authorization": f"Bearer {TEST_TOKEN}", "Host": "127.0.0.1"}
+    with TestClient(app, headers=headers, client=("127.0.0.1", 5555)) as client:
+        monkeypatch.setenv("NOTEBOOKLM_PROFILE", "other")
+        body = client.get("/v1/server/info").json()
+
+    assert body["auth"]["profile"] == "work"
+    assert seen == {"profile": "work", "storage_path": paths.get_storage_path("work")}
+    assert paths.get_active_profile() is None
 
 
 def test_server_info_include_account(

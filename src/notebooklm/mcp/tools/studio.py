@@ -41,7 +41,12 @@ from .._confirm import DESTRUCTIVE, READ_ONLY, needs_confirmation
 from .._context import get_client, get_file_transfer
 from .._errors import mcp_errors
 from .._paginate import DEFAULT_LIMIT, paginate
-from .._resolve import resolve_artifact, resolve_notebook, resolve_sources
+from .._resolve import (
+    reject_non_canonical_id,
+    resolve_artifact,
+    resolve_notebook,
+    resolve_sources,
+)
 from ._passthrough import passthrough_child_id, passthrough_notebook_id
 from ._studio_download import (
     _DOWNLOAD_SPECS,
@@ -53,6 +58,7 @@ from ._studio_download import (
     _resolve_artifact_id,
 )
 from ._studio_items import (
+    compact_studio_item,
     resolve_studio_item,
     studio_items,
     summarize_studio_item,
@@ -105,7 +111,7 @@ _KIND_OPTIONS: dict[str, dict[str, tuple[str, ...] | None]] = {
         "audio_length": ("short", "default", "long"),
     },
     "video": {
-        "video_format": ("explainer", "brief", "cinematic"),
+        "video_format": ("explainer", "brief", "cinematic", "short"),
         "style": (
             "auto",
             "custom",
@@ -204,27 +210,26 @@ def register(mcp: Any) -> None:
             "video",
         ]
         | None = None,
-        detail: Literal["summary", "full"] = "summary",
+        detail: Literal["compact", "summary", "full"] = "summary",
         limit: int = DEFAULT_LIMIT,
         offset: int = 0,
     ) -> dict[str, Any]:
         """List a notebook's Studio panel — text notes AND generated artifacts.
 
         Accepts a notebook name or ID. Returns a merged ``items`` list; each item has
-        ``id`` / ``title`` / ``type`` (``note`` or a hyphenated artifact kind). Artifacts
-        carry ``status_label`` and ``url``.
+        ``id`` / ``title`` / ``type`` (``note`` or a hyphenated artifact kind); artifacts
+        also carry ``status_label`` / ``url``. Bounded page of ``limit`` (default 50)
+        from ``offset``, with ``total`` / ``offset`` / ``has_more``.
 
-        * List mode: a bounded page of ``limit`` (default 50) from ``offset``, plus
-          ``total`` / ``offset`` / ``has_more``.
-        * ``detail`` (note-body token-saver): ``summary`` (default) gives each note a
-          bounded ``content_preview`` + full-body ``char_count`` instead of the whole
-          ``content``; ``full`` returns it. Artifacts are unaffected. Read a full body
-          via ``item=<ref>`` or ``detail="full"``.
+        * ``detail`` ladder: ``summary`` (default) gives each note a bounded
+          ``content_preview`` + ``char_count`` (artifacts unaffected); ``full`` returns
+          the whole ``content``; ``compact`` collapses every item to ``id`` / ``title``
+          / ``type`` / ``status_label`` / ``created_at`` (no body/``url``) — a low-token
+          roster.
         * ``kind`` filters to one ``type``.
-        * ``item`` (name or id — note OR artifact) fetches just that item as a 1-element
-          list with the note's FULL ``content``; no match is a NOT_FOUND error.
-          ``limit`` / ``offset`` / ``detail`` are ignored with ``item``; ``kind`` scopes
-          the resolution.
+        * ``item`` (name or id) fetches just that item as a 1-element list with the
+          note's FULL ``content``; no match is NOT_FOUND. ``limit`` / ``offset`` /
+          ``detail`` are ignored with ``item``; ``kind`` scopes resolution.
         """
         client = get_client(ctx)
         with mcp_errors():
@@ -250,16 +255,21 @@ def register(mcp: Any) -> None:
                     "offset": 0,
                     "has_more": False,
                 }
-            items = await studio_items(client, nb_id)
+            # ``compact`` needs each row's ``created_at`` (dropped by the default
+            # projection); fetch it only for that mode so the other paths are unchanged.
+            items = await studio_items(client, nb_id, include_created_at=(detail == "compact"))
             if kind is not None:
                 items = [it for it in items if it["type"] == kind]
             page, meta = paginate(items, limit, offset)
-            # Summarize only the returned page (not the whole list) so the note-body
-            # slicing is O(limit): default ``summary`` swaps each note's full body for a
-            # bounded ``content_preview`` + ``char_count`` (full body via ``detail="full"``
-            # or ``item=<ref>``); ``full`` leaves the projection untouched.
+            # Project only the returned page (not the whole list) so the work is
+            # O(limit): ``summary`` (default) swaps each note's full body for a bounded
+            # ``content_preview`` + ``char_count`` (full body via ``detail="full"`` or
+            # ``item=<ref>``); ``compact`` collapses every item to the roster row;
+            # ``full`` leaves the projection untouched.
             if detail == "summary":
                 page = [summarize_studio_item(it) for it in page]
+            elif detail == "compact":
+                page = [compact_studio_item(it) for it in page]
             return {"notebook_id": nb_id, "items": page, **meta}
 
     @mcp.tool
@@ -293,7 +303,7 @@ def register(mcp: Any) -> None:
         audio_length: Literal["short", "default", "long"] | None = None,
         quantity: Literal["fewer", "standard", "more"] | None = None,
         difficulty: Literal["easy", "medium", "hard"] | None = None,
-        video_format: Literal["explainer", "brief", "cinematic"] | None = None,
+        video_format: Literal["explainer", "brief", "cinematic", "short"] | None = None,
         # ``style`` is shared by ``video`` and ``infographic`` with DIFFERENT value
         # sets (overlap only auto/anime/kawaii). One param carries one Literal, so this
         # is the UNION of both kinds' values; the runtime ``_KIND_OPTIONS`` loop narrows
@@ -340,10 +350,10 @@ def register(mcp: Any) -> None:
         * ``audio``        — podcast-style overview (``audio_format``:
           deep-dive|brief|critique|debate, ``audio_length``: short|default|long).
         * ``video``        — video overview (``video_format``:
-          explainer|brief|cinematic, ``style``: auto|custom|classic|whiteboard|
+          explainer|brief|cinematic|short, ``style``: auto|custom|classic|whiteboard|
           kawaii|anime|watercolor|retro-print|heritage|paper-craft, ``style_prompt``:
           free-text custom-style prompt — requires ``style=custom``).
-        * ``cinematic-video`` — AI-generated documentary video (no per-kind options).
+        * ``cinematic-video`` — AI-generated documentary video.
         * ``slide-deck``   — slide deck (``deck_format``: detailed|presenter,
           ``deck_length``: default|short).
         * ``quiz`` / ``flashcards`` — study aids (``quantity``:
@@ -352,7 +362,7 @@ def register(mcp: Any) -> None:
           landscape|portrait|square, ``detail``: concise|standard|detailed,
           ``style``: auto|sketch-note|professional|bento-grid|editorial|
           instructional|bricks|clay|anime|kawaii|scientific).
-        * ``data-table``   — extracted data table (no per-kind options).
+        * ``data-table``   — extracted data table.
         * ``mind-map``     — mind map (``map_kind``: interactive|note-backed).
         * ``report``       — text report (``report_format``:
           briefing-doc|study-guide|blog-post|custom).
@@ -464,7 +474,13 @@ def register(mcp: Any) -> None:
                 notebook_resolver=passthrough_notebook_id,
                 source_resolver=_passthrough_sources,
             )
-            return _generation_payload(nb_id, result)
+            payload = _generation_payload(nb_id, result)
+            # Echo the resolved canonical source scope when one was passed (by
+            # id/prefix/title) so a title-scoped generation hands back the ids for
+            # deterministic chaining (#1808). Omitted when unscoped (all sources).
+            if resolved_source_ids is not None:
+                payload["source_ids"] = resolved_source_ids
+            return payload
 
     @mcp.tool(annotations=READ_ONLY)
     async def studio_status(ctx: Context, notebook: str, task_id: str) -> dict[str, Any]:
@@ -574,6 +590,12 @@ def register(mcp: Any) -> None:
                 artifact_id = resolved_id
             elif artifact_type is None:
                 raise ValidationError("Provide `artifact` (name/id) or `artifact_type`.")
+            # Strict IDs-only mode: only the explicit `artifact_id` path needs the
+            # guard — the `artifact` name/id path already ran through strict-gated
+            # resolve_artifact, so `artifact_id` is that full UUID there. Reject a
+            # prefix before either transport lists (#1808).
+            if artifact is None and artifact_id is not None:
+                reject_non_canonical_id(artifact_id, "artifact")
             spec = _DOWNLOAD_SPECS.get(artifact_type)
             if spec is None:
                 raise ValidationError(
@@ -669,7 +691,11 @@ def register(mcp: Any) -> None:
                 notebook_resolver=_passthrough_download_notebook,
                 artifact_resolver=_resolve_artifact_id,
             )
-            return to_jsonable(result)
+            # Echo the resolved canonical notebook_id (DownloadResult carries none)
+            # so a download-by-name response is chainable by id, matching the broker
+            # path above and the other studio tools (#1808). Explicit key AFTER the
+            # spread so nb_id always wins if DownloadResult ever grows a notebook_id.
+            return {**to_jsonable(result), "notebook_id": nb_id}
 
     @mcp.tool
     async def studio_rename(

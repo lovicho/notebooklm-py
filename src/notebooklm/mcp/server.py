@@ -25,6 +25,7 @@ from fastmcp import FastMCP
 from fastmcp.server.auth import AuthProvider
 
 from ..client import NotebookLMClient
+from ..paths import get_active_profile, resolve_profile, set_active_profile
 from ._context import AppState
 from ._filelink import FileTransferConfig
 
@@ -37,7 +38,9 @@ SERVER_INSTRUCTIONS = (
     "notebook's sources, generate and download studio artifacts (audio, video, "
     "reports, quizzes, …), and run deep research. Notebook- and source-scoped "
     "tools accept a name OR an id (full or unique prefix); use the matching "
-    "*_list tool to discover them. Long-running generation is split into a "
+    "*_list tool to discover them (set NOTEBOOKLM_MCP_STRICT_IDS=1 to require "
+    "full canonical ids and reject names/prefixes, for deterministic automation). "
+    "Long-running generation is split into a "
     "non-blocking generate step (returns a task_id) plus status polling. "
     "Destructive tools — and sharing-widening tools (making a notebook public, "
     "granting a user access) — require `confirm=true`; called without it they "
@@ -76,7 +79,8 @@ def create_server(
 
     Args:
         profile: Auth profile bound for the whole process. Defaults to the active
-            profile when ``None``.
+            profile when ``None``. Also drives process-wide profile resolution
+            for diagnostics such as the ``server_info`` tool.
         client_factory: Test seam — a zero-arg callable returning an async context
             manager that yields a client. Defaults to
             ``NotebookLMClient.from_storage(profile=...)``.
@@ -109,8 +113,13 @@ def create_server(
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncIterator[AppState]:
-        async with factory() as client:
-            yield AppState(client=client, file_transfer=file_transfer)
+        previous_profile = get_active_profile()
+        set_active_profile(resolve_profile(profile))
+        try:
+            async with factory() as client:
+                yield AppState(client=client, file_transfer=file_transfer)
+        finally:
+            set_active_profile(previous_profile)
 
     mcp = FastMCP(name=SERVER_NAME, instructions=SERVER_INSTRUCTIONS, lifespan=lifespan, auth=auth)
     register_all(mcp)
