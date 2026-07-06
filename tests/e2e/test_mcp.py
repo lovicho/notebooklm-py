@@ -208,6 +208,8 @@ TOOL_COVERAGE: dict[str, str] = {
     "source_rename": "TestMcpSources.test_source_roundtrip",
     "source_delete": "TestMcpSources.test_source_roundtrip",
     "source_wait": "TestMcpSources.test_source_roundtrip",
+    "source_add_and_wait": "tests/unit/mcp/test_sources.py (add+wait composite; unit)",
+    "source_upload_bytes": "tests/unit/mcp/test_file_tools.py (in-channel bytes upload; unit)",
     # chat
     "chat_ask": "TestMcpChat.test_configure_then_ask",
     "chat_configure": "TestMcpChat.test_configure_then_ask",
@@ -363,6 +365,7 @@ class TestMcpSources:
 
 
 @requires_auth
+@pytest.mark.live_chat_ask
 class TestMcpChat:
     """Chat domain: configure then ask against the read-only notebook."""
 
