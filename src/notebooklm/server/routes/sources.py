@@ -30,6 +30,7 @@ import shutil
 import tempfile
 from typing import Annotated, Any, Literal
 
+import pydantic
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel
 
@@ -41,24 +42,37 @@ from ..._app.errors import classify
 from ..._app.views import source_view
 from ...client import NotebookLMClient
 from ...exceptions import ValidationError
-from .._context import get_client, get_pending
+from .._context import get_client, get_pending, limit_source_mutation, limit_source_wait
 from .._errors import CATEGORY_STATUS, error_item, safe_detail
 from .._pagination import MAX_LIMIT, paginate_envelope
 from .._pending import PendingRegistry
 from ._passthrough import passthrough_source_id
 
-__all__ = ["MAX_UPLOAD_BYTES", "MAX_WAIT_TIMEOUT", "router"]
+__all__ = [
+    "MAX_BATCH_URLS",
+    "MAX_UPLOAD_BYTES",
+    "MAX_WAIT_CONCURRENT_SOURCES",
+    "MAX_WAIT_SOURCE_IDS",
+    "MAX_WAIT_TIMEOUT",
+    "router",
+]
 
 router = APIRouter(prefix="/notebooks/{notebook_id}/sources", tags=["sources"])
 
 ClientDep = Annotated[NotebookLMClient, Depends(get_client)]
 PendingDep = Annotated[PendingRegistry, Depends(get_pending)]
+_field_validator = getattr(pydantic, "field_validator", pydantic.validator)
 
 #: Max accepted upload size. Bounds temp-file disk pressure under concurrent
 #: uploads; an upload exceeding it is rejected with 413 before it is spooled to
 #: completion. 200 MiB comfortably covers documents/audio while staying
 #: single-user-safe.
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+
+#: Max URL entries accepted by the REST batch-add endpoint. Each entry is added
+#: sequentially under the source-mutation limiter, so the cap bounds how long a
+#: single request can occupy one shared mutation slot.
+MAX_BATCH_URLS = 20
 
 #: Chunk size when streaming an upload to the temp file.
 _UPLOAD_CHUNK = 1024 * 1024
@@ -68,6 +82,14 @@ _UPLOAD_CHUNK = 1024 * 1024
 #: backstop that turns a ``timeout=inf`` (valid JSON) into a clean 400 rather
 #: than a request that never returns.
 MAX_WAIT_TIMEOUT = 3600.0
+
+#: Max source ids accepted by one ``source_wait`` request. NotebookLM notebooks
+#: are source-limited; this cap preserves normal all-source waits while blocking
+#: pathological route fanout.
+MAX_WAIT_SOURCE_IDS = 100
+
+#: Max simultaneous per-source wait pollers spawned by one REST wait request.
+MAX_WAIT_CONCURRENT_SOURCES = 8
 
 
 #: Safe-basename sanitizer for a spooled upload. Aliased to the shared neutral
@@ -93,11 +115,17 @@ class SourceAddText(BaseModel):
 
 
 class SourceAddDrive(BaseModel):
-    """Request body for adding a Google Drive document source."""
+    """Request body for adding a Google Drive document source.
+
+    ``mime_type`` is REQUIRED (no ``google-doc`` default): defaulting a non-Doc
+    Drive file to ``google-doc`` silently routes it through the Google Docs
+    converter, fails the import, and leaves an error source stub behind (#1827).
+    An omitted value is rejected by Pydantic (422) before any add RPC runs.
+    """
 
     document_id: str
     title: str | None = None
-    mime_type: mut_core.DriveMimeChoice = "google-doc"
+    mime_type: mut_core.DriveMimeChoice
 
 
 class SourceAddBatch(BaseModel):
@@ -105,6 +133,12 @@ class SourceAddBatch(BaseModel):
 
     urls: list[str]
     allow_internal: bool = False
+
+    @_field_validator("urls")
+    def _limit_urls(cls, value: list[str]) -> list[str]:
+        if len(value) > MAX_BATCH_URLS:
+            raise ValueError(f"urls must contain at most {MAX_BATCH_URLS} entries")
+        return value
 
 
 class SourceRename(BaseModel):
@@ -123,6 +157,12 @@ class SourceWaitBody(BaseModel):
     source_ids: list[str] | None = None
     timeout: float = 120.0
     interval: float = 1.0
+
+    @_field_validator("source_ids")
+    def _limit_source_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and len(value) > MAX_WAIT_SOURCE_IDS:
+            raise ValueError(f"source_ids must contain at most {MAX_WAIT_SOURCE_IDS} entries")
+        return value
 
 
 async def _add_source(
@@ -206,7 +246,7 @@ async def get_source(
     return source_view(source)
 
 
-@router.post("/url", status_code=201)
+@router.post("/url", status_code=201, dependencies=[Depends(limit_source_mutation)])
 async def add_url(
     notebook_id: str, body: SourceAddUrl, client: ClientDep, pending: PendingDep
 ) -> dict[str, Any]:
@@ -222,7 +262,7 @@ async def add_url(
     )
 
 
-@router.post("/text", status_code=201)
+@router.post("/text", status_code=201, dependencies=[Depends(limit_source_mutation)])
 async def add_text(
     notebook_id: str, body: SourceAddText, client: ClientDep, pending: PendingDep
 ) -> dict[str, Any]:
@@ -364,16 +404,20 @@ async def get_source_content(
     }
 
 
-@router.post("/drive", status_code=201)
+@router.post("/drive", status_code=201, dependencies=[Depends(limit_source_mutation)])
 async def add_drive(
     notebook_id: str, body: SourceAddDrive, client: ClientDep, pending: PendingDep
 ) -> dict[str, Any]:
     """Add a Google Drive document as a source.
 
-    ``mime_type`` is one of ``google-doc`` (default) / ``google-slides`` /
-    ``google-sheets`` / ``pdf`` (validated by the neutral core, which 400s on an
-    unknown value). Flows through ``_app.source_mutations.execute_source_add_drive``
-    (the neutral ``source_add`` core has no Drive path).
+    ``mime_type`` is REQUIRED — one of ``google-doc`` / ``google-slides`` /
+    ``google-sheets`` / ``pdf``. It is a ``Literal``, so an omitted OR unknown value
+    is rejected with 422 by Pydantic at the schema boundary (the neutral core's
+    ``ValidationError`` guard is a defense-in-depth backstop that this route never
+    reaches). There is no ``google-doc`` default because it silently fails non-Doc
+    Drive imports and leaves an error stub behind (#1827). Flows through
+    ``_app.source_mutations.execute_source_add_drive`` (the neutral ``source_add``
+    core has no Drive path).
     """
     result = await mut_core.execute_source_add_drive(
         client,
@@ -407,7 +451,7 @@ def _batch_item_is_fatal(exc: BaseException) -> bool:
     return status in (401, 429) or status >= 500
 
 
-@router.post("/batch", status_code=201)
+@router.post("/batch", status_code=201, dependencies=[Depends(limit_source_mutation)])
 async def add_batch(
     notebook_id: str,
     body: SourceAddBatch,
@@ -492,7 +536,7 @@ async def add_batch(
     }
 
 
-@router.post("/wait")
+@router.post("/wait", dependencies=[Depends(limit_source_wait)])
 async def wait_sources(notebook_id: str, body: SourceWaitBody, client: ClientDep) -> dict[str, Any]:
     """Wait for source(s) to finish processing (mirrors MCP ``source_wait``).
 
@@ -501,11 +545,11 @@ async def wait_sources(notebook_id: str, body: SourceWaitBody, client: ClientDep
 
         {"notebook_id", "ok", "ready", "timed_out", "failed", "not_found"}
 
-    ``ready`` holds the sources that reached READY (each with ``kind`` /
-    ``status_label`` labels); the error buckets hold ``{"source_id", "error"}``
-    entries. ``ok`` is true iff all three error buckets are empty — the
-    all-sources mode reports partial progress rather than discarding the sources
-    that did become ready.
+    plus per-bucket ``*_count`` and a ``total_count`` (their sum). ``ready`` holds
+    the sources that reached READY (each with ``kind`` / ``status_label`` labels);
+    the error buckets hold ``{"source_id", "error"}`` entries. ``ok`` is true iff
+    all three error buckets are empty — the all-sources mode reports partial
+    progress rather than discarding the sources that did become ready.
     """
     # Reject non-finite bounds first: JSON allows ``inf`` / ``NaN`` (Python's
     # json module parses ``Infinity`` / ``NaN``), and ``timeout=inf`` would wait
@@ -530,16 +574,21 @@ async def wait_sources(notebook_id: str, body: SourceWaitBody, client: ClientDep
             raise ValidationError(
                 "source_ids must not be empty; omit it entirely to wait for all sources"
             )
-        ids = list(body.source_ids)
+        ids = _dedupe_source_ids(body.source_ids)
     else:
-        ids = [s.id for s in await client.sources.list(notebook_id)]
+        ids = _dedupe_source_ids([s.id for s in await client.sources.list(notebook_id)])
+        if len(ids) > MAX_WAIT_SOURCE_IDS:
+            raise ValidationError(
+                f"notebook has {len(ids)} sources; wait-all is capped at "
+                f"{MAX_WAIT_SOURCE_IDS}. Pass source_ids to wait for a smaller subset."
+            )
     outcomes = await _wait_all_sources(
         client, notebook_id, ids, timeout=body.timeout, interval=body.interval
     )
     return _aggregate_wait_outcomes(notebook_id, outcomes)
 
 
-@router.patch("/{source_id}")
+@router.patch("/{source_id}", dependencies=[Depends(limit_source_mutation)])
 async def rename_source(
     notebook_id: str, source_id: str, body: SourceRename, client: ClientDep
 ) -> dict[str, Any]:
@@ -554,7 +603,7 @@ async def rename_source(
     return source_view(result.source)
 
 
-@router.delete("/{source_id}", status_code=204)
+@router.delete("/{source_id}", status_code=204, dependencies=[Depends(limit_source_mutation)])
 async def delete_source(
     notebook_id: str, source_id: str, client: ClientDep, pending: PendingDep
 ) -> Response:
@@ -581,25 +630,48 @@ async def _wait_all_sources(
     still-running sibling pollers before re-raising (it then flows through the
     server's classify-once handler) rather than leaking coroutines.
     """
-    tasks = [
-        asyncio.create_task(
-            wait_core.execute_source_wait(
+    if not source_ids:
+        return []
+
+    outcomes: list[wait_core.SourceWaitOutcome | None] = [None] * len(source_ids)
+    source_iter = iter(enumerate(source_ids))
+
+    async def _worker() -> None:
+        for index, sid in source_iter:
+            outcomes[index] = await wait_core.execute_source_wait(
                 client,
                 wait_core.SourceWaitPlan(
-                    notebook_id=notebook_id, source_id=sid, timeout=timeout, interval=interval
+                    notebook_id=notebook_id,
+                    source_id=sid,
+                    timeout=timeout,
+                    interval=interval,
                 ),
             )
-        )
-        for sid in source_ids
+
+    tasks = [
+        asyncio.create_task(_worker())
+        for _ in range(min(len(source_ids), MAX_WAIT_CONCURRENT_SOURCES))
     ]
     try:
-        return list(await asyncio.gather(*tasks))
+        await asyncio.gather(*tasks)
     except BaseException:
         for task in tasks:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
+
+    ready_outcomes: list[wait_core.SourceWaitOutcome] = []
+    for outcome in outcomes:
+        if outcome is None:
+            raise AssertionError("source wait worker exited without producing an outcome")
+        ready_outcomes.append(outcome)
+    return ready_outcomes
+
+
+def _dedupe_source_ids(source_ids: list[str]) -> list[str]:
+    """Return source ids in first-seen order with duplicates removed."""
+    return list(dict.fromkeys(source_ids))
 
 
 def _aggregate_wait_outcomes(
@@ -628,6 +700,12 @@ def _aggregate_wait_outcomes(
             not_found.append(_wait_bucket_entry(outcome.error))
         else:  # exhaustive over the closed SourceWaitOutcome union
             raise AssertionError(f"unhandled SourceWaitOutcome: {outcome!r}")
+    # Explicit counts mirror the MCP aggregate (#1822): additive to the buckets,
+    # ``total_count`` folds all four so it equals the number of sources waited on.
+    ready_count = len(ready)
+    timed_out_count = len(timed_out)
+    failed_count = len(failed)
+    not_found_count = len(not_found)
     return {
         "notebook_id": notebook_id,
         "ok": not (timed_out or failed or not_found),
@@ -635,6 +713,11 @@ def _aggregate_wait_outcomes(
         "timed_out": timed_out,
         "failed": failed,
         "not_found": not_found,
+        "ready_count": ready_count,
+        "timed_out_count": timed_out_count,
+        "failed_count": failed_count,
+        "not_found_count": not_found_count,
+        "total_count": ready_count + timed_out_count + failed_count + not_found_count,
     }
 
 

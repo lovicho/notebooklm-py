@@ -34,7 +34,7 @@ from notebooklm.mcp.tools._content_sanity import (  # noqa: E402 - after importo
     _THIN_SOURCE_CHAR_THRESHOLD,
 )
 from notebooklm.rpc.types import SourceStatus  # noqa: E402 - after importorskip guard
-from notebooklm.types import Label  # noqa: E402 - after importorskip guard
+from notebooklm.types import Label, Source  # noqa: E402 - after importorskip guard
 
 from .conftest import AsyncMock  # noqa: E402 - after importorskip guard
 
@@ -703,20 +703,34 @@ async def test_source_delete_with_confirm_deletes(mcp_call, mock_client) -> None
 
 # ---------------------------------------------------------------------------
 # source_wait — both modes share ONE aggregate contract:
-#   {notebook_id, ok, ready, timed_out, failed, not_found}
+#   {notebook_id, ok, ready, timed_out, failed, not_found,
+#    ready_count, timed_out_count, failed_count, not_found_count, total_count}
 # ``ready`` carries _source_view rows; the three error buckets carry
-# {source_id, error}. ``ok`` is True iff all three error buckets are empty.
+# {source_id, error}. ``ok`` is True iff all three error buckets are empty. The
+# ``*_count`` scalars mirror the bucket lengths and ``total_count`` folds all
+# four buckets (#1822) — additive to the arrays, which stay for compatibility.
 # ---------------------------------------------------------------------------
 
-_AGGREGATE_KEYS = {"notebook_id", "ok", "ready", "timed_out", "failed", "not_found"}
+_AGGREGATE_BUCKET_KEYS = ("ready", "timed_out", "failed", "not_found")
+_AGGREGATE_COUNT_KEYS = {
+    "ready_count",
+    "timed_out_count",
+    "failed_count",
+    "not_found_count",
+    "total_count",
+}
+_AGGREGATE_KEYS = {"notebook_id", "ok", *_AGGREGATE_BUCKET_KEYS} | _AGGREGATE_COUNT_KEYS
 
 
 def _assert_aggregate_shape(structured: dict[str, Any]) -> None:
-    """Pin the six-key aggregate so the shape isn't re-asserted per test."""
+    """Pin the aggregate keys + count invariants so they aren't re-asserted per test."""
     assert set(structured) == _AGGREGATE_KEYS
     assert isinstance(structured["ok"], bool)
-    for key in ("ready", "timed_out", "failed", "not_found"):
+    for key in _AGGREGATE_BUCKET_KEYS:
         assert isinstance(structured[key], list)
+        # Each ``*_count`` scalar equals its bucket length (#1822).
+        assert structured[f"{key}_count"] == len(structured[key])
+    assert structured["total_count"] == sum(len(structured[key]) for key in _AGGREGATE_BUCKET_KEYS)
 
 
 def _dispatch_wait_until_ready(by_id: dict[str, Any]) -> Any:
@@ -861,6 +875,12 @@ async def test_source_wait_all_sources_partial_progress(mcp_call, mock_client) -
     assert [e["source_id"] for e in sc["timed_out"]] == [timeout_id]
     assert [e["source_id"] for e in sc["failed"]] == [failed_id]
     assert [e["source_id"] for e in sc["not_found"]] == [missing_id]
+    # Explicit counts mirror the buckets and total across all four (#1822).
+    assert sc["ready_count"] == 1
+    assert sc["timed_out_count"] == 1
+    assert sc["failed_count"] == 1
+    assert sc["not_found_count"] == 1
+    assert sc["total_count"] == 4
 
 
 async def test_source_wait_all_sources_empty_notebook(mcp_call, mock_client) -> None:
@@ -876,6 +896,11 @@ async def test_source_wait_all_sources_empty_notebook(mcp_call, mock_client) -> 
         "timed_out": [],
         "failed": [],
         "not_found": [],
+        "ready_count": 0,
+        "timed_out_count": 0,
+        "failed_count": 0,
+        "not_found_count": 0,
+        "total_count": 0,
     }
 
 
@@ -1342,6 +1367,30 @@ async def test_source_add_drive_bad_mime_is_validation_error(mcp_call, mock_clie
     mock_client.sources.add_drive.assert_not_called()
 
 
+@pytest.mark.parametrize("tool", ["source_add", "source_add_and_wait"])
+async def test_source_add_drive_missing_mime_is_validation_error(
+    tool, mcp_call, mock_client
+) -> None:
+    """An omitted drive mime_type is rejected (no google-doc default) and no add
+    RPC runs, so no error source stub is left behind (#1827)."""
+    mock_client.sources.add_drive = AsyncMock(return_value=FakeSource(id=SRC_ID))
+    with pytest.raises(ToolError) as excinfo:
+        await mcp_call(
+            tool,
+            {
+                "notebook": NB_ID,
+                "source_type": "drive",
+                "document_id": "drivefile123",
+            },
+        )
+    msg = str(excinfo.value)
+    assert "VALIDATION" in msg
+    assert "mime_type" in msg
+    # Rejected before resolve_notebook / the add RPC — nothing is persisted.
+    mock_client.sources.add_drive.assert_not_called()
+    mock_client.notebooks.get.assert_not_called()
+
+
 async def test_source_add_mime_type_has_no_schema_enum(mcp_list_tools) -> None:
     """``mime_type`` deliberately stays a free-text ``str`` — NOT a ``Literal`` — so its
     schema carries NO ``enum`` (issue #1759, decision b). It is dual-use: ``source_type=
@@ -1372,10 +1421,12 @@ async def test_source_add_mime_type_has_no_schema_enum(mcp_list_tools) -> None:
         ("file", {"path": "/tmp/doc.pdf"}, {"url": "https://example.com/a"}),
         ("file", {"path": "/tmp/doc.pdf"}, {"text": "hi"}),
         ("file", {"path": "/tmp/doc.pdf"}, {"document_id": "drivefile123"}),
-        # drive consumes `document_id`; url/text/path are foreign.
-        ("drive", {"document_id": "drivefile123"}, {"url": "https://example.com/a"}),
-        ("drive", {"document_id": "drivefile123"}, {"text": "hi"}),
-        ("drive", {"document_id": "drivefile123"}, {"path": "/tmp/x"}),
+        # drive consumes `document_id`; url/text/path are foreign. ``mime_type`` is
+        # required for drive (#1827), so it rides along in ``good`` to reach the
+        # foreign-scalar check (it is metadata, not a content scalar).
+        ("drive", {"document_id": "drivefile123", "mime_type": "pdf"}, {"url": "https://e.com/a"}),
+        ("drive", {"document_id": "drivefile123", "mime_type": "pdf"}, {"text": "hi"}),
+        ("drive", {"document_id": "drivefile123", "mime_type": "pdf"}, {"path": "/tmp/x"}),
         # youtube consumes `url`; text/path/document_id are foreign.
         ("youtube", {"url": "https://www.youtube.com/watch?v=abc"}, {"text": "hi"}),
         ("youtube", {"url": "https://www.youtube.com/watch?v=abc"}, {"path": "/tmp/x"}),
@@ -2050,6 +2101,38 @@ async def test_source_add_and_wait_drive_ready(mcp_call, mock_client) -> None:
     assert sc["source_id"] == SRC_ID
     assert sc["ok"] is True
     mock_client.sources.add_drive.assert_awaited_once()
+
+
+async def test_source_add_and_wait_drive_pdf_kind_not_spreadsheet(mcp_call, mock_client) -> None:
+    """The ready aggregate labels a Drive PDF as ``pdf``, not ``google_spreadsheet``.
+
+    ``wait_until_ready`` re-reads the source from GET_NOTEBOOK, where a Drive PDF
+    again decodes to the ambiguous type code 14 (→ GOOGLE_SPREADSHEET). The declared
+    ``mime_type='pdf'`` must still win on the final waited/aggregated source (#1828),
+    just as it does for plain ``source_add``.
+    """
+    # add_drive returns the raw ambiguous code; the core re-stamps it to PDF.
+    mock_client.sources.add_drive = AsyncMock(
+        return_value=Source(id=SRC_ID, title="Report.pdf", _type_code=14)
+    )
+    # wait_until_ready re-reads the source and again gets the ambiguous code 14.
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=Source(id=SRC_ID, title="Report.pdf", _type_code=14)
+    )
+    result = await mcp_call(
+        "source_add_and_wait",
+        {
+            "notebook": NB_ID,
+            "source_type": "drive",
+            "document_id": "drivefile123",
+            "mime_type": "pdf",
+        },
+    )
+    sc = result.structured_content
+    assert sc["ok"] is True
+    (ready_row,) = sc["ready"]
+    assert ready_row["kind"] == "pdf"
+    assert ready_row["kind"] != "google_spreadsheet"
 
 
 async def test_source_add_and_wait_stdio_file_ready(mcp_call, mock_client, tmp_path) -> None:
