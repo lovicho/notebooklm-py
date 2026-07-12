@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`notebooklm skill package` — Claude-uploadable skill archive** (#1856 item 2;
+  the docs half landed in #1857). Builds a deterministic ZIP whose root contains
+  the `notebooklm/SKILL.md` skill folder (version-stamped, frontmatter-first),
+  ready for upload via Claude **Settings → Capabilities** in chat and **Claude
+  Cowork** — the supported hand-off for sandboxed agent environments that
+  cannot run `skill install` against a local directory. Supports
+  `-o/--output` (file or directory), `--force` overwrite protection, and
+  `--json` (success payload `{"path", "version", "entries", "size_bytes"}`;
+  failures use the standard error envelope with codes `SKILL_SOURCE_MISSING` /
+  `OUTPUT_EXISTS` / `WRITE_FAILED`). Release workflow now also attaches `notebooklm-skill.zip`
+  to GitHub releases alongside the `.mcpb` bundle.
+- **`AccountLimits.tier` — a correct account-tier signal, sourced from the
+  authoritative quota block.** The v0.8.0 removal ([#1738]) dropped a tier that came
+  from `GET_USER_TIER` (`FetchRecommendations`, a **promotions** endpoint) which could
+  not tell free from paid. This adds `tier` read from `GET_USER_SETTINGS` limits[4] —
+  the *same* block as `notebook_limit` / `source_limit`, so no extra RPC. It is an
+  opaque enum key (not an ordinal): `1`=Free, `2`=Pro, `4`=Plus, `3`/`6`=Ultra
+  (20 TB / 30 TB), `5`=Expanded (legacy); only `1` and `2` are live-confirmed. The
+  MCP **and** REST `server_info(include_account=True)` account blocks now include a
+  `tier` key. The removed `plan_name` label and the promotions RPC/`AccountTier` type
+  stay gone. ([#1738](https://github.com/teng-lin/notebooklm-py/issues/1738))
+
 ### Fixed
 
 - **Direct-PDF-URL sources no longer show the raw URL as their title.** Adding a
@@ -39,6 +63,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **Per-tier quota & limit reference (`docs/quota-limits.md`).** A new reference
+  documenting NotebookLM's published static plan limits — notebooks, sources,
+  chats, and studio artifacts across consumer (5 tiers), Workspace (5 levels), and
+  Enterprise — keyed to the `AccountLimits.tier` int, with evidence classes for the
+  features Google leaves unquantified and a note that live per-account
+  remaining/reset counters are not API-exposed. Distilled from the research in
+  [#1825](https://github.com/teng-lin/notebooklm-py/issues/1825); cross-linked from
+  the `tier` field, `rpc-reference.md`, `mcp-guide.md`, and `python-api.md`.
 - **Sandboxed agents (Claude Cowork / headless).** Documented running
   `notebooklm-py` from Claude Cowork and similar no-display sandboxes in
   `SKILL.md` and `docs/installation.md`: per-session `pip install` bootstrap (no

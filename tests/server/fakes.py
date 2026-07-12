@@ -19,7 +19,7 @@ from typing import Any
 
 from notebooklm._types.artifacts import Artifact, GenerationState, GenerationStatus
 from notebooklm._types.chat import AskResult, ChatSettings
-from notebooklm._types.common import AccountLimits
+from notebooklm._types.common import AccountLimits, UserSettings
 from notebooklm._types.notebooks import Notebook, PromptSuggestion
 from notebooklm._types.notes import Note
 from notebooklm._types.research import (
@@ -574,6 +574,12 @@ class FakeSettings:
     async def get_output_language(self) -> str | None:
         return self._s.output_language
 
+    async def get_user_settings(self) -> UserSettings:
+        return UserSettings(
+            limits=self._s.account_limits,
+            output_language=self._s.output_language,
+        )
+
 
 class FakeClient:
     """Scriptable in-memory client mirroring the namespaces the routes use."""
@@ -617,7 +623,7 @@ class FakeClient:
         # server_info(include_account=True) surface.
         self.account_email: str | None = "user@example.com"
         self.account_authuser: int = 0
-        self.account_limits = AccountLimits(notebook_limit=100, source_limit=50)
+        self.account_limits = AccountLimits(notebook_limit=100, source_limit=50, tier=1)
         self.output_language: str | None = "en"
 
         self.new_source_status: SourceStatus = SourceStatus.PROCESSING

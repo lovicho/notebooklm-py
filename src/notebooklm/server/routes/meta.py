@@ -23,7 +23,6 @@ This module imports NO ``click`` / ``rich`` / ``cli``.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request
@@ -71,10 +70,10 @@ async def _account_block(client: NotebookLMClient, *, authenticated: bool) -> di
     if not authenticated:
         return {**identity, "available": False, "reason": "not authenticated"}
     try:
-        limits, output_language = await asyncio.gather(
-            client.settings.get_account_limits(),
-            client.settings.get_output_language(),
-        )
+        # Both limits + language ride one GET_USER_SETTINGS response (#1724):
+        # a single fetch instead of two identical POSTs (mirrors the MCP tool).
+        settings = await client.settings.get_user_settings()
+        limits, output_language = settings.limits, settings.output_language
     except NotebookLMError as exc:  # degrade, don't sink the whole response
         return {**identity, "available": False, "reason": redact(str(exc))}
     return {
@@ -82,6 +81,8 @@ async def _account_block(client: NotebookLMClient, *, authenticated: bool) -> di
         "available": True,
         "notebook_limit": limits.notebook_limit,
         "source_limit": limits.source_limit,
+        # Subscription tier enum (GET_USER_SETTINGS limits[4]); mirrors the MCP block.
+        "tier": limits.tier,
         "output_language": output_language,
     }
 
