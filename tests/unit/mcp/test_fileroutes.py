@@ -477,6 +477,90 @@ def test_upload_post_adds_source_with_title_and_mime_from_token(mock_client, con
     assert kwargs["title"] == "Signed Title"
 
 
+def test_short_link_redirects_to_canonical_upload_page(mock_client, config) -> None:
+    # /u/<shortid> is the tap-friendly link handed to mobile users; it 302-redirects to the
+    # real /files/ul/<token> page (single source of truth for the picker + POST).
+    app = _build(mock_client, config)
+    short = config.short_upload_url({"nb": NB})  # https://files.test/u/<shortid>
+    shortid = short.rsplit("/", 1)[1]
+    with starlette_testclient.TestClient(app) as client:
+        resp = client.get(f"/u/{shortid}", follow_redirects=False)
+        assert resp.status_code in (302, 307)
+        loc = resp.headers["location"]
+        assert "/files/ul/" in loc
+        # following it renders the real upload page
+        page = client.get(loc)
+    assert page.status_code == 200
+    assert "Upload a source to NotebookLM" in page.text
+
+
+def test_short_link_unknown_id_404(mock_client, config) -> None:
+    app = _build(mock_client, config)
+    with starlette_testclient.TestClient(app) as client:
+        resp = client.get("/u/doesnotexist", follow_redirects=False)
+    assert resp.status_code == 404
+
+
+def test_upload_cors_preflight_and_allow_origin(mock_client, config) -> None:
+    # The in-app widget (Phase 3) POSTs cross-origin from its sandboxed iframe, so /files/ul
+    # must answer the CORS preflight and allow-origin the success response.
+    add_file = AsyncMock(return_value=MagicMock(id="src-cors"))
+    mock_client.sources.add_file = add_file
+    app = _build(mock_client, config)
+    url = config.upload_url({"op": "ul", "nb": NB})
+    with starlette_testclient.TestClient(app) as client:
+        pre = client.options(_path(url))
+        assert pre.status_code == 204
+        assert pre.headers["access-control-allow-origin"] == "*"
+        assert "POST" in pre.headers["access-control-allow-methods"]
+        resp = client.post(
+            _path(url) + "?filename=x.pdf", content=b"DATA", headers={"Accept": "application/json"}
+        )
+        # A rejected (bad/expired token) POST must ALSO carry ACAO, so the cross-origin widget
+        # can read the real error instead of an opaque "Failed to fetch".
+        rej = client.post("/files/ul/bogus.token", content=b"DATA")
+    assert resp.status_code == 200
+    assert resp.headers["access-control-allow-origin"] == "*"
+    assert rej.status_code == 403
+    assert rej.headers["access-control-allow-origin"] == "*"
+
+
+def test_upload_post_records_completion_result_for_await_upload(mock_client, config) -> None:
+    # Phase 1: a successful POST records {source_id, name, size, mime} in the in-process
+    # completion map keyed by jti, so a same-process await_upload poll surfaces the source.
+    add_file = AsyncMock(return_value=MagicMock(id="src-77"))
+    mock_client.sources.add_file = add_file
+    app = _build(mock_client, config)
+    url = config.upload_url({"op": "ul", "nb": NB, "mime": "application/pdf"})
+    jti = config.signer.verify(url.rsplit("/", 1)[1], op="ul")["jti"]
+    assert config.jti_store.completed(jti) is None  # nothing before the upload
+    with starlette_testclient.TestClient(app) as client:
+        resp = client.post(_path(url) + "?filename=paper.pdf", content=b"PDFDATA")
+    assert resp.status_code == 200
+    record = config.jti_store.completed(jti)
+    assert record == {
+        "source_id": "src-77",
+        "name": "paper.pdf",
+        "size": len(b"PDFDATA"),
+        "mime": "application/pdf",
+    }
+
+
+def test_upload_failed_add_records_no_completion_result(monkeypatch, mock_client, config) -> None:
+    # Success-only by design: a failed add rolls the jti back (retryable) and writes NO
+    # completion record, so await_upload stays "pending" rather than reporting a phantom add.
+    from notebooklm.exceptions import NotebookLMError
+
+    mock_client.sources.add_file = AsyncMock(side_effect=NotebookLMError("boom"))
+    app = _build(mock_client, config)
+    url = config.upload_url({"op": "ul", "nb": NB})
+    jti = config.signer.verify(url.rsplit("/", 1)[1], op="ul")["jti"]
+    with starlette_testclient.TestClient(app) as client:
+        resp = client.post(_path(url) + "?filename=x.pdf", content=b"DATA")
+    assert resp.status_code >= 400
+    assert config.jti_store.completed(jti) is None
+
+
 def test_upload_post_filename_is_sanitized_to_basename(mock_client, config) -> None:
     add_file = AsyncMock(return_value=MagicMock(id="src-1"))
     mock_client.sources.add_file = add_file
@@ -612,6 +696,9 @@ def test_upload_post_streams_past_cap_413_midstream_and_cleans_up(
     with starlette_testclient.TestClient(app) as client:
         resp = client.post(_path(url), content=body())
     assert resp.status_code == 413
+    # The cross-origin widget must be able to READ the failure status (not a generic
+    # "Failed to fetch") to show a useful message — so error responses carry ACAO too.
+    assert resp.headers["access-control-allow-origin"] == "*"
     add_file.assert_not_awaited()
     assert cleaned, "temp dir must be removed on a mid-stream abort"
 

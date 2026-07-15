@@ -87,6 +87,13 @@ def register_all(mcp: FastMCP) -> None:
     ):
         module.register(mcp)
 
+    # ``await_upload`` (Phase 1 upload-completion signal) lives in the ``_fileupload``
+    # sibling of the sources domain — registered here rather than from ``sources.register``
+    # so that fat module (at its ADR-0008 size cap) does not absorb the wiring.
+    from .tools._fileupload import register_file_tools
+
+    register_file_tools(mcp)
+
 
 def create_server(
     *,
@@ -149,4 +156,10 @@ def create_server(
         from ._fileroutes import register_file_routes
 
         register_file_routes(mcp, file_transfer)
+    # Dev-only in-app upload widget (Phase 3 experiment). No-op unless NOTEBOOKLM_MCP_UPLOAD_WIDGET=1,
+    # so it never enters the prod manifest. Lazy import keeps the fastmcp.apps dependency off the
+    # default path.
+    from ._uploadwidget import register_upload_widget
+
+    register_upload_widget(mcp, file_transfer)
     return mcp
