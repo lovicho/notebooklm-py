@@ -540,7 +540,9 @@ class SourcesAPI:
         Args:
             notebook_id: The notebook ID.
             file_id: The Google Drive file ID.
-            title: Display title for the source.
+            title: Display title. **Ignored for native Drive imports** —
+                NotebookLM re-derives it from live Drive metadata, keeping the
+                file's Drive name. Call :meth:`rename` after the add to retitle.
             mime_type: MIME type of the Drive document. Common values:
                 - application/vnd.google-apps.document (Google Docs)
                 - application/vnd.google-apps.presentation (Slides)
@@ -587,8 +589,8 @@ class SourcesAPI:
     ) -> Source:
         """Auto-route an upload-only Google Drive file: download it, then upload (#1884).
 
-        Covers the Drive file types NotebookLM's native import (:meth:`add_drive`)
-        can't ingest (epub/docx/txt/md/rtf/odt/csv/tsv/pdf): fetches the file
+        Covers the upload-only Drive file types (epub/docx/txt/md/rtf/odt/csv/tsv/pdf);
+        a Drive PDF can also go by reference via :meth:`add_drive`. Fetches the file
         SERVER-SIDE using the same live ``.google.com`` cookie jar the upload leg
         uses (so it works in stdio AND remote MCP mode with no ``upload_required``
         detour), then streams it through :meth:`add_file`. Native Docs/Slides/

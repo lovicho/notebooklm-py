@@ -58,13 +58,42 @@ tool-count / schema-char budgets) unless a deployment enables it.
 - **Requires stateless HTTP.** An MCP-Apps host reads the `ui://` widget resource on a connection
   without the chat `Mcp-Session-Id`; a stateful FastMCP server rejects that ("Missing session ID"
   → "fail to fetch app content"). Enabling the widget therefore auto-enables
-  `FASTMCP_STATELESS_HTTP` (overridable). Stateless is safe here — every tool is request/response,
-  with no server-push/subscription state.
+  `FASTMCP_STATELESS_HTTP` (overridable). Stateless is safe for the **single-process** connector —
+  every tool is request/response — but two consequences are worth recording:
+  - **Single-process invariant (the real constraint — not stateless per se).** The `/files/ul`
+    signing key (`FileLinkSigner`) is minted per-process, and `FileLinkSigner.verify` checks each
+    upload token's signature against *that* process's key; the in-process completion map that
+    `await_upload` reads and `ConsumedJtiStore` (the single-use/replay guard) are likewise
+    per-process. Because the file routes carry no session id, a load balancer can't co-locate the
+    mint and the POST via MCP session affinity even in *stateful* mode (explicit cookie/IP affinity
+    still could) — the hazard is **>1 process** (multiple replicas, or a single replica running
+    multiple workers), which stateless only makes tempting. Under multi-process: (a) a `/files/ul`
+    POST minted by one process but landing on another **fails signature verification (403) — the
+    source is never added**, not merely an `await_upload` confirmation miss; (b) even with a shared
+    signing key, `await_upload` would false-negative across processes (`source_list`, an RPC to
+    Google that works on any replica, is the source-of-truth backstop) and the single-use guard
+    (upload tokens only) degrades to per-process, so a leaked upload token — a content-agnostic
+    write primitive — is replayable ~once per process within its TTL, each replay adding one more
+    attacker-chosen source (bounded by process count and TTL; a deployment wanting a hard cap needs
+    quota controls). To scale out, back the signing key **and** the JTI / completion stores with a
+    shared store (e.g. Redis) or pin token minting + `/files/*` + `await_upload` to one replica.
+  - **Forecloses server→client MCP features.** Stateless rules out sampling, elicitation, and
+    subscriptions / out-of-band notifications (single-request progress notifications still work).
+    Each is already covered otherwise — NotebookLM answers with its own grounded model, not the
+    client's (no sampling); consent is the `confirm=` two-call pattern (no elicitation) — so the
+    only genuine ceiling is **no push-on-generation-complete**: long-running studio work stays on
+    the `studio_status` poll.
 - **Multi-file via a token pool.** `source_add_widget` mints a small fixed pool of independent
   single-use tokens (`upload_urls`, one per file, cap 10) and the widget uploads file[i] to
   token[i]. This keeps multi-file entirely on the existing single-use `/files/ul` route with no
   change to the completion map, `await_upload`, or this ADR's single-use invariant — unused tokens
   just expire, and minting is stateless (no jti store entry until a token is committed on success).
+  The whole pool is minted at one instant but uploaded **sequentially**, so the pool uses a longer
+  `WIDGET_UPLOAD_TTL` (1 h) rather than the 15-min single-link `UPLOAD_TTL`: a later token must
+  outlive the sum of every earlier file's transfer, or a slow multi-file batch silently 403s a late
+  file (#1894). The longer window is a smaller risk class — a pool token is single-use,
+  notebook-scoped, and never enters a URL bar / history / `Referer` (it lives only in the widget's
+  `structuredContent` / `fetch` body), unlike the human link the tight `UPLOAD_TTL` guards.
 - One host resource, the MCP-Apps standard mime `text/html;profile=mcp-app`, serves both claude.ai
   and ChatGPT (a `text/html+skybridge` variant is unnecessary; OpenAI's SDK accepts the standard
   mime). ChatGPT caches the template per conversation, so the first call in a new chat may not

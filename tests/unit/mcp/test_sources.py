@@ -24,12 +24,14 @@ from notebooklm._types.sources import SourceType  # noqa: E402 - after importors
 from notebooklm.exceptions import (  # noqa: E402 - after importorskip guard
     NetworkError,
     RPCError,
+    SourceAddError,
     SourceNotFoundError,
     SourceProcessingError,
     SourceTimeoutError,
 )
 from notebooklm.mcp._errors import tool_error_payload  # noqa: E402 - after importorskip guard
 from notebooklm.mcp.tools._content_sanity import (  # noqa: E402 - after importorskip guard
+    _BOT_CHALLENGE_BODY_SCAN_LIMIT,
     _THIN_SOURCE_CHAR_THRESHOLD,
 )
 from notebooklm.rpc.types import SourceStatus  # noqa: E402 - after importorskip guard
@@ -1223,6 +1225,151 @@ async def test_source_wait_title_phrase_not_flagged(mcp_call, mock_client) -> No
 
 
 # ---------------------------------------------------------------------------
+# source_wait — bot-challenge / WAF interstitial body scan (#1923): a READY
+# web_page whose (short) body is a Cloudflare "Just a moment" / Akamai "access
+# denied" challenge page is flagged with its own advisory. These sail past the
+# 100-char thin gate and carry no dead-link vocabulary, so #1709 missed them.
+# Body-only; never rejects; a wider scan cap than the dead-link pass.
+# ---------------------------------------------------------------------------
+
+
+async def test_source_wait_bot_challenge_cloudflare_warns(mcp_call, mock_client) -> None:
+    """The reported OECD case: a ~489-char Cloudflare "Just a moment… Enable
+    JavaScript and cookies" interstitial (above the 100-char thin gate, no dead-link
+    vocabulary) is flagged via the bot-challenge scan, distinct from the soft-404
+    message."""
+    prefix = (
+        "Just a moment... www.oecd.org needs to review the security of your "
+        "connection before proceeding. Enable JavaScript and cookies to continue. "
+    )
+    body = prefix + "x" * (489 - len(prefix))
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeSource(id=SRC_ID, title="OECD")
+    )
+    mock_client.sources.get_fulltext = AsyncMock(
+        return_value=FakeFulltext(content=body, char_count=489)
+    )
+    result = await mcp_call("source_wait", {"notebook": NB_ID, "source": SRC_ID})
+    sc = result.structured_content
+    assert sc["ok"] is True
+    row = sc["ready"][0]
+    assert "warning" in row
+    assert "489 chars" in row["warning"]
+    assert "bot-challenge" in row["warning"]
+    # Distinct from the dead-link advisory — never mislabels a WAF page as a soft-404.
+    assert "soft-404" not in row["warning"]
+    assert 'source_read (detail="full")' in row["warning"]
+
+
+async def test_source_wait_bot_challenge_akamai_access_denied_warns(mcp_call, mock_client) -> None:
+    """The reported CISA case: a ~248-char Akamai "Access Denied" block page is
+    flagged via the bot-challenge scan."""
+    prefix = "Access Denied. You don't have permission to access this resource. "
+    body = prefix + "Reference #18.abcd " + "x" * (248 - len(prefix) - len("Reference #18.abcd "))
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeSource(id=SRC_ID, title="CISA")
+    )
+    mock_client.sources.get_fulltext = AsyncMock(
+        return_value=FakeFulltext(content=body, char_count=248)
+    )
+    result = await mcp_call("source_wait", {"notebook": NB_ID, "source": SRC_ID})
+    row = result.structured_content["ready"][0]
+    assert "warning" in row
+    assert "248 chars" in row["warning"]
+    assert "bot-challenge" in row["warning"]
+
+
+async def test_source_wait_bot_challenge_above_dead_link_cap_still_warns(
+    mcp_call, mock_client
+) -> None:
+    """The wider scan cap earns its keep: a challenge body between the dead-link cap
+    (2000) and the bot-challenge cap is still scanned and flagged — a WAF page just
+    over 2000 chars would slip through the dead-link pass alone."""
+    body = "Attention Required! Checking your browser before accessing. " + "x" * 2500
+    char_count = len(body)
+    assert 2000 <= char_count < _BOT_CHALLENGE_BODY_SCAN_LIMIT
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeSource(id=SRC_ID, title="Blocked")
+    )
+    mock_client.sources.get_fulltext = AsyncMock(
+        return_value=FakeFulltext(content=body, char_count=char_count)
+    )
+    result = await mcp_call("source_wait", {"notebook": NB_ID, "source": SRC_ID})
+    row = result.structured_content["ready"][0]
+    assert "warning" in row
+    assert "bot-challenge" in row["warning"]
+
+
+async def test_source_wait_bot_challenge_over_scan_cap_not_flagged(mcp_call, mock_client) -> None:
+    """Boundary: a body of EXACTLY _BOT_CHALLENGE_BODY_SCAN_LIMIT chars is NOT scanned
+    (gate is ``< limit``) even though it carries a challenge phrase — keeps a large
+    healthy page from being lowercased + scanned."""
+    prefix = "Just a moment... enable javascript and cookies. "
+    body = prefix + "x" * (_BOT_CHALLENGE_BODY_SCAN_LIMIT - len(prefix))
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeSource(id=SRC_ID, title="Big")
+    )
+    mock_client.sources.get_fulltext = AsyncMock(
+        return_value=FakeFulltext(content=body, char_count=_BOT_CHALLENGE_BODY_SCAN_LIMIT)
+    )
+    result = await mcp_call("source_wait", {"notebook": NB_ID, "source": SRC_ID})
+    assert "warning" not in result.structured_content["ready"][0]
+
+
+async def test_source_wait_bot_challenge_title_not_scanned(mcp_call, mock_client) -> None:
+    """No-title-scan holds for the challenge pass too: a page TITLED like a WAF page
+    ("Just a moment…") with a clean, phrase-free body is NOT flagged. Body is sub-cap
+    so the scan path is active — a regression that folded the title in would fire."""
+    body = (
+        "A genuine, thorough article about web performance, edge caching strategies, "
+        "and how to structure a fast static site for real readers over the long term."
+    )
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeSource(id=SRC_ID, title="Just a moment... | Cloudflare")
+    )
+    mock_client.sources.get_fulltext = AsyncMock(
+        return_value=FakeFulltext(content=body, char_count=len(body))
+    )
+    result = await mcp_call("source_wait", {"notebook": NB_ID, "source": SRC_ID})
+    assert "warning" not in result.structured_content["ready"][0]
+
+
+async def test_source_wait_bot_challenge_healthy_body_not_flagged(mcp_call, mock_client) -> None:
+    """A short healthy body that merely mentions a challenge topic in passing but
+    carries no anchored interstitial phrase is not flagged."""
+    body = (
+        "Our comprehensive guide to configuring a CDN covers performance tuning, cache "
+        "invalidation, and origin shielding in depth for teams running at real scale."
+    )
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeSource(id=SRC_ID, title="CDN guide")
+    )
+    mock_client.sources.get_fulltext = AsyncMock(
+        return_value=FakeFulltext(content=body, char_count=len(body))
+    )
+    result = await mcp_call("source_wait", {"notebook": NB_ID, "source": SRC_ID})
+    assert "warning" not in result.structured_content["ready"][0]
+
+
+async def test_source_wait_bot_challenge_array_id_not_false_positive(mcp_call, mock_client) -> None:
+    """The Cloudflare Ray-ID marker is vendor-anchored, not a bare ``ray id`` substring:
+    ordinary technical prose containing 'array id' / 'array identifier' must NOT trip
+    the WAF warning (#1923 review). Only 'cloudflare ray id' matches."""
+    body = (
+        "Each record in the response carries an array id and an array identifier so "
+        "clients can reconcile the returned rows against the request they submitted."
+    )
+    mock_client.sources.wait_until_ready = AsyncMock(
+        return_value=FakeSource(id=SRC_ID, title="API reference")
+    )
+    mock_client.sources.get_fulltext = AsyncMock(
+        return_value=FakeFulltext(content=body, char_count=len(body))
+    )
+    result = await mcp_call("source_wait", {"notebook": NB_ID, "source": SRC_ID})
+    assert "warning" not in result.structured_content["ready"][0]
+
+
+# ---------------------------------------------------------------------------
 # source_add batch — content-sanity warning on synchronously-READY web_page items
 # (Task B reuses _annotate_thin_warnings). Most adds return PROCESSING (no fetch);
 # this covers the ready case + the leak guard (single mode never fetches).
@@ -1710,6 +1857,64 @@ async def test_source_add_batch_isolates_non_fatal_input_error(mcp_call, mock_cl
     assert sc["results"][1]["source_id"] == SRC2_ID
     # Non-fatal → the batch continued and attempted the second URL.
     assert mock_client.sources.add_url.await_count == 2
+
+
+async def test_source_add_batch_isolates_source_add_error(mcp_call, mock_client) -> None:
+    """A per-URL ``SourceAddError`` (bad domain) isolates as a SOURCE_ADD error and
+    later URLs still process — regression for #1905.
+
+    Before the fix, ``SourceAddError`` classified as the fatal ``LIBRARY`` category,
+    so a single bad-domain URL aborted the whole batch (the 3rd + 4th entries were
+    never attempted). Now it is the non-fatal ``SOURCE_ADD`` category, so the batch
+    isolates it per item. ``[valid, bad-domain, valid, non-http]`` must yield 4 result
+    entries: 2 ``added``, 1 ``SOURCE_ADD`` error (the bad domain, wrapped by
+    ``_source/add.py`` from a residual ADD RPCError), 1 ``VALIDATION`` error (the
+    non-http entry, rejected by ``validate_url`` before any client call) — with no
+    abort.
+    """
+    mock_client.sources.add_url = AsyncMock(
+        side_effect=[
+            FakeSource(id=SRC_ID, title="A"),
+            SourceAddError("https://bad-domain.example.com"),
+            FakeSource(id=SRC2_ID, title="B"),
+        ]
+    )
+    mock_client.sources.get_fulltext = AsyncMock(
+        return_value=FakeFulltext(content="x" * 500, char_count=500)
+    )
+    result = await mcp_call(
+        "source_add",
+        {
+            "notebook": NB_ID,
+            "urls": [
+                "https://valid-a.example.com",
+                "https://bad-domain.example.com",
+                "https://valid-b.example.com",
+                "ftp://not-http.example.com",
+            ],
+        },
+    )
+    sc = result.structured_content
+    # The whole call did NOT raise (isolated, not aborted).
+    assert sc["status"] == "added"
+    assert sc["added"] == 2
+    assert sc["failed"] == 2
+    assert [item["status"] for item in sc["results"]] == ["added", "error", "added", "error"]
+
+    assert sc["results"][0]["source_id"] == SRC_ID
+    # The bad domain is isolated as a per-item SOURCE_ADD error (non-fatal).
+    bad = sc["results"][1]
+    assert bad["input"] == "https://bad-domain.example.com"
+    assert bad["error"]["code"] == "SOURCE_ADD"
+    assert bad["error"]["retriable"] is False
+    # The URL AFTER the bad domain was still processed (not dropped by an abort).
+    assert sc["results"][2]["source_id"] == SRC2_ID
+    # The non-http entry is a VALIDATION error (rejected before any client call).
+    non_http = sc["results"][3]
+    assert non_http["input"] == "ftp://not-http.example.com"
+    assert non_http["error"]["code"] == "VALIDATION"
+    # add_url was attempted for the 3 http(s) entries; the non-http one never reached it.
+    assert mock_client.sources.add_url.await_count == 3
 
 
 async def test_source_add_batch_over_cap_rejected_before_any_add(mcp_call, mock_client) -> None:
