@@ -125,6 +125,22 @@ before you start: the auth model and remote file transfer.
 Use a **dedicated/throwaway Google account** — the mounted `master_token.json` is a durable
 full-account credential. Multi-tenant hosting is out of scope for this single-tenant setup.
 
+**Where OAuth state lives.** The registered clients + issued tokens persist to a
+deployment-scoped file keyed on `NOTEBOOKLM_MCP_OAUTH_BASE_URL` (the OAuth issuer), **not**
+the served account profile: `<home>/oauth/<slug>.json` by default (the Docker deploy mounts
+this at `/data/oauth` — the `make` targets pre-create the host dir `0700`; direct `docker
+compose up` users must `mkdir -p ./oauth-state && chmod 700 ./oauth-state` first), or set
+`NOTEBOOKLM_MCP_OAUTH_STATE_PATH` to override. Because it's keyed on the base_url, **switching the served profile/account no longer
+orphans your registered clients** (ChatGPT/claude.ai stay connected), and two servers with
+different origins on one host keep separate registries. On first startup after upgrading, a
+legacy `oauth_state.json` in the **active profile dir** is migrated once (then renamed
+`.migrated`, so it's never re-read); if you keep OAuth state elsewhere or had already switched
+profiles, copy it across manually first — `cp <old-profile-dir>/oauth_state.json <new-path>`
+(Docker: into your `./oauth-state` mount). Treat the file as a full-account secret. Keying
+on the issuer also isolates two servers reachable via different origins (a token minted for
+one base_url is never routed through another), but it requires a **stable** hostname — an
+ephemeral tunnel URL that changes on restart shifts the slug and re-orphans clients.
+
 ### File upload & download (remote)
 
 The MCP/JSON-RPC channel can't carry large binaries, so over a remote connector
@@ -543,11 +559,12 @@ gate the destructive ones.
   searches common install dirs beyond `PATH`.
 - **Client doesn't see the tools.** Confirm the config was written (`notebooklm mcp install <client>`)
   and **restart the client** — most hosts only read MCP config at startup.
-- **`Unknown tool: '<name>'` after upgrading the server.** The claude.ai connector caches the tool
-  list from when it connected, so a version upgrade that **renamed or folded** a tool leaves the old
-  name callable-but-failing until you **reconnect the connector** (disconnect + reconnect, or toggle it
-  off/on). Newly-added *optional* parameters on existing tools forward through the stale schema and keep
-  working without a reconnect. See [troubleshooting.md](troubleshooting.md#unknown-tool-from-the-claudeai-connector-after-upgrading-the-server).
+- **`Unknown tool: '<name>'` after upgrading the server.** The MCP host (claude.ai, ChatGPT, …) caches
+  the tool list from when it connected, so a version upgrade that **renamed or folded** a tool leaves the
+  old name callable-but-failing. **Remove and re-add the connector** to refresh it — a reconnect / re-auth
+  is often *not* enough (some hosts, notably ChatGPT, keep the cached manifest across reconnects). The
+  server's live manifest is correct; only *removed/renamed tools* ghost — newly-added *optional* parameters
+  on existing tools forward through the stale schema and keep working. See [troubleshooting.md](troubleshooting.md#unknown-tool-from-an-mcp-host-claudeai-chatgpt--after-upgrading-the-server).
 - **Wrong account.** The server binds one profile per process. Start it with `--profile <name>`, or set
   `NOTEBOOKLM_PROFILE`. See [configuration.md](configuration.md#multiple-accounts).
 - **`RATE_LIMITED`.** NotebookLM enforces per-account quotas; the error is `retriable=true` — back off
