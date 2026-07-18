@@ -9,30 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Self-hosted MCP OAuth: switching the served account no longer resets the client
-  registry.** OAuth-registered clients + issued tokens (`oauth_state.json`) were stored
-  under the *served account's profile dir*, so pointing the server at a different profile
-  silently orphaned every connected client (ChatGPT / claude.ai → "Client ID not found").
-  The OAuth state is now **deployment-scoped**, keyed on `NOTEBOOKLM_MCP_OAUTH_BASE_URL`
-  (the OAuth issuer) at `<home>/oauth/<slug>.json` — independent of the served profile,
-  and distinct per issuer so two servers on one host stay isolated. New
-  `NOTEBOOKLM_MCP_OAUTH_STATE_PATH` overrides the path; the Docker deploy mounts a
-  dedicated `/data/oauth` volume (`NOTEBOOKLM_OAUTH_STATE_DIR`). Existing installs are
-  migrated once on startup (the legacy profile-dir `oauth_state.json` is copied over, then
-  renamed `.migrated` so it is never re-read). This deliberately reverses the profile-dir
-  coupling introduced in #1765, and applies the deployment-vs-data separation that the
-  proposed multi-profile server
-  ([#1901](https://github.com/teng-lin/notebooklm-py/issues/1901)) builds on — without
-  implementing it.
-- **`source_add` now honors an explicit `title` for YouTube, Google Drive, and
-  web-page imports.** These source types re-derive the display title server-side
-  (from the video / Drive / page metadata), so a caller-supplied `title` was
-  silently dropped. `SourcesAPI.add_url` (new optional `title=`) and
-  `add_drive` now apply the requested title via a best-effort post-add
-  `rename` — a rename failure is non-fatal (the added source is kept with its
-  upstream title and a warning is logged). The MCP `source_add` tool flags a miss
-  with `title_override_applied: false` + a `warning`
-  ([#1960](https://github.com/teng-lin/notebooklm-py/issues/1960)).
+- `server_info(include_account=True)` (MCP tool and the REST `GET /v1/server/info`
+  route) now adds an `output_language_is_default` boolean to the account block. When
+  the account has never set an explicit output language, `output_language` is `null`
+  **and** `output_language_is_default` is `true`, signalling that the account uses
+  NotebookLM's default language rather than a bare null that reads as
+  missing/broken. A genuinely unparseable settings response still degrades to
+  `available: false` (so it stays distinguishable from the unset-uses-default case).
 
 ## [0.8.0]
 
@@ -540,6 +523,30 @@ get-returns-None / kwarg-alias deprecation machinery — has been **removed**
 
 ### Fixed
 
+- **Self-hosted MCP OAuth: switching the served account no longer resets the client
+  registry.** OAuth-registered clients + issued tokens (`oauth_state.json`) were stored
+  under the *served account's profile dir*, so pointing the server at a different profile
+  silently orphaned every connected client (ChatGPT / claude.ai → "Client ID not found").
+  The OAuth state is now **deployment-scoped**, keyed on `NOTEBOOKLM_MCP_OAUTH_BASE_URL`
+  (the OAuth issuer) at `<home>/oauth/<slug>.json` — independent of the served profile,
+  and distinct per issuer so two servers on one host stay isolated. New
+  `NOTEBOOKLM_MCP_OAUTH_STATE_PATH` overrides the path; the Docker deploy mounts a
+  dedicated `/data/oauth` volume (`NOTEBOOKLM_OAUTH_STATE_DIR`). Existing installs are
+  migrated once on startup (the legacy profile-dir `oauth_state.json` is copied over, then
+  renamed `.migrated` so it is never re-read). This deliberately reverses the profile-dir
+  coupling introduced in #1765, and applies the deployment-vs-data separation that the
+  proposed multi-profile server
+  ([#1901](https://github.com/teng-lin/notebooklm-py/issues/1901)) builds on — without
+  implementing it.
+- **`source_add` now honors an explicit `title` for YouTube, Google Drive, and
+  web-page imports.** These source types re-derive the display title server-side
+  (from the video / Drive / page metadata), so a caller-supplied `title` was
+  silently dropped. `SourcesAPI.add_url` (new optional `title=`) and
+  `add_drive` now apply the requested title via a best-effort post-add
+  `rename` — a rename failure is non-fatal (the added source is kept with its
+  upstream title and a warning is logged). The MCP `source_add` tool flags a miss
+  with `title_override_applied: false` + a `warning`
+  ([#1960](https://github.com/teng-lin/notebooklm-py/issues/1960)).
 - **Fresh conversations are no longer reported as follow-ups.** A null-conversation
   ask now checks whether the server-assigned current conversation has any turns
   before setting `AskResult.is_follow_up` ([#1973](https://github.com/teng-lin/notebooklm-py/issues/1973)).
