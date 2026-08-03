@@ -7,6 +7,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Audio overviews now download as `.m4a`, not `.mp3`.** The Audio Overview
+  bytes have always been AAC in an ISO-BMFF/MP4 container — the artifact
+  metadata itself advertises them as `audio/mp4` — so the `.mp3` name was a
+  mislabel that broke players, transcoders, and MIME-sniffing upload endpoints
+  in ways that were hard to trace back to the extension. Fixed on all three
+  surfaces (CLI `download audio`, MCP `studio_download`, REST
+  `POST /v1/notebooks/{id}/artifacts/download`), and the advertised MIME type is
+  now `audio/mp4` instead of `audio/mpeg`
+  ([#2034](https://github.com/teng-lin/notebooklm-py/issues/2034)).
+
+  > **⚠ Migration.** Only the *derived* filename changed — an explicit output
+  > path is still honoured verbatim, so `notebooklm download audio out.mp3`
+  > keeps writing `out.mp3` (with the same, still-AAC bytes). What changes is
+  > the default name when you pass no path, the per-file names under `--all`,
+  > and the `filename` / `mime_type` the MCP and REST surfaces advertise.
+  > Scripts that glob `*.mp3` in a download directory should glob `*.m4a`
+  > (or `*.m4a` and `*.mp3` during a transition). Note that re-running
+  > `download audio --all <dir>` after upgrading writes new `.m4a` files
+  > *alongside* any `.mp3` files a previous run left there — the names no
+  > longer collide, so nothing is overwritten or auto-renamed.
+
+- **REST `POST /v1/notebooks/{id}/artifacts/download` no longer mislabels a
+  non-default `output_format`.** The route named its spool file from the type's
+  *default* extension, then served that name as the download filename and
+  derived `Content-Type` from it — so a `pptx` slide deck arrived as
+  `artifact.pdf` / `application/pdf`, and a `markdown` quiz as `artifact.json`.
+  Same defect class as the audio fix above, on the format axis instead of the
+  type axis. The MCP `/files/dl` route already resolved both format-aware and
+  was unaffected
+  ([#2034](https://github.com/teng-lin/notebooklm-py/issues/2034)).
+- **Nightly RPC-health and bundle-drift checks no longer report "Authentication
+  expired" against valid credentials.** `scripts/check_rpc_health.py` and
+  `scripts/capture_rpc_registry.py` loaded auth through the flat
+  `load_auth_from_storage()` mapping, which drops every cookie's domain, so
+  host-scoped cookies (`OSID` on the NotebookLM host, `LSID` on
+  `accounts.google.com`) were broadcast to every `*.google.com` host. Once
+  Google's `notebook.google.com` cutover landed, the stale broadcast `OSID`
+  collided with the freshly minted host cookie and dead-ended the sign-in chain
+  on `accounts.google.com/CookieMismatch`. Flattening also **lost** data
+  outright, which is the more serious half: a flat map has one slot per name,
+  so where `OSID` legitimately existed on both the app host and
+  `accounts.google.com` with different values, the duplicate-name resolution
+  silently discarded one of them before any request was built — the sign-in
+  host then received a value that was never its own. The health check lost the
+  domains only under `NOTEBOOKLM_AUTH_JSON`, where there is no storage file to
+  rebuild the jar from; the drift monitor lost them unconditionally, because a
+  plain mapping handed to `httpx.get(cookies=...)` carries no domain at all.
+  Both now use the domain-preserving loaders the CLI already used
+  (`AuthTokens.from_storage()` / `build_httpx_cookies_from_storage()`), and a
+  unit guardrail pins — for both the env-var and the profile-file
+  configuration — that the jar mirrors the `storage_state` domains, that a
+  host-scoped cookie value never reaches a host it was not scoped to, and that
+  the same-named sibling on the other host survives
+  ([#2019](https://github.com/teng-lin/notebooklm-py/issues/2019),
+  [#2018](https://github.com/teng-lin/notebooklm-py/issues/2018)).
+
+### Changed
+
+- **`scripts/check_rpc_health.py` reports what it authenticated with.** The
+  report now names the auth source (`NOTEBOOKLM_AUTH_JSON` vs the resolved
+  profile path), the base host, the account route, and the cookie jar's
+  `name@domain` scopes — names and domains only, never values. #2019 was a
+  cookie-*scoping* failure that surfaced as a generic "authentication expired"
+  line, leaving the nightly log with nothing to diagnose it from
+  ([#2019](https://github.com/teng-lin/notebooklm-py/issues/2019)).
+- **`notebooklm login` now actually auto-installs Chromium**
+  ([#2031](https://github.com/teng-lin/notebooklm-py/issues/2031)). The
+  pre-flight in `cli/services/playwright_login.py` scraped
+  `playwright install --dry-run chromium` for a `"will download"` marker no
+  Playwright release emits, so it always returned early and the user hit a raw
+  `Executable doesn't exist` error at launch. `--dry-run` cannot answer the
+  question in either direction — it prints the same `Install location:` block
+  whether or not the browser is on disk — so the probe now resolves
+  Playwright's own `chromium.executable_path` (in an isolated, timeout-bounded
+  interpreter) and tests that path.
+- **Token-extraction failures no longer misreport a wrong page as an expired
+  login.** When `SNlM0e` / `FdrFJe` could not be extracted, `extract_csrf_from_html`
+  and `extract_session_id_from_html` fell back to scanning the page *body* for any
+  `accounts.google.com` URL and, on a hit, raised `Authentication expired or
+  invalid. Run 'notebooklm login' to re-authenticate.` — with no URL attached.
+  Practically every Google-served page carries such a link, so a valid session that
+  simply landed on the wrong page was reported as expired. The scheduled
+  `rpc-health` workflow failed this way every day from 2026-07-28 to 2026-08-03
+  while the credentials were provably valid, and three users piled onto the
+  auto-filed issue diagnosing an unrelated login bug
+  ([#2038](https://github.com/teng-lin/notebooklm-py/issues/2038),
+  [#2019](https://github.com/teng-lin/notebooklm-py/issues/2019)).
+
+  The body scan is gone; classification is now driven by the authoritative final
+  URL, and **every** failure message carries it. Four conditions are now
+  distinguishable: the region/anti-abuse gate, a cookie mismatch, a genuine auth
+  redirect, and a token-missing response — the last split into "we never reached a
+  NotebookLM app host" (a redirect/environment problem) versus "the app answered
+  but the token moved" (a real page-structure change worth filing). The
+  `"CSRF token not found"` / `"Session ID not found"` / `"Authentication expired"`
+  message substrings and the `ValueError` type are unchanged.
+
+- **A `accounts.google.com/CookieMismatch` hop is now its own diagnostic.** It
+  means the cookies were sent to a host they were not scoped for — commonly a
+  `storage_state.json` whose per-cookie domains were flattened — which needs a
+  different fix than re-authenticating. Because the interstitial redirects onward
+  to a `support.google.com` help article, it is invisible to the final URL alone,
+  so `_fetch_tokens_with_jar` now threads the redirect history into the extractors
+  via a new optional keyword-only `redirect_urls` argument on
+  `extract_csrf_from_html` / `extract_session_id_from_html` (additive; existing
+  positional calls are unaffected)
+  ([#2038](https://github.com/teng-lin/notebooklm-py/issues/2038)).
+
+- **`notebook.google.com` is now recognised as a NotebookLM app host** when
+  deciding whether a token-less response actually reached the app. Google serves
+  the personal app from this alias after the "Gemini Notebook" rebrand, and
+  `_auth/browser_capture.url_matches_base_host` already honoured it; without the
+  matching entry a genuine app response would have been reported as "the request
+  never reached the app". The alias is deliberately *not* added to
+  `_ALLOWED_BASE_HOSTS` — that set governs where credentials may be sent, which
+  is a narrower question than where a response may have come from
+  ([#2038](https://github.com/teng-lin/notebooklm-py/issues/2038)).
+- **`login` now explains bundled-Chromium launch failures instead of asking for a bug report.**
+  The friendly launch-failure branch was gated on `CHANNEL_BROWSERS` (`chrome` / `msedge`), which
+  excludes the *default* bundled Chromium — so every bundled launch failure fell through to a bare
+  re-raise and surfaced as `Unexpected error: … This may be a bug` with exit 2. It is now classified:
+  a missing download points at `python -m playwright install chromium`, and Windows'
+  `spawn UNKNOWN` is named as an execution veto (AppLocker / WDAC / Software Restriction Policies,
+  or Defender blocking `%LOCALAPPDATA%\ms-playwright`) with the working alternatives — a system
+  browser under `Program Files`, or signing in elsewhere and shipping `storage_state.json` — plus
+  an explicit note that `--headless` does not help. `spawn UNKNOWN` on `--browser chrome`/`msedge`
+  is covered too, and so is `login --master-token`, whose one-time bootstrap spawns a headed
+  browser and previously hit the same raw-traceback dead end. The veto itself is an environment
+  policy this client cannot bypass ([#2004](https://github.com/teng-lin/notebooklm-py/issues/2004)).
+
+### Documentation
+
+- `docs/troubleshooting.md`: new Windows `spawn UNKNOWN` section (why libuv reports `UNKNOWN`
+  rather than `ENOENT`/`EACCES`, why headless does not help, and the ship-`storage_state.json`
+  path for locked-down hosts), and a correction to the master-token note — the one-time
+  `login --master-token` bootstrap **does** launch a browser, so only `--oauth-token` (manual
+  paste) and `--cdp-url` (attach) avoid spawning one.
+
 ## [0.8.0] - 2026-08-03
 
 The headline of 0.8.0 is **integrations**: NotebookLM is now reachable from AI
