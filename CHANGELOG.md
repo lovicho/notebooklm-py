@@ -9,6 +9,236 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **RPC errors now name the host, not just the method.** Google serves the
+  personal app from two hosts — `notebooklm.google.com` and, since the Gemini
+  Notebook rebrand, `notebook.google.com` (ADR-0028) — and
+  `NOTEBOOKLM_BASE_URL` selects between them. A wrong-host session previously
+  surfaced as `Client error 404 calling LIST_NOTEBOOKS: Not Found`, which is
+  indistinguishable from "this account cannot see that notebook", so the one
+  recovery lever available was one the user could not tell they needed. Every
+  HTTP-status message now reads `… calling LIST_NOTEBOOKS on
+  notebooklm.google.com: …` — 4xx (including the 401/403 fallback), 5xx, and
+  429 on both the mapper and the retry-exhausted transport path, which is the
+  one a real 429 actually reaches. The host is read from the request that
+  failed rather than re-read from `NOTEBOOKLM_BASE_URL`, so a re-point while an
+  RPC is in flight cannot make the message name a host that failure never
+  touched ([#2067](https://github.com/teng-lin/notebooklm-py/issues/2067)).
+
+- **Corrected the last cookie-domain tier claim that still said the ranking is
+  decisive.** #2057 rewrote the `_auth_domain_priority` docstring and its two
+  consumers, but the tier comment added by
+  [#2020](https://github.com/teng-lin/notebooklm-py/pull/2020) still said the
+  canonical app host "still wins when both hosts carry" a cookie name. It does
+  not: `.notebooklm.google.com` and `.notebook.google.com` are both tier 3, and
+  their bare variants both tier 2, so those pairs tie and the winner falls to
+  `storage_state` iteration order. Also renames `test_priority_strict_ordering`
+  — which asserted "no ties between named tiers" over a sample holding exactly
+  one domain per tier, and so passed while four tiers were shared — and adds a
+  test pinning the real tie structure. Comments and tests only; no behaviour
+  change ([#2054](https://github.com/teng-lin/notebooklm-py/issues/2054)).
+
+### Added
+
+- **Host-contract tests for the RPC path.** `get_batchexecute_url()` /
+  `get_query_url()` / `get_upload_url()` are now asserted against a bare host
+  literal under the *default* environment — previously covered only under the
+  enterprise override, so a change to the default was invisible — and the
+  streamed-chat builder is pinned to send no origin-bound header. The latter
+  matters because such headers are host-bound and appear in no VCR `match_on`,
+  so one naming the wrong host would pass every offline test and fail every
+  live call ([#2067](https://github.com/teng-lin/notebooklm-py/issues/2067)).
+
+- **`notebook.google.com` is now an accepted `NOTEBOOKLM_BASE_URL` value.**
+  Google serves the personal app from this host after the "Gemini Notebook"
+  rebrand, and a live probe on 2026-08-04 reached `batchexecute` on **both**
+  personal hosts — the endpoint is dual-served. The base-URL validator therefore
+  accepts either, via a new internal `notebooklm._env.PERSONAL_APP_HOSTS` that
+  gives the two personal hosts one named home; `_url_utils`' app-host set is
+  derived from it instead of repeating the literals. **The default host is
+  unchanged** (`https://notebooklm.google.com`), and the rebrand host is
+  deliberately *not* documented as a supported value in `docs/configuration.md`:
+  it is accepted so that authentication against it is not hard-blocked, but no
+  `batchexecute` request to it has ever been captured in `tests/cassettes/` — a
+  coverage gap on our side, since the validator rejected the host until now
+  ([#1977](https://github.com/teng-lin/notebooklm-py/issues/1977),
+  [#2013](https://github.com/teng-lin/notebooklm-py/issues/2013)).
+
+- **The nightly RPC-health check probes the rebrand host in its own reporting
+  lane.** `scripts/check_rpc_health.py` runs a `batchexecute` and a streamed-chat
+  probe against `notebook.google.com` last in the run, and reports a *state
+  change* (`ABSENT->PRESENT`) under its own issue title rather than a recurring
+  error. The lane carries **no exit code**, deliberately: the existing
+  "Non-transient ERROR detected" issue dedups by title alone, so a rebrand probe
+  that legitimately failed every night would file one issue and then suppress
+  every later legacy-degradation issue. `UNKNOWN` (transport failure, 429, 5xx)
+  carries the previous state forward instead of manufacturing a transition. Two
+  new flags support it: `--base-url` (point a whole manual run at a specific
+  personal app host) and `--rebrand-state-file` (where the lane reads and writes
+  its previous state; omitted means baseline-only, no write)
+  ([#1977](https://github.com/teng-lin/notebooklm-py/issues/1977)).
+
+- **`AuthTokens.cookie_header_for(url)` — a domain-correct `Cookie:` header.**
+  Selects cookies per RFC 6265 for a specific URL via the session's
+  `cookie_jar`, so a cookie scoped to one host is never sent to another. Use it
+  instead of `AuthTokens.cookie_header`, which collapses every domain into one
+  `name -> value` slot and therefore has to pick an arbitrary winner when the
+  same name exists on two hosts. `url` is required — a default would
+  reintroduce the fabricated target the method exists to remove — and a
+  non-`https` URL raises rather than returning a quietly truncated header
+  ([#2054](https://github.com/teng-lin/notebooklm-py/issues/2054)).
+
+### Fixed
+
+- **Browser login now accepts both personal hosts, whichever one is selected.**
+  `accepted_login_hosts()` keyed its accept set on the legacy host by name, so
+  selecting `notebook.google.com` narrowed the set to that host alone — and
+  because Google's login flow can land on either host regardless of which one we
+  navigated to, a perfectly good landing was rejected and the login wait ran to
+  its timeout. Selecting either personal host now accepts both (the selected one
+  first, so the DEBUG line names the host we navigated to). Enterprise has no
+  such alias and still accepts only itself
+  ([#2013](https://github.com/teng-lin/notebooklm-py/issues/2013)).
+
+- **Resumable-upload URL trust is now host-relative, and `Origin`/`Referer`
+  derive from the validated upload URL.** Google's Scotty frontend picks which
+  personal host it names in the `X-Goog-Upload-URL` response header, so an
+  equality check against the configured host would reject a legitimate upload
+  once either host can be configured; a personal client now accepts either
+  personal host. Any other configured host — enterprise included — stays pinned
+  to **exactly itself**, so an enterprise client still rejects a consumer-host
+  upload URL rather than streaming enterprise file bytes to the consumer service
+  on the say-so of a response header. The upload and cancel requests now send
+  `Origin`/`Referer` derived from the *validated* upload URL rather than the
+  configured base URL: once the two hosts stand in for each other the two can
+  legitimately diverge, and Google's origin-bound auth checks reject a POST to
+  host B carrying `Origin: https://hostA`. The headers are built below the
+  validation call, so a server-named host can never reach an outbound header
+  unvalidated ([#2013](https://github.com/teng-lin/notebooklm-py/issues/2013)).
+
+- **Cookie-scope recovery guidance no longer points at a host the client may not
+  be using.** The stale-cookie advice from browser-cookie account discovery and
+  the region / anti-abuse gate message both hardcoded
+  `https://notebooklm.google.com`. Both now name the **configured** host — the
+  one actually probed — because refreshing cookies against, or reproducing a
+  per-request gate on, a host this client never calls proves nothing. The
+  stale-cookie advice also carries a shared both-personal-hosts scope caveat
+  (`app_host_scope_note`, one copy in `_auth/cookie_policy.py`, re-exported
+  through `_auth/browser_capture.py` for the CLI boundary), which covers the
+  other reading of that failure: the binding cookie exists, but on the sibling
+  personal host, so the probe was rejected for scope rather than staleness
+  ([#2013](https://github.com/teng-lin/notebooklm-py/issues/2013)).
+
+- **The nightly RPC-health probes no longer send one host's cookies to
+  another.** All three authenticated probes in `scripts/check_rpc_health.py`
+  — two `batchexecute` calls and one streamed-chat call —
+  hand-built their `Cookie:` header from the flat `AuthTokens.cookie_header`
+  projection, so the `accounts.google.com`-scoped `LSID` was sent to the app
+  host on **every** request, and where a name existed on more than one host
+  (`OSID` and `__Secure-OSID` legitimately do, post-rebrand, with different
+  values per host) the surviving value was arbitrary — decided by
+  `storage_state` iteration order, because the domain-priority tiers are not
+  all distinct. The probes now share one client carrying the domain-scoped jar.
+  This is the same defect class as [#2019](https://github.com/teng-lin/notebooklm-py/issues/2019)
+  / [#2018](https://github.com/teng-lin/notebooklm-py/issues/2018), which fixed
+  the script's *auth* path and left its *request* path untouched
+  ([#2054](https://github.com/teng-lin/notebooklm-py/issues/2054)).
+
+- **`scripts/diagnose_get_notebook.py` can authenticate again, and honours
+  `NOTEBOOKLM_BASE_URL`.** Two independent defects in the same ~40 lines: it
+  built its `Cookie:` header by joining `AuthTokens.cookies`, whose keys became
+  `(name, domain, path)` tuples in #369 — emitting a syntactically malformed
+  `('SID', '.google.com', '/')=…` header, so the script has been unable to
+  authenticate for anyone since [#369](https://github.com/teng-lin/notebooklm-py/issues/369) —
+  and it read the eager module-level
+  `BATCHEXECUTE_URL` constant, ignoring `NOTEBOOKLM_BASE_URL` and so pointing
+  enterprise users at the consumer host. Both are fixed together, and the
+  script now loads auth domain-preserving (`extract_cookies_with_domains`)
+  rather than through the flat map, so its jar routes per host instead of
+  broadcasting
+  ([#2054](https://github.com/teng-lin/notebooklm-py/issues/2054)).
+
+- **The `__Secure-1PSIDTS` recovery gate now decides by RFC 6265 routing instead
+  of a domain-priority ranking.** Whether to fire the healing `RotateCookies`
+  POST was decided from a domain-blind "global winner" projection that ranked
+  duplicate cookie names by domain tier and read that one winner's `expires` —
+  while the POST it gates is routed per RFC 6265. The two could therefore answer
+  different questions about the same cookie set. The ranking was also inverted
+  relative to the action: `accounts.google.com`, the exact host the POST targets,
+  sat in the *lowest* tier, so a host-scoped `__Secure-1PSIDTS` that does route
+  was outranked by app-host cookies that do not. And because the tiers are not
+  all distinct, the winner within a shared tier depended on `storage_state`
+  ordering. The gate now asks whether the `Cookie:` header this jar would send to
+  the rotate URL actually carries `__Secure-1PSIDTS`; the separate "did the heal
+  land?" check stays domain-blind, because it must predict the retrying
+  preflight. No divergence had been observed on measured profiles — this was a
+  latent defect whose failure mode is a silent wrong gate decision surfacing as a
+  spurious missing-cookie error
+  ([#2057](https://github.com/teng-lin/notebooklm-py/issues/2057)).
+
+- **An empty `NOTEBOOKLM_AUTH_JSON` no longer redirects recovery at a profile
+  file.** The cookie loader tests the variable's *presence* and fails fast with
+  "set but empty", but the recovery path tested its *truthiness* — so an empty
+  value fell through to the default profile, where recovery could fire a
+  `RotateCookies` POST and persist rotated cookies to a profile the caller had
+  deliberately bypassed by setting the variable at all. Both now test presence
+  ([#2057](https://github.com/teng-lin/notebooklm-py/issues/2057)).
+
+- **A cookie row with an uncoercible `expires` no longer takes a whole profile
+  down.** `http.cookiejar.Cookie.__init__` coerces via `int(float(expires))`, so
+  a row whose `expires` is `""`, `"never"`, `nan`, `inf`, or a list raised
+  `ValueError: could not convert string to float` out of every cookie loader —
+  and on the recovery paths it was raised from *inside* the caller's own
+  `except ValueError:` handler, replacing the actionable "Missing required
+  cookies … Run `notebooklm login`" message with a converter traceback. One
+  malformed sibling row was enough; it did not have to be the PSIDTS row. Rows
+  that cannot be converted are now skipped in `build_httpx_cookies_from_storage`,
+  `load_httpx_cookies` and the recovery jars alike — a row we cannot convert is
+  a row we could never have sent, so dropping it lets the loaders' own
+  validation produce the actionable message instead
+  ([#2057](https://github.com/teng-lin/notebooklm-py/issues/2057)).
+
+- **`doctor` no longer warns Windows users about permissions the client
+  deliberately never sets.** `notebooklm doctor` compared the profile
+  directory's POSIX mode against `0o700` on every platform, but the writer
+  (`paths._ensure_dir`) intentionally skips `mode=` / `chmod` on Windows —
+  pre-3.13 CPython ignores `mode=` in `mkdir()`, and 3.13+ turns it into ACLs
+  restrictive enough to block other same-user processes — so the directory is
+  left inheriting the parent's ACLs. Every Windows install therefore reported a
+  permanent `profile_dir` warn (`permissions: 0o777, expected: 0o700`)
+  describing the exact state the client creates on purpose, and `--fix` could
+  not clear it because `mkdir(mode=…)` / `chmod` do not move those bits on
+  Windows either. The check is now platform-aware: on Windows it passes with a
+  detail naming inherited NTFS ACLs (evaluated and not applicable, not silently
+  hidden), a missing directory is still a hard `fail`, and `--fix` no longer
+  claims a permission change it cannot make
+  ([#2046](https://github.com/teng-lin/notebooklm-py/issues/2046)).
+
+  POSIX reporting is unchanged, with one deliberate exception: `doctor --fix`
+  used to hard-code the `profile_dir` row to `pass` after a successful
+  migration, which reported a green permissions row for a directory that could
+  still be world-readable. It now re-runs the check, so a wide-mode directory is
+  actually repaired (and reported) instead of being silently greenlit.
+
+- Cookie extraction now requests `notebook.google.com` (the Gemini Notebook rebrand
+  host) and the runtime loader ranks its per-product binding cookies
+  (`OSID` / `__Secure-OSID`) at the same priority tier as the legacy
+  `notebooklm.google.com` host. Before this fix, `notebooklm login --browser-cookies`
+  never asked the browser for `notebook.google.com` cookies, and a user whose browser
+  only populated `OSID` on the rebrand host could fail the Tier-2 secondary-binding
+  check ([#2020](https://github.com/teng-lin/notebooklm-py/pull/2020)).
+- **`notebooklm -vv login` now explains the five-minute wait instead of going
+  silent.** The interactive login wait emitted no DEBUG output at all, so a
+  login that never landed was indistinguishable from a user who walked away —
+  the reason the `notebook.google.com` rebrand needed manual triage across
+  #2017 / #2022 / #2023 / #2025 / #2028 / #2030 / #2032. `-vv` now logs the
+  host(s) that would end the wait plus the starting URL before blocking, one
+  line per main-frame navigation observed during it, and the final URL on
+  timeout. Every logged URL is reduced to scheme + host — path, query,
+  fragment, and userinfo are all dropped, so a federated SSO redirect cannot
+  put a one-time assertion into output users paste into public bug reports —
+  and the tracing attaches no listener at all unless DEBUG is enabled, so
+  behaviour with logging off is unchanged
+  ([#2046](https://github.com/teng-lin/notebooklm-py/issues/2046)).
 - **Audio overviews now download as `.m4a`, not `.mp3`.** The Audio Overview
   bytes have always been AAC in an ISO-BMFF/MP4 container — the artifact
   metadata itself advertises them as `audio/mp4` — so the `.mp3` name was a
@@ -141,6 +371,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- `CLAUDE.md`: the VCR match tuple was described as `rpcids` plus decoded body
+  shape. It is the full tuple
+  `["method", "scheme", "host", "port", "path", "rpcids", "freq"]`
+  (`tests/vcr_config.py`) — `host` is part of the match, so replay is pinned to
+  the host a cassette was recorded against, which is exactly why rebrand-host
+  coverage cannot be inherited from existing cassettes
+  ([#1977](https://github.com/teng-lin/notebooklm-py/issues/1977)).
+- `docs/adr/0028-gemini-notebook-rename.md`: records the 2026-08-04 probe
+  showing `batchexecute` **dual-served** on both personal hosts, replacing the
+  earlier claim that the rebrand host was unverified, and separates that from
+  this project's own (real) cassette coverage gap
+  ([#1977](https://github.com/teng-lin/notebooklm-py/issues/1977)).
+- `docs/troubleshooting.md`: the base-URL section now agrees with ADR-0028 — the
+  rebrand host is experimental and not the default, rather than an endpoint
+  users should expect not to work
+  ([#1977](https://github.com/teng-lin/notebooklm-py/issues/1977)).
+- `docs/rpc-development.md`: documents the rebrand-host reporting lane — its
+  exit-code exclusion and the dedup reasoning behind it, its two flags, and what
+  it does not answer (whether the rebrand host serves Scotty `/upload/_/`)
+  ([#1977](https://github.com/teng-lin/notebooklm-py/issues/1977)).
 - `docs/troubleshooting.md`: new Windows `spawn UNKNOWN` section (why libuv reports `UNKNOWN`
   rather than `ENOENT`/`EACCES`, why headless does not help, and the ship-`storage_state.json`
   path for locked-down hosts), and a correction to the master-token note — the one-time

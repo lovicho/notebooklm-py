@@ -6,6 +6,8 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from notebooklm._env import PERSONAL_APP_ALIAS_HOST, PERSONAL_APP_HOSTS, get_base_host
+
 logger = logging.getLogger("notebooklm.auth")
 
 
@@ -71,15 +73,75 @@ _SECONDARY_BINDING_WARNED = False
 def _has_valid_secondary_binding(cookie_names: set[str]) -> bool:
     """Tier 2 acceptance check (see ``MINIMUM_REQUIRED_COOKIES``).
 
-    Pair-wise ablation against a live Google session reveals that the
-    NotebookLM homepage GET requires *at least one* of two redundant
-    secondary-binding paths in addition to Tier 1:
+    The homepage GET requires *at least one* of two secondary-binding paths in
+    addition to Tier 1:
 
     - ``OSID`` (recent-sign-in binding), OR
-    - both ``APISID`` AND ``SAPISID`` (legacy XSSI binding pair).
+    - ``APISID`` AND ``SAPISID`` (legacy XSSI pair) **AND** bare ``LSID``.
 
-    Without either, Google 302s to ``accounts.google.com/v3/signin`` even when
-    ``SID`` and ``__Secure-1PSIDTS`` are present and otherwise valid.
+    Without one of those, Google 302s to ``accounts.google.com/v3/signin`` even
+    when ``SID`` and ``__Secure-1PSIDTS`` are present and otherwise valid.
+
+    The ``LSID`` conjunct is the correction. The original pair-wise ablation
+    only varied ``OSID`` and the XSSI pair; because ``APISID``/``SAPISID`` are
+    ``.google.com``-scoped they survived every domain filter, so the XSSI branch
+    was never tested *without* them and the ``LSID`` dependency stayed hidden.
+    A three-way ablation, replicated on two unrelated accounts (2026-08-04,
+    issue #1977), gives:
+
+    ==========  =====================  ============  ========
+    ``OSID``    ``APISID``+``SAPISID``  bare ``LSID``  result
+    ==========  =====================  ============  ========
+    present     --                     --            works
+    present     present                --            works
+    --          present                present       works
+    --          present                --            **fails**
+    --          --                     present       fails
+    ==========  =====================  ============  ========
+
+    Row 4 is what this function used to get wrong. Two consequences worth
+    keeping straight:
+
+    * ``OSID`` alone is sufficient — a profile with **no** ``LSID`` anywhere
+      authenticates (row 1, verified with every ``accounts.google.com`` cookie
+      stripped). ``LSID`` is required *only* when ``OSID`` is absent.
+    * ``__Host-1PLSID`` / ``__Host-3PLSID`` do **not** substitute for bare
+      ``LSID``; row 4 retains them and still fails.
+
+    Deliberately domain-blind, and that is not the #2054 mistake. ``LSID`` is
+    ``accounts.google.com``-scoped and never routes to the app host, while
+    ``OSID`` is app-host-scoped — the binding spans hosts because the auth flow
+    does (app-host GET, redirect through accounts, back). A check restricted to
+    what routes to the *target* URL would reject working profiles. Host-aware,
+    were it ever needed, would mean "``OSID`` routable to the app host, or the
+    XSSI pair routable there plus ``LSID`` present for the accounts hop" — not a
+    single routed header.
+    """
+    if "OSID" in cookie_names:
+        return True
+    return {"APISID", "SAPISID", "LSID"} <= cookie_names
+
+
+def _has_rotatable_secondary_binding(cookie_names: set[str]) -> bool:
+    """Whether a ``RotateCookies`` attempt is worth making — deliberately weaker.
+
+    This is **not** :func:`_has_valid_secondary_binding` and must not be
+    collapsed into it. That one answers "will the homepage GET succeed with
+    these cookies *as they stand*". This one answers "is this set intact enough
+    that rotating ``__Secure-1PSIDTS`` could plausibly produce a working
+    session" — a precondition for attempting recovery, not for succeeding.
+
+    The difference is the ``LSID`` conjunct. Rotation POSTs to
+    ``accounts.google.com``; whether that hop can itself re-establish the
+    accounts-side session (and so supply the missing ``LSID``) has not been
+    ablated. Requiring the *post*-recovery condition before *attempting*
+    recovery would gate off the rotation that might satisfy it — checking the
+    destination as a precondition for the journey. That is the failure shape of
+    #2061, where an over-strict heal check never converged.
+
+    So this keeps the pre-#1977 rule until someone ablates the rotation hop. Its
+    cost when wrong is one wasted POST; the strict version's cost when wrong is
+    a recoverable session left unrecovered.
     """
     if "OSID" in cookie_names:
         return True
@@ -125,10 +187,91 @@ def _validate_required_cookies(
         if not _SECONDARY_BINDING_WARNED:
             _SECONDARY_BINDING_WARNED = True
             logger.warning(
-                "Cookie set lacks a secondary binding (need OSID, or both APISID "
-                "and SAPISID). Google may reject auth on the next call. %s",
+                "Cookie set lacks a secondary binding (need OSID, or all three of "
+                "APISID, SAPISID and LSID). Google may reject auth on the next "
+                "call. %s",
                 _EXTRACTION_HINT,
             )
+
+
+def app_host_scope_note() -> str:
+    """Return the both-hosts caveat to append to "open the app in your browser" advice.
+
+    Every hint that tells a user to open the NotebookLM app in their browser is
+    really telling them to *mint the per-product binding cookie* (``OSID`` /
+    ``__Secure-OSID``). Google now serves the personal app from two hosts and
+    redirects between them, and those binding cookies are **host-scoped**: a
+    cookie set on one host is never sent to the other. So the browser visit can
+    succeed and still leave the configured host without a binding — which is the
+    #2019 shape all over again (a working session read as an expired one).
+
+    Naming a different URL in the advice does not fix that: the redirect happens
+    either way. What the user needs is the *outcome* named — which host the
+    cookies landed on, which host this client is talking to — plus a recovery
+    that works. Hence this note, appended to the binding-related hints.
+
+    Both recoveries are real, and ordered deliberately:
+
+    1. Re-run ``notebooklm login`` and complete the sign-in. That re-mints the
+       account-wide cookies. ``APISID`` + ``SAPISID`` live on ``.google.com``
+       and ``LSID`` on ``accounts.google.com``, so none of them are host-scoped
+       and together they satisfy the binding on *either* host — see
+       :func:`_has_valid_secondary_binding`.
+    2. Select the host that actually holds the cookies via
+       ``NOTEBOOKLM_BASE_URL``.
+
+    Recovery 2 carries a caveat, but only in one direction. The sibling host is
+    computed *relative to the configured one*, so it is the rebrand host
+    (:data:`notebooklm._env.PERSONAL_APP_ALIAS_HOST`) for a default-host user and
+    the long-established default for a rebrand-host user. Attaching the caveat
+    unconditionally therefore warned rebrand-host users off the legacy host —
+    exactly backwards, and it discourages the one fallback whose behavior this
+    project has exercised end to end.
+
+    What the caveat may and may not claim: a live probe (issue #1977) reached
+    ``batchexecute`` on the rebrand host — a 400 on a deliberately malformed
+    payload proves the endpoint is there. So the host is *not* "unverified to
+    serve the API". It is simply experimental here: not the documented default,
+    and not covered by this repository's cassettes. The note says that and no
+    more — overclaiming in either direction sends users into a different failure,
+    which is the bug this note exists to avoid.
+
+    Returns:
+        The note as plain text (no trailing newline), or ``""`` when the
+        configured host has no sibling — i.e. the enterprise host, which has no
+        alias, so there is no cross-host scope to warn about.
+    """
+    base_host = get_base_host()
+    siblings = sorted(PERSONAL_APP_HOSTS - {base_host})
+    if base_host not in PERSONAL_APP_HOSTS or not siblings:
+        return ""
+    other_host = siblings[0]
+    # Asymmetric by design — see the "only in one direction" paragraph above.
+    # Never inline the alias literal here: the centralization guardrail AST-walks
+    # f-string parts too, so the host must arrive via the constant.
+    caveat = (
+        " (that host is experimental — not the documented default)"
+        if other_host == PERSONAL_APP_ALIAS_HOST
+        else ""
+    )
+    return (
+        f"Heads-up: Google serves the personal app from both {base_host} and "
+        f"{other_host} and redirects between them, but the OSID binding is "
+        f"host-scoped — a cookie set on {other_host} is never sent to {base_host}, "
+        f"which is the host this client is configured to use.\n"
+        f"If the binding is still missing afterwards it landed on {other_host}: "
+        f"re-run 'notebooklm login' and complete the sign-in (that re-mints the "
+        f"account-wide binding APISID+SAPISID+LSID, none of which are "
+        f"host-scoped, so both hosts accept it), or select the host that has "
+        f"the cookies with "
+        f"NOTEBOOKLM_BASE_URL=https://{other_host}{caveat}."
+    )
+
+
+def _with_scope_note(hint: str) -> str:
+    """Append :func:`app_host_scope_note` to ``hint`` when there is one to append."""
+    note = app_host_scope_note()
+    return f"{hint}\n{note}" if note else hint
 
 
 def missing_cookies_hint(
@@ -158,6 +301,11 @@ def missing_cookies_hint(
     - Secondary binding missing (Tier-2 warning case): the session works for
       now but is fragile. Visiting NotebookLM populates the missing cookies.
 
+    Every branch names the *configured* host rather than a fixed URL, and the
+    two binding-related branches carry :func:`app_host_scope_note` — the browser
+    visit they ask for can land the host-scoped binding on the sibling personal
+    host, which no re-wording of the URL prevents.
+
     Args:
         cookie_names: Names of cookies that survived extraction.
         browser_label: Optional browser label for the message
@@ -181,27 +329,30 @@ def missing_cookies_hint(
     has_secondary = _has_valid_secondary_binding(cookie_names)
 
     if psidts_missing and not has_secondary:
-        return (
+        return _with_scope_note(
             f"Your {browser_phrase} session is signed in to Google but is missing "
-            f"the cookies NotebookLM needs (OSID or APISID+SAPISID, plus "
+            f"the cookies NotebookLM needs (OSID, or APISID+SAPISID+LSID, plus "
             f"__Secure-1PSIDTS).\n"
-            f"Open https://notebooklm.google.com in {browser_phrase} (sign in if "
+            f"Open https://{get_base_host()} in {browser_phrase} (sign in if "
             f"prompted), reload the page, then re-run this command."
         )
 
     if psidts_missing:
+        # No scope note here: the missing cookie is ``__Secure-1PSIDTS``, which
+        # lives on ``.google.com`` and is therefore sent to both personal hosts.
+        # Only the host-scoped OSID binding has a cross-host failure mode.
         return (
             f"__Secure-1PSIDTS is missing and the automatic RotateCookies recovery "
             f"did not succeed.\n"
-            f"Open https://notebooklm.google.com in {browser_phrase} (this triggers "
+            f"Open https://{get_base_host()} in {browser_phrase} (this triggers "
             f"Google to refresh the cookie), then re-run this command."
         )
 
     if not has_secondary:
-        return (
+        return _with_scope_note(
             f"Your {browser_phrase} cookies are missing the NotebookLM binding "
-            f"(OSID, or APISID+SAPISID).\n"
-            f"Open https://notebooklm.google.com in {browser_phrase} (sign in if "
+            f"(OSID, or all of APISID, SAPISID and LSID).\n"
+            f"Open https://{get_base_host()} in {browser_phrase} (sign in if "
             f"prompted), reload the page, then re-run this command."
         )
 
@@ -215,6 +366,8 @@ def missing_cookies_hint(
 # following domains are actually exercised during login + token refresh +
 # source-add + chat-ask flows:
 #   - ``notebooklm.google.com`` (the API host — all CLI RPCs land here)
+#   - ``notebook.google.com`` (the Gemini Notebook rebrand host; Google sets
+#     the per-product ``OSID`` / ``__Secure-OSID`` binding cookies here too)
 #   - ``.google.com`` (carries ``SID``/``HSID``/``SSID``/etc.)
 #   - ``accounts.google.com`` (token refresh + ``RotateCookies`` endpoint at
 #     :data:`KEEPALIVE_ROTATE_URL`)
@@ -246,6 +399,14 @@ REQUIRED_COOKIE_DOMAINS: frozenset[str] = frozenset(
         # Playwright storage_state may preserve the leading dot for NotebookLM cookies.
         ".notebooklm.google.com",
         "notebooklm.google.com",
+        # Gemini Notebook rebrand (July 2026, issue #2013): Google now also serves
+        # the app from ``notebook.google.com`` and sets the per-product binding
+        # cookies (``OSID`` / ``__Secure-OSID``) on this host. Both dotted and
+        # non-dotted variants are listed (same defensive pattern as
+        # ``notebooklm.google.com`` above) so http.cookiejar normalization does
+        # not drop them at extraction / load time.
+        f".{PERSONAL_APP_ALIAS_HOST}",
+        PERSONAL_APP_ALIAS_HOST,
         ".notebooklm.cloud.google.com",
         "notebooklm.cloud.google.com",
         ".googleusercontent.com",
@@ -522,14 +683,43 @@ def _is_allowed_auth_domain(domain: str) -> bool:
 def _auth_domain_priority(domain: str) -> int:
     """Return duplicate-cookie priority for allowed auth domains.
 
-    Higher value wins. Tiers are distinct so the resolved cookie is fully
-    deterministic regardless of storage_state ordering.
+    Higher value wins. Tiers are **not** distinct: several domains share a tier,
+    so the resolved cookie is NOT fully determined by the ranking alone. Where a
+    tier is shared, the first occurrence in ``storage_state`` iteration order
+    wins, and reordering the file changes the result. The collisions are:
+
+    - **tier 3** — ``.notebooklm.google.com``, ``.notebook.google.com``
+      (the Gemini Notebook rebrand host), ``.notebooklm.cloud.google.com``
+    - **tier 2** — the three bare (no leading dot) variants of the above
+    - **tier 0** — every allowlisted domain that is not a Google ccTLD:
+      ``accounts.google.com``, ``drive.google.com``, ``.googleusercontent.com``,
+      ``lh3.google.com``, bare ``google.com``, …
+
+    Tier 0 is worth calling out: it holds ``accounts.google.com``, the host the
+    ``RotateCookies`` POST targets. A host-scoped cookie there — which *does*
+    route to that POST — is outranked by app-host cookies that do not. Ranking
+    by tier is therefore not a substitute for RFC 6265 routing when the question
+    is "would this cookie be sent to URL X"; use a cookie jar for that
+    (issue #2057).
     """
     if domain == ".google.com":
         return 4
     if domain == ".notebooklm.google.com":
         return 3
     if domain == "notebooklm.google.com":
+        return 2
+    # Gemini Notebook rebrand host (issue #2013). The dotted variant sits at the
+    # same tier as ``.notebooklm.google.com`` and the bare variant at the same
+    # tier as ``notebooklm.google.com`` -- deliberately, so neither host is
+    # ranked below the other now that Google mints host-scoped cookies on both.
+    #
+    # It does NOT mean the canonical app host wins when both carry a name:
+    # 3 == 3 and 2 == 2, so those pairs tie and the winner falls to
+    # ``storage_state`` iteration order. This comment claimed the opposite until
+    # #2054; the docstring above now describes the real tier structure.
+    if domain == f".{PERSONAL_APP_ALIAS_HOST}":
+        return 3
+    if domain == PERSONAL_APP_ALIAS_HOST:
         return 2
     if domain == ".notebooklm.cloud.google.com":
         return 3

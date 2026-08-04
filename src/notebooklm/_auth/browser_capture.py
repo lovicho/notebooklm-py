@@ -45,20 +45,50 @@ import time
 from collections.abc import Awaitable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 from urllib.parse import urlparse
 
 from .._atomic_io import atomic_write_json
-from ..config import PERSONAL_BASE_HOST, get_base_host, get_base_url
+
+# ``PERSONAL_APP_HOSTS`` is imported from ``_env`` rather than ``config``
+# deliberately: it is not part of ``config.__all__``, and re-exporting it there
+# just to reach it here would add a public export for an internal host fact.
+# Importing ``_env`` directly is the established idiom (``_url_utils`` and
+# friends do the same).
+from .._env import PERSONAL_APP_HOSTS
+from ..config import get_base_host, get_base_url
 from ..exceptions import HeadlessLoginRequiredError
+
+# The storage-state filter is a pure leaf shared by the headed and headless
+# capture arms; the historical names remain re-exported from this module.
+from ._browser_cookie_filter import _safe_cookie_shape as _safe_cookie_shape
+from ._browser_cookie_filter import filter_storage_state_cookies_by_domain_policy
 
 # ``CHANNEL_BROWSERS`` and the launch-failure triage live in the
 # ``browser_launch_errors`` leaf (ADR-0008). ``CHANNEL_BROWSERS`` is re-exported
 # below because this module has always been its import site for the CLI adapter
 # (``cli/services/playwright_login.py``) and the launch banner.
 from .browser_launch_errors import CHANNEL_BROWSERS, classify_launch_failure
-from .cookie_policy import build_cookie_domain_allowlist
+
+# ``app_host_scope_note`` owns the both-personal-hosts cookie-scope caveat that
+# every "open the app in your browser" instruction needs (it is appended to the
+# binding-related hints in ``cookie_policy.missing_cookies_hint``). It is
+# re-exported here for the same reason as ``log_observed_navigations`` below:
+# ``browser_capture`` is the only ``_auth`` module the CLI-boundary guardrail
+# sanctions as an import site, and the CLI's own cookie-refresh advice
+# (``cli/services/login/cookie_jar.py``) must not grow a second, drifting copy
+# of that caveat.
+from .cookie_policy import app_host_scope_note
+
+# DEBUG tracing for the login wait lives in its own leaf (ADR-0008) and is
+# re-exported here because ``browser_capture`` is the only ``_auth`` module the
+# CLI-boundary guardrail sanctions as an import site. Both helpers are
+# credential-safe: every URL they log is reduced to scheme + host, dropping the
+# path, query, fragment, and userinfo — any of which can carry auth material
+# mid-SSO, including on a third-party identity provider.
+from .login_wait_trace import log_observed_navigations, safe_page_url
 
 if TYPE_CHECKING:
     from playwright.sync_api import BrowserContext, Page
@@ -113,171 +143,31 @@ BROWSER_CLOSED_HELP = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Cookie-domain filter (neutral; both login paths consume it at write time)
-# ---------------------------------------------------------------------------
+class _CaptureAbortKind(Enum):
+    """Private categories for unattended capture infrastructure aborts."""
+
+    BROWSER_CLOSED = "browser_closed"
+    CONNECTION_EXHAUSTED = "connection_exhausted"
 
 
-def _safe_cookie_shape(cookie: dict[str, Any]) -> str:
-    """A VALUE-FREE structural summary of a cookie dict, safe to log.
+class _HeadlessCaptureAbort(RuntimeError):
+    """Private typed abort raised by infrastructure failures in headless mode."""
 
-    Returns the sorted key set plus the Python type of each field — but NEVER
-    any field *value*. A cookie ``value`` is a live credential (and, on the CDP
-    arm, comes straight from the operator's running browser), so the
-    malformed-row warnings must not echo the row. Example output:
-    ``keys=['domain', 'name', 'value'] types={domain: int, name: str, value: str}``.
-
-    Iterates ``items()`` (sorted by the string form of each key) rather than
-    re-subscripting by a stringified key, so a malformed cookie with a non-str
-    key (e.g. an ``int``) cannot raise ``KeyError`` here — this helper exists to
-    describe malformed rows, so it must itself never choke on one.
-    """
-    sorted_items = sorted(cookie.items(), key=lambda item: str(item[0]))
-    keys = [str(k) for k, _ in sorted_items]
-    types = ", ".join(f"{k}: {type(v).__name__}" for k, v in sorted_items)
-    return f"keys={keys} types={{{types}}}"
+    def __init__(self, kind: _CaptureAbortKind) -> None:
+        self.kind = kind
+        super().__init__(kind.value)
 
 
-def filter_storage_state_cookies_by_domain_policy(
-    state: dict[str, Any],
+def _abort_capture(
+    io: BrowserCaptureIO,
     *,
-    include_optional: bool = False,
-    include_domains: set[str] | None = None,
-) -> dict[str, Any]:
-    """Filter a Playwright ``storage_state`` dict to the configured cookie-domain policy.
-
-    The Playwright login flow captures every cookie the browser context holds.
-    Without this filter, sibling-product cookies (``mail.google.com``,
-    ``myaccount.google.com``, ``docs.google.com``, ``.youtube.com``) the user
-    happens to be signed into leak into the persisted ``storage_state.json``
-    and inflate the blast radius. This applies the same allowlist the rookiepy
-    path uses (:func:`_build_google_cookie_domains`) at write time so both
-    login paths produce equivalent on-disk state, opt-in via
-    ``--include-domains=...``. The match is exact-against-allowlist with
-    leading-dot/no-dot equivalence (``http.cookiejar`` may normalize either);
-    sibling subdomains are deliberately NOT matched by a broad ``.google.com``
-    suffix — that's the bug being fixed.
-
-    Two hardening behaviors (#1513) ride on top of the allowlist:
-
-    * **Malformed rows are skipped, not raised.** rookiepy / Playwright can
-      emit malformed rows; a non-dict entry, a cookie whose ``domain`` is not
-      a str, or a cookie whose ``name`` is not a non-empty str (all malformed
-      under Playwright's own ``storage_state`` schema) is dropped with one
-      bounded ``logger.warning`` per row instead of crashing the whole persist.
-      The warning logs only a **value-free shape** (:func:`_safe_cookie_shape`:
-      the row's keys + per-field types) — never the row itself — so a cookie
-      ``value`` (a live credential, and for the CDP arm one that comes straight
-      from the operator's running browser) cannot leak into the logs.
-    * **Exact-identity duplicate dedup.** Rows are keyed by their full
-      RFC 6265 identity ``(name, domain, path)`` (path normalized via
-      ``or "/"``, matching every loader). For exact-identity duplicates —
-      where only metadata such as ``value`` / ``expires`` / flags can differ —
-      the **last occurrence in input order wins** and replaces the earlier row
-      in place, kept whole (fields are never merged). This mirrors the
-      persistence-merge rule in
-      :func:`notebooklm._auth.storage.save_cookies_to_storage`, where the
-      newer observation overwrites the stored row for the same
-      ``(name, domain, path)`` key.
-
-      Same-name rows on *different* domains or paths are deliberately ALL
-      kept: cross-domain same-name resolution is a **load-time** concern (the
-      flat loaders :func:`notebooklm._auth.cookies.extract_cookies_from_storage`
-      / :func:`notebooklm._auth.cookies.flatten_cookie_map` rank by
-      ``_auth_domain_priority``). Deduping by bare name at write time would
-      starve the ``(name, domain, path)``-keyed runtime loader
-      (:func:`notebooklm._auth.cookies.build_httpx_cookies_from_storage`),
-      which legitimately holds e.g. the per-product ``OSID`` cookie on
-      ``notebooklm.google.com`` and ``myaccount.google.com`` as distinct jar
-      entries.
-
-    Args:
-        state: Playwright ``storage_state`` dict (``BrowserContext.storage_state()``).
-        include_optional: When ``True``, opt in to every label in
-            :data:`notebooklm._auth.cookie_policy.OPTIONAL_COOKIE_DOMAINS_BY_LABEL`.
-        include_domains: Optional-domain labels to opt in (``"all"`` = every
-            label). Mirrors the rookiepy path semantics.
-
-    Returns:
-        A new ``storage_state`` dict with ``cookies`` filtered and ``origins``
-        copied verbatim. The input dict is not mutated.
-    """
-    allowed_list = build_cookie_domain_allowlist(
-        include_optional=include_optional, include_domains=include_domains
-    )
-    allowed: frozenset[str] = frozenset(allowed_list)
-    allowed_stripped: frozenset[str] = frozenset(d.lstrip(".") for d in allowed_list)
-
-    def _is_allowed(domain: str) -> bool:
-        return domain in allowed or domain.lstrip(".") in allowed_stripped
-
-    filtered_cookies: list[dict[str, Any]] = []
-    index_by_identity: dict[tuple[str, str, Any], int] = {}
-
-    for cookie in state.get("cookies", []):
-        if not isinstance(cookie, dict):
-            # Never log the row itself — a cookie's ``value`` is a live
-            # credential and (for the CDP arm) comes straight from the
-            # operator's running browser. Log only the offending Python type.
-            logger.warning(
-                "Skipping malformed storage_state cookie entry (not a dict): type=%s",
-                type(cookie).__name__,
-            )
-            continue
-        domain = cookie.get("domain", "")
-        if not isinstance(domain, str):
-            logger.warning(
-                "Skipping storage_state cookie with non-str domain (%s)",
-                _safe_cookie_shape(cookie),
-            )
-            continue
-        name = cookie.get("name")
-        if not isinstance(name, str) or not name:
-            logger.warning(
-                "Skipping storage_state cookie with missing/empty/non-str name (%s)",
-                _safe_cookie_shape(cookie),
-            )
-            continue
-        # ``path`` participates in the dedup identity below and is normalized
-        # with ``or "/"``; a present-but-non-str path (int, list) would slip
-        # past that and later crash http.cookiejar/httpx path matching, so
-        # treat it as malformed. ``None``/absent is fine — it normalizes to
-        # the root path, matching the loaders.
-        path = cookie.get("path")
-        if path is not None and not isinstance(path, str):
-            logger.warning(
-                "Skipping storage_state cookie with non-str path (%s)",
-                _safe_cookie_shape(cookie),
-            )
-            continue
-        if not _is_allowed(domain):
-            continue
-
-        # Full RFC 6265 identity. ``or "/"`` mirrors the path normalization
-        # the loaders and the save_cookies_to_storage merge key use, so an
-        # empty-path twin can't survive as a phantom duplicate row.
-        identity = (name, domain, path or "/")
-        existing = index_by_identity.get(identity)
-        if existing is None:
-            index_by_identity[identity] = len(filtered_cookies)
-            filtered_cookies.append(cookie)
-        else:
-            # Exact-identity duplicate: the later observation wins whole,
-            # replacing the earlier row in place — mirroring the
-            # save_cookies_to_storage merge, where the newer observation
-            # overwrites the stored row for the same (name, domain, path) key.
-            logger.debug(
-                "Cookie %s: exact-identity duplicate on (%s, %s); keeping later observation",
-                name,
-                domain,
-                identity[2],
-            )
-            filtered_cookies[existing] = cookie
-
-    return {
-        "cookies": filtered_cookies,
-        "origins": list(state.get("origins", [])),
-    }
+    headless: bool,
+    kind: _CaptureAbortKind,
+) -> NoReturn:
+    """Abort a capture, retaining infrastructure type for unattended callers."""
+    if headless:
+        raise _HeadlessCaptureAbort(kind)
+    io.fail(1)
 
 
 # ---------------------------------------------------------------------------
@@ -316,14 +206,20 @@ def sync_playwright_context() -> Iterator[Any]:
         yield playwright
 
 
-def recover_page(context: BrowserContext, io: BrowserCaptureIO) -> Page:
+def recover_page(
+    context: BrowserContext,
+    io: BrowserCaptureIO,
+    *,
+    headless: bool = False,
+) -> Page:
     """Get a fresh page from a persistent browser context.
 
     Used when the current page reference is stale (TargetClosedError); a new
     page in a persistent context inherits all cookies and storage. Returns a
-    new ``Page``, or aborts (via ``io.fail``) if the context/browser is dead;
+    new ``Page``, or aborts if the context/browser is dead;
     re-raises the original ``PlaywrightError`` for non-TargetClosed failures.
-    ``io`` supplies both emit + fail.
+    ``io`` supplies both emit + fail. Headless callers receive a typed abort
+    for a dead browser instead of the interactive ``io.fail`` exception.
     """
     from playwright.sync_api import Error as PlaywrightError
 
@@ -334,7 +230,11 @@ def recover_page(context: BrowserContext, io: BrowserCaptureIO) -> Page:
         if TARGET_CLOSED_ERROR in error_str:
             logger.error("Browser context is dead, cannot recover page: %s", error_str)
             io.emit(BROWSER_CLOSED_HELP)
-            io.fail(1)
+            _abort_capture(
+                io,
+                headless=headless,
+                kind=_CaptureAbortKind.BROWSER_CLOSED,
+            )
         logger.error("Failed to create new page for recovery: %s", error_str)
         raise
 
@@ -345,13 +245,32 @@ def is_navigation_interrupted_error(error: str | Exception) -> bool:
     return any(marker in error_str for marker in _NAVIGATION_INTERRUPTED_MARKERS)
 
 
+def accepted_login_hosts() -> tuple[str, ...]:
+    """Return the lowercased hostnames :func:`url_matches_base_host` accepts.
+
+    Single source of truth for the accept set so the login-wait DEBUG line
+    ("waiting for host X") can never drift from the predicate that actually
+    ends the wait — the drift that made the ``notebook.google.com`` rebrand
+    (#2017 / #2025 and friends) so expensive to triage.
+
+    Selecting *either* personal host accepts *both* of them. Google's login
+    flow may land on either one regardless of which we navigated to, so keying
+    the accept set on the selected host alone would reject a perfectly good
+    landing (and, on the alias, fail every login). Enterprise has no such
+    alias, so it accepts only itself.
+    """
+    base_host = get_base_host().lower()
+    if base_host in PERSONAL_APP_HOSTS:
+        # Selected host first so the DEBUG line names the one we navigated to;
+        # the rest sorted so the message is stable across runs.
+        return (base_host, *sorted(PERSONAL_APP_HOSTS - {base_host}))
+    return (base_host,)
+
+
 def url_matches_base_host(url: str) -> bool:
     """Return True when ``url`` is on the configured NotebookLM host or personal-app alias."""
     current_host = (urlparse(url).hostname or "").lower()
-    base_host = get_base_host().lower()
-    return current_host == base_host or (
-        base_host == PERSONAL_BASE_HOST and current_host == "notebook.google.com"
-    )
+    return current_host in accepted_login_hosts()
 
 
 def connection_error_help() -> str:
@@ -530,7 +449,9 @@ def run_browser_capture(
         try:
             context = p.chromium.launch_persistent_context(**launch_kwargs)
 
-            page = context.pages[0] if context.pages else recover_page(context, io)
+            page = (
+                context.pages[0] if context.pages else recover_page(context, io, headless=headless)
+            )
 
             # Retry navigation on transient connection errors with backoff
             for attempt in range(1, LOGIN_MAX_RETRIES + 1):
@@ -550,7 +471,7 @@ def run_browser_capture(
 
                     if (is_retryable or is_target_closed) and attempt < LOGIN_MAX_RETRIES:
                         if is_target_closed:
-                            page = recover_page(context, io)
+                            page = recover_page(context, io, headless=headless)
 
                         backoff_seconds = attempt  # Linear backoff: 1s, 2s
                         logger.debug(
@@ -579,14 +500,22 @@ def run_browser_capture(
                             error_str,
                         )
                         io.emit(BROWSER_CLOSED_HELP)
-                        io.fail(1)
+                        _abort_capture(
+                            io,
+                            headless=headless,
+                            kind=_CaptureAbortKind.BROWSER_CLOSED,
+                        )
                     elif is_retryable:
                         logger.error(
                             f"Failed to connect to NotebookLM after {LOGIN_MAX_RETRIES} attempts. "
                             f"Last error: {error_str}"
                         )
                         io.emit(connection_error_help())
-                        io.fail(1)
+                        _abort_capture(
+                            io,
+                            headless=headless,
+                            kind=_CaptureAbortKind.CONNECTION_EXHAUSTED,
+                        )
                     else:
                         logger.debug("Non-retryable error: %s", error_str)
                         raise
@@ -619,6 +548,18 @@ def run_browser_capture(
                 io.emit("1. Complete the Google login in the browser window")
                 io.emit("2. Authentication will be saved automatically once login is detected\n")
                 io.emit("[dim]Waiting for login (up to 5 minutes)...[/dim]")
+                # Name the accept set and the starting point BEFORE blocking:
+                # with these two lines plus the per-navigation trace below, a
+                # ``-vv`` paste from a stuck login is self-diagnosing (#2046).
+                # Explicitly level-gated: ``logger.debug``'s %-args are built
+                # eagerly, and this diagnostic must do NO work when logging is
+                # off — the wait has to stay byte-for-byte what it was.
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Login wait: accepting any of %s (currently on %s); timeout 300s",
+                        ", ".join(accepted_login_hosts()),
+                        safe_page_url(page),
+                    )
                 try:
                     # wait_until="commit", not the default "load": the SPA never
                     # fires "load", so a load-gated wait hangs the full 5 min even
@@ -627,8 +568,13 @@ def run_browser_capture(
                     # host. Cookies are read later at storage_state() (after the
                     # cookie-forcing round-trips), so resolving early is safe;
                     # page.content() at capture time is best-effort/None-tolerant.
-                    page.wait_for_url(url_matches_base_host, wait_until="commit", timeout=300_000)
+                    with log_observed_navigations(page):
+                        page.wait_for_url(
+                            url_matches_base_host, wait_until="commit", timeout=300_000
+                        )
                 except PlaywrightTimeout:
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("Login wait: timed out after 300s on %s", safe_page_url(page))
                     io.emit(
                         "[red]Login not detected within 5 minutes.[/red]\n"
                         "Try again with: notebooklm login\n"
@@ -644,7 +590,11 @@ def run_browser_capture(
                     # help text other browser-closed paths use.
                     if TARGET_CLOSED_ERROR in str(exc):
                         io.emit(BROWSER_CLOSED_HELP)
-                        io.fail(1)
+                        _abort_capture(
+                            io,
+                            headless=headless,
+                            kind=_CaptureAbortKind.BROWSER_CLOSED,
+                        )
                     raise
                 io.emit("[green]Login detected.[/green]")
 
@@ -662,14 +612,18 @@ def run_browser_capture(
                     error_str = str(exc)
                     if TARGET_CLOSED_ERROR in error_str:
                         # Page was destroyed (e.g. user switched accounts) -- get fresh page
-                        page = recover_page(context, io)
+                        page = recover_page(context, io, headless=headless)
                         recovered_during_cookie_forcing = True
                         try:
                             page.goto(url, wait_until="commit")
                         except PlaywrightError as inner_exc:
                             if TARGET_CLOSED_ERROR in str(inner_exc):
                                 io.emit(BROWSER_CLOSED_HELP)
-                                io.fail(1)
+                                _abort_capture(
+                                    io,
+                                    headless=headless,
+                                    kind=_CaptureAbortKind.BROWSER_CLOSED,
+                                )
                             elif not is_navigation_interrupted_error(inner_exc):
                                 raise
                     elif not is_navigation_interrupted_error(error_str):
@@ -713,11 +667,10 @@ def run_browser_capture(
                 launch_help = classify_launch_failure(browser, str(e))
                 # Remediation prose is for a human, and only the interactive arm
                 # has one. Short-circuiting the unattended L3 arm via ``io.fail``
-                # would be actively harmful: its sink maps every ``io.fail`` to
-                # ``HeadlessLoginRequiredError``, which ``attempt_headless_reauth``
-                # reports as "the persisted browser profile's Google session is
-                # also expired" — a confidently wrong diagnosis for a browser
-                # that never started, on a PUBLIC ``HeadlessReauthResult.reason``.
+                # would be actively harmful: the unattended sink maps remaining
+                # user-facing ``io.fail`` paths to ``HeadlessLoginRequiredError``.
+                # Those paths retain the existing dead-session classification;
+                # infrastructure aborts use the private typed marker below.
                 # Letting the original exception propagate instead lands it in
                 # that caller's generic arm as an honest "headless capture
                 # failed: <Type>" (it logs there; the fall-through ``logger.debug``
@@ -740,7 +693,11 @@ def run_browser_capture(
             # launch failures are not TargetClosed.)
             if isinstance(e, PlaywrightError) and TARGET_CLOSED_ERROR in str(e):
                 io.emit(BROWSER_CLOSED_HELP)
-                io.fail(1)
+                _abort_capture(
+                    io,
+                    headless=headless,
+                    kind=_CaptureAbortKind.BROWSER_CLOSED,
+                )
             # For everything else, the diagnostic stays at debug level; the bare
             # ``raise`` propagates to ``handle_errors`` → friendly
             # ``Unexpected error: <msg>`` + exit 2.
@@ -748,7 +705,13 @@ def run_browser_capture(
             raise
         finally:
             if context:
-                context.close()
+                try:
+                    context.close()
+                except PlaywrightError as close_exc:
+                    # A browser that died during capture can also reject
+                    # teardown; do not let that replace the typed abort.
+                    if TARGET_CLOSED_ERROR not in str(close_exc):
+                        raise
 
     return CaptureResult(page_html=captured_page_html)
 
@@ -827,7 +790,12 @@ def run_cdp_capture(
         return content if isinstance(content, str) else None
 
     with sync_playwright_context() as p:
-        browser = p.chromium.connect_over_cdp(cdp_url)
+        try:
+            browser = p.chromium.connect_over_cdp(cdp_url)
+        except PlaywrightError as exc:
+            if TARGET_CLOSED_ERROR in str(exc):
+                raise _HeadlessCaptureAbort(_CaptureAbortKind.BROWSER_CLOSED) from exc
+            raise
         page = None
         try:
             # Reuse a context the operator's Chrome already holds — that context
@@ -883,6 +851,10 @@ def run_cdp_capture(
                 dict(playwright_state), include_domains=include_domains
             )
             atomic_write_json(storage_path, filtered_state)
+        except PlaywrightError as exc:
+            if TARGET_CLOSED_ERROR in str(exc):
+                raise _HeadlessCaptureAbort(_CaptureAbortKind.BROWSER_CLOSED) from exc
+            raise
         finally:
             # Close ONLY the temporary page we created — never the operator's
             # tabs or context.
@@ -914,6 +886,10 @@ __all__ = [
     "BrowserCaptureIO",
     "BrowserCapturePlan",
     "CaptureResult",
+    "accepted_login_hosts",
+    # Re-exported from the cookie_policy leaf so the CLI's cookie-refresh advice
+    # shares one copy of the both-hosts scope caveat (see the import comment).
+    "app_host_scope_note",
     # Re-exported from the browser_launch_errors leaf: browser_capture is the
     # only _auth module the CLI-boundary guardrail sanctions, so CLI-side
     # callers (the --master-token bootstrap) must reach it through here.
@@ -922,9 +898,11 @@ __all__ = [
     "ensure_playwright_available",
     "filter_storage_state_cookies_by_domain_policy",
     "is_navigation_interrupted_error",
+    "log_observed_navigations",
     "recover_page",
     "run_browser_capture",
     "run_cdp_capture",
+    "safe_page_url",
     "sync_playwright_context",
     "url_matches_base_host",
     "windows_playwright_event_loop",
