@@ -285,6 +285,10 @@ def _token_not_found_message(what: str, final_url: str) -> str:
     return f"{what} not found in HTML. Final URL: {_safe_url(final_url)}\n{detail}"
 
 
+class _LoginRedirectError(ValueError):
+    """Private typed signal for a confirmed Google login redirect."""
+
+
 def _url_only_extraction_failure(final_url: str, redirect_urls: Sequence[str]) -> ValueError | None:
     """Classify the failures that are decidable from the URLs alone, else ``None``.
 
@@ -321,7 +325,7 @@ def _url_only_extraction_failure(final_url: str, redirect_urls: Sequence[str]) -
     if hop is not None:
         return ValueError(_cookie_mismatch_message(hop, final_url))
     if is_google_auth_redirect(final_url):
-        return ValueError(
+        return _LoginRedirectError(
             f"Authentication expired or invalid. Final URL: {_safe_url(final_url)}\n"
             "Run 'notebooklm login' to re-authenticate."
         )
@@ -386,7 +390,7 @@ def extract_csrf_from_html(
     It's required for all RPC calls to prevent cross-site request forgery.
 
     Args:
-        html: Page HTML content from notebooklm.google.com
+        html: Page HTML content from the configured app host
         final_url: The final URL after redirects (for error messages)
         redirect_urls: The redirect chain that preceded ``final_url``, in order
             (``[str(r.url) for r in response.history]``). Optional, and only
@@ -429,7 +433,7 @@ def extract_session_id_from_html(
     It's passed in URL query parameters for RPC calls.
 
     Args:
-        html: Page HTML content from notebooklm.google.com
+        html: Page HTML content from the configured app host
         final_url: The final URL after redirects (for error messages)
         redirect_urls: The redirect chain that preceded ``final_url``. See
             :func:`extract_csrf_from_html`.

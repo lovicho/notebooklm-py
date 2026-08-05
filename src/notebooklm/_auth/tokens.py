@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 import httpx
 
-from ..paths import get_storage_path
 from . import account as _auth_account
 from . import cookies as _auth_cookies
 from . import psidts_recovery as _auth_psidts_recovery
@@ -223,7 +221,13 @@ class AuthTokens:
         return _auth_cookies.flatten_cookie_map(self.cookies)
 
     @classmethod
-    async def from_storage(cls, path: Path | None = None, profile: str | None = None) -> AuthTokens:
+    async def from_storage(
+        cls,
+        path: Path | None = None,
+        profile: str | None = None,
+        *,
+        allow_headless: bool = False,
+    ) -> AuthTokens:
         """Create AuthTokens from Playwright storage state file.
 
         This is the recommended way to create AuthTokens for programmatic use.
@@ -233,6 +237,9 @@ class AuthTokens:
             path: Path to storage_state.json. If provided, takes precedence over profile.
             profile: Profile name to load auth from (e.g., "work", "personal").
                 If None, uses the active profile (from CLI flag, env var, or config).
+            allow_headless: Permit layer-3 browser recovery if stored cookies
+                redirect to Google sign-in. Layer 4 remains automatic when a
+                sibling ``master_token.json`` is present.
 
         Returns:
             Fully initialized AuthTokens ready for API calls.
@@ -250,8 +257,7 @@ class AuthTokens:
             # Load from a specific profile
             auth = await AuthTokens.from_storage(profile="work")
         """
-        if path is None and (profile is not None or not os.environ.get("NOTEBOOKLM_AUTH_JSON")):
-            path = get_storage_path(profile=profile)
+        path = _auth_cookies.resolve_auth_storage_path(path, profile)
 
         if path is None:
             authuser = 0
@@ -278,15 +284,23 @@ class AuthTokens:
         # merge in save_cookies_to_storage will then write only what this
         # process actually rotated, preserving sibling-process state.
         snapshot = _auth_storage.snapshot_cookie_jar(jar)
-        route_kwargs: dict[str, Any] = {"authuser": authuser}
-        if account_email is not None:
-            route_kwargs["account_email"] = account_email
-        (
-            csrf_token,
-            session_id,
-            refreshed,
-            post_refresh_snapshot,
-        ) = await _auth_refresh._fetch_tokens_with_refresh(jar, path, profile, **route_kwargs)
+        if path is None:
+            fetch_result = await _auth_refresh._fetch_tokens_with_refresh(
+                jar,
+                path,
+                profile,
+                authuser=authuser,
+                account_email=account_email,
+                allow_headless=allow_headless,
+                env_auth=True,
+            )
+        elif allow_headless:
+            fetch_result = await _auth_refresh._fetch_tokens_with_refresh(
+                jar, path, profile, allow_headless=True
+            )
+        else:
+            fetch_result = await _auth_refresh._fetch_tokens_with_refresh(jar, path, profile)
+        csrf_token, session_id, refreshed, post_refresh_snapshot = fetch_result
 
         # If NOTEBOOKLM_REFRESH_CMD ran, ``_fetch_tokens_with_refresh`` captured
         # a snapshot immediately after the jar was wholesale-replaced from
@@ -324,6 +338,10 @@ class AuthTokens:
         else:
             cookie_snapshot = None if save_result else snapshot
         cookies = _auth_cookies._cookie_map_from_jar(jar)
+
+        if refreshed and path is not None:
+            authuser = _auth_account.get_authuser_for_storage(path)
+            account_email = _auth_account.get_account_email_for_storage(path)
 
         return cls(
             cookies=cookies,
@@ -379,8 +397,15 @@ def load_auth_from_storage(path: Path | None = None) -> dict[str, str]:
     """
     storage_state = _auth_cookies._load_storage_state(path)
     try:
-        return _auth_cookies.extract_cookies_from_storage(storage_state)
-    except ValueError:
+        cookies = _auth_cookies.extract_cookies_from_storage(storage_state)
+        entries = _auth_cookies._sanitized_auth_entries(storage_state)
+        _auth_cookies._validate_routable_entries(
+            entries,
+            to_cookie=_auth_cookies._storage_entry_to_cookie,
+            require_routable=True,
+        )
+        return cookies
+    except _auth_cookies.RequiredCookieValidationError:
         # Inline ``__Secure-1PSIDTS`` recovery (issue #865). Playwright login
         # can land a ``storage_state.json`` that carries SID + secondary
         # binding but lacks PSIDTS, because Google only mints PSIDTS
@@ -395,7 +420,13 @@ def load_auth_from_storage(path: Path | None = None) -> dict[str, str]:
         # we pass ``path`` through verbatim — including ``None`` for the
         # default-profile case.
         if not _auth_psidts_recovery._recover_psidts_inline(path):
-            raise
+            # Recovery declined, so the routing half of the preflight has no
+            # heal to trigger and must not harden into a failure this call
+            # cannot repair. Re-run name-only: it re-raises when a required
+            # cookie is genuinely absent, and otherwise returns exactly what
+            # this function returned before #2061. See
+            # ``_build_httpx_cookies_from_storage_state`` for the rule.
+            return _auth_cookies.extract_cookies_from_storage(storage_state)
         storage_state = _auth_cookies._load_storage_state(path)
         return _auth_cookies.extract_cookies_from_storage(storage_state)
 

@@ -25,21 +25,62 @@ POST https://notebook.google.com/_/LabsTailwindUi/data/batchexecute   -> 400 (en
 `batchexecute` is **dual-served**. The RPC backend has not moved out from under
 us, which is why most sessions still work against the legacy default.
 
+The nightly health check later strengthened the rebrand-host evidence from an
+endpoint-level 400 to an authenticated application response: at commit
+`36221e0`, `LIST_NOTEBOOKS` returned HTTP 200 and echoed its `wXbhsf` RPC ID
+(#2077). This records availability for that credential cohort; it is not, by
+itself, a default-host policy decision.
+
+The same authenticated nightly probe confirmed the rebrand host's
+`GenerateFreeFormStreamed` chat endpoint too: HTTP 200 with a parsed stream on
+2026-08-04 (#2078). This does not answer whether `/upload/_/` (Scotty) is served
+there; the health check issues no upload POST, so that remains unprobed.
+
 Two things follow, and they are easy to conflate:
 
-- **Our own coverage has never exercised rebrand-host RPC.** Every request
-  recorded against `notebook.google.com` in `tests/cassettes/` is a `GET /`
-  returning the app shell (12 such, all in `collection_*`); no `batchexecute`
-  POST to that host has been captured. That is a gap in our testing, not a
-  statement about the service — until this change the base-URL allowlist
-  rejected the host, so no client we ship *could* have issued one.
+- **Before the default flip, recorded integration coverage had never exercised
+  rebrand-host RPC.** Every request then recorded against `notebook.google.com`
+  in `tests/cassettes/` was a `GET /` returning the app shell (12 such, all in
+  `collection_*`); no `batchexecute` POST to that host had been captured. That
+  was a gap in our testing, not a statement about the service — before the
+  allowlist change no client we shipped *could* have issued one.
 - **Dual-serving is a transitional state, not a guarantee.** It is the thing to
   monitor, which is why `scripts/check_rpc_health.py` probes the rebrand host in
-  its own reporting lane. The signal that would justify moving the default is
-  the legacy host *ceasing* to serve RPC, not the rebrand host starting to.
+  its own reporting lane.
 
-The rebrand host is therefore an accepted base URL, deliberately left
-undocumented as a supported value while the default stays on the legacy host.
+> **Amended (#2067): the trigger for moving the default has changed.**
+>
+> This ADR originally set the criterion as *"the legacy host ceasing to serve
+> RPC, not the rebrand host starting to"* — i.e. move when the old host breaks.
+> That is now superseded, for one reason: **it makes the migration an incident
+> rather than a change.** The signal arrives *as* users start failing, the fix
+> ships days later, and the window in which the move is invisible — the window
+> we are in right now, with both hosts serving — has closed by the time we act.
+>
+> Waiting also buys less safety than it appears to. The evidence that the flip
+> is survivable does not depend on legacy degrading: the app shell has already
+> migrated (the legacy host is a 302), so a session's CSRF/session pair is
+> *already* minted by `notebook.google.com` today and accepted by legacy
+> `batchexecute` — visible in twelve recorded interactions in
+> `tests/cassettes/collection_*.yaml`. Flipping makes the origin coherent; it
+> does not introduce a new dependency. Pre-cutover profiles were measured
+> against both hosts (#2067) and reached the rebrand host successfully
+> *without* their legacy-scoped `OSID`, because the accounts-scoped `LSID`
+> family is what actually gates the session.
+>
+> The revised criterion: **move while both hosts serve, keep the legacy host
+> selectable via `NOTEBOOKLM_BASE_URL`, and treat the probe lane as a
+> rollback-availability monitor** — a `PRESENT → ABSENT` transition on the
+> legacy host now means "rollback has expired", which is the thing worth
+> alarming on.
+>
+> What has *not* changed: dual-serving is still transitional and still the
+> thing to monitor. This amendment moves the default; it does not claim the
+> rebrand host is guaranteed.
+
+Both hosts are accepted base URLs. The default is `notebook.google.com`
+(#2067); the legacy host remains selectable via `NOTEBOOKLM_BASE_URL` and is
+documented as the rollback lever.
 
 Separately, the project's discoverable identity (PyPI listing, repo name, docs)
 now points at a retired brand. New users will search for

@@ -231,17 +231,37 @@ print(notebooklm.__version__)
    scp ~/.notebooklm/profiles/default/storage_state.json \
        user@server:~/.notebooklm/profiles/default/storage_state.json
    ```
-   or stuff the contents into a CI / deployment env var (preferred for ephemeral runners):
-   <!-- not mirrored: headless-server bootstrap step 2b (env var); not part of contributor flow -->
+   **For CI, ship the master token — not a cookie snapshot.** A cookie snapshot
+   is superseded by any other active client within ~10 minutes and is rejected
+   shortly after (see [auth-cookie-lifecycle.md §2.5](auth-cookie-lifecycle.md#25-four-timers-people-confuse)),
+   so a secret exported on a workstation is routinely dead before the run starts.
+   A master token does not rotate. Write it to a file and mint a session per run:
+
+   <!-- not mirrored: headless-server bootstrap step 2b (CI secret); not part of contributor flow -->
    ```bash
-   export NOTEBOOKLM_AUTH_JSON="$(cat ~/.notebooklm/profiles/default/storage_state.json)"
+   # one-off, on the workstation: mint the master token, then ship it.
+   # Plain `notebooklm login` (step 1) does NOT create master_token.json.
+   pip install "notebooklm-py[headless]"
+   notebooklm login --master-token   # writes ~/.notebooklm/profiles/default/master_token.json
+   gh secret set NOTEBOOKLM_MASTER_TOKEN_JSON < ~/.notebooklm/profiles/default/master_token.json
+
+   # in the job, before anything that authenticates.
+   # [headless] pulls gpsoauth, without which the mint below cannot run.
+   pip install "notebooklm-py[headless]"
+   umask 077
+   mkdir -p ~/.notebooklm/profiles/default
+   printf '%s' "$NOTEBOOKLM_MASTER_TOKEN_JSON" > ~/.notebooklm/profiles/default/master_token.json
+   chmod 600 ~/.notebooklm/profiles/default/master_token.json
+   unset NOTEBOOKLM_MASTER_TOKEN_JSON     # `login` refuses to run while inline env auth is set
+   notebooklm login --master-token-refresh   # bootstraps storage_state.json from the token
    ```
 
-   > **CI env-var notes:**
-   > - `storage_state.json` is typically 4–15 KB — well under GitHub Actions' 48 KB single-secret cap.
-   > - Watch for trailing newlines: pipe with `tr -d '\n'` if your secret-set tool adds one (`cat ... | tr -d '\n' | gh secret set NOTEBOOKLM_AUTH_JSON`).
-   > - For **ephemeral runners** (GitHub Actions, GitLab CI — no persistent disk between runs), the layer-5 in-process refresh from [troubleshooting.md](troubleshooting.md#authentication-errors) cannot persist rotated cookies. Run `notebooklm auth refresh` periodically on a workstation cron and push the refreshed file with `gh secret set NOTEBOOKLM_AUTH_JSON < ~/.notebooklm/profiles/default/storage_state.json`.
-   > - **Rotation immunity:** inline env-var auth never engages the layer-4 master-token re-mint below. To make CI survive Google's cookie rotations, write the secrets to real files on the runner instead (`~/.notebooklm/profiles/default/storage_state.json` plus `master_token.json`, both mode `0600`), pre-mint at job start with `notebooklm login --master-token-refresh` (a fully-expired snapshot fails eager token fetches before the in-client re-mint can fire), and run without `NOTEBOOKLM_AUTH_JSON` set — see [master-token auth](#alternative-master-token-auth-no-cookie-file-to-ship-survives-expiry). This repo's own live-E2E workflows do exactly this via a `NOTEBOOKLM_MASTER_TOKEN_JSON` secret ([development.md](development.md#setting-up-nightly-e2e-tests)).
+   > **CI notes:**
+   > - The mint **bootstraps** `storage_state.json` when none exists, so the token is the only credential you ship. Layer-4 then covers mid-run expiry.
+   > - `master_token.json` is a **full-account credential** — it mints OAuth for many Google services and does not rotate. **It survives a password change**: the only remediation for a leaked token is explicit revocation (Google Account → Security → Your devices → remove the device/session), so do not treat a password reset as containment. Use a dedicated/throwaway account, keep it in a protected environment, `0600` on disk, and `unset` it from the environment once written (a file is not inherited by child processes; an env var is). See the security warning under [master-token auth](#alternative-master-token-auth-no-cookie-file-to-ship-survives-expiry).
+   > - Requires the `[headless]` extra (`gpsoauth`) on the runner.
+   > - This repo's four secret-bearing workflows all use exactly this shape and ship no cookie snapshot ([development.md](development.md#setting-up-nightly-e2e-tests)).
+   > - Inline `NOTEBOOKLM_AUTH_JSON` still works for a single short-lived invocation, but it never engages the layer-4 re-mint and cannot persist a rotation, so it is not suitable for scheduled or long-lived jobs. See [master-token auth](#alternative-master-token-auth-no-cookie-file-to-ship-survives-expiry).
 3. **On the server**, run any non-`login` command:
    <!-- not mirrored: headless-server smoke test; not part of contributor flow -->
    ```bash
@@ -276,16 +296,21 @@ notebooklm login --master-token --account you@gmail.com
 scp ~/.notebooklm/profiles/default/master_token.json \
     user@server:~/.notebooklm/profiles/default/master_token.json
 
-# On the server, just run commands — cookies are minted/refreshed as needed:
+# Mint initial storage if only the token was shipped; --verify reuses the
+# mandatory passive validation.
+notebooklm auth refresh --verify
+
+# Then run commands normally; dead existing sessions re-mint as needed.
 notebooklm list
-# Force a re-mint by hand (or from cron) any time:
+
+# Legacy escape hatch: force a re-mint unconditionally.
 notebooklm login --master-token-refresh
 ```
 
-When a `master_token.json` sits beside a profile's `storage_state.json`, an
-expired session is recovered by re-minting from the master token in-process
-(after the normal homepage/RotateCookies/headless ladder is exhausted) — so
-long-lived headless workers self-heal.
+When storage is absent, `auth refresh` mints it from the exact sibling token and
+passively validates once. When both files exist, cold or mid-session loading
+re-mints only after the homepage/RotateCookies/headless ladder is exhausted.
+The legacy login flag remains the unconditional forced route.
 
 > ⚠️ **Security:** the master token is **full-account, durable, and
 > infostealer-grade** — a materially larger blast radius than an expiring

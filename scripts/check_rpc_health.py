@@ -15,9 +15,15 @@ Exit codes:
         account migrated to the new customization surface and the VideoStyle /
         format codes must be re-captured. GATED-null is the expected steady
         state and is NOT a failure.
+    5 - Stale frontend build label: the ``bl`` value pinned in
+        ``_env.DEFAULT_BL`` trails the label the app shell actually serves by
+        more than ``_env.BUILD_LABEL_STALE_AFTER_DAYS``. Ordinary week-to-week
+        drift is a PASS; this fires only once the pin has gone unattended, and
+        clears as soon as it is bumped (#2073).
 
 Priority order when multiple statuses are present:
-    MISMATCH (1) > AUTH (2) > non-transient ERROR (3) > cohort MIGRATED (4) > OK (0)
+    MISMATCH (1) > AUTH (2) > non-transient ERROR (3) > cohort MIGRATED (4)
+    > build label STALE (5) > OK (0)
 
 Transient errors that still exit 0 are limited to rate-limit signals
 (HTTP 429, gRPC ``RESOURCE_EXHAUSTED``, and the decoder's user-displayable
@@ -32,11 +38,11 @@ Rebrand-host lane (``notebook.google.com``):
     A SEPARATE reporting lane answers "does the post-rebrand host serve RPC?".
     It NEVER contributes to the exit codes above and never lands in the
     ``CheckResult`` list — see :func:`probe_rebrand_host`. That separation is
-    load-bearing: the legacy lane's non-transient-ERROR issue is deduped by
+    load-bearing: the main lane's non-transient-ERROR issue is deduped by
     title alone, so a rebrand probe folded into it would open one issue on the
-    first failing night and then SUPPRESS every legacy-degradation issue after
-    it. The lane reports a *state change* (``ABSENT -> PRESENT``) against the
-    previous run's recorded state, under its own issue title.
+    first failing night and then SUPPRESS every main-lane degradation issue after
+    it. The lane reports a *state change* (for example, ``PRESENT -> ABSENT``)
+    against the previous run's recorded state, under its own issue title.
 
     The lane answers two of the three migration sub-questions — batchexecute and
     ``GenerateFreeFormStreamed``. The third, ``/upload/_/`` (Scotty), is NOT
@@ -46,7 +52,8 @@ Rebrand-host lane (``notebook.google.com``):
     lane as a green one.
 
 Environment variables:
-    NOTEBOOKLM_AUTH_JSON - Playwright storage state JSON (required)
+    NOTEBOOKLM_AUTH_JSON - Playwright storage state JSON (optional; the
+        profile's storage_state.json is used when unset, which is what CI does)
     NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID - Notebook ID for read operations
     NOTEBOOKLM_GENERATION_NOTEBOOK_ID - Notebook ID for write operations
     NOTEBOOKLM_RPC_DELAY - Delay between RPC calls in seconds (default: 1.0)
@@ -56,7 +63,7 @@ Usage:
     python scripts/check_rpc_health.py          # Quick mode (skip destructive)
     python scripts/check_rpc_health.py --full   # Full mode (create temp notebook)
     # Point the WHOLE run at the rebrand host (manual investigation only — the
-    # nightly must stay on the default host so the legacy signal is preserved):
+    # nightly stays on the default host so the main signal exercises that host):
     python scripts/check_rpc_health.py --base-url https://notebook.google.com
 """
 
@@ -83,9 +90,14 @@ from notebooklm._chat.wire import (
     parse_streaming_chat_response,
 )
 from notebooklm._env import (
-    PERSONAL_APP_ALIAS_HOST,
+    BUILD_LABEL_STALE_AFTER_DAYS,
+    DEFAULT_BL,
     PERSONAL_APP_HOSTS,
+    PERSONAL_BASE_HOST,
+    build_label_days_behind,
+    extract_build_label,
     get_base_url,
+    get_default_bl,
     get_default_language,
 )
 from notebooklm._logging import scrub_secrets
@@ -172,6 +184,27 @@ RECORDED_REBRAND_STATUSES: frozenset[RebrandProbeStatus] = frozenset(
 # Studio-customization cohort tripwire RPC. NOT in ``RPCMethod`` (it is gated off
 # for our consumer cohort, so there is no typed/public path), called by raw id.
 _CUSTOMIZATION_CHOICES_RPC_ID = "sqTeoe"
+
+
+class BuildLabelStatus(str, Enum):
+    """Verdict for the pinned-vs-served frontend build label (``bl``).
+
+    ``CURRENT`` — the app shell serves exactly what ``_env.DEFAULT_BL`` pins.
+    ``DRIFTED`` — it serves something else, but the pin is inside the freshness
+    window (``_env.BUILD_LABEL_STALE_AFTER_DAYS``). This is the ordinary steady
+    state: Google ships a new build roughly weekly and the pin is not expected to
+    chase every one, so DRIFTED is a PASS.
+    ``STALE`` — the pin trails the served label by more than that window. The
+    constant has been left unattended (#2073: it went five months and 154 label-days
+    without a re-check) and should be bumped.
+    ``UNKNOWN`` — no label could be read (not signed in, transport failure,
+    unrecognized shell). No conclusion is drawn and nothing is alarmed.
+    """
+
+    CURRENT = "CURRENT"
+    DRIFTED = "DRIFTED"
+    STALE = "STALE"
+    UNKNOWN = "UNKNOWN"
 
 
 @dataclass
@@ -311,9 +344,9 @@ async def load_auth(storage_path: Path | None) -> AuthTokens:
     Routes through :meth:`AuthTokens.from_storage` — the same loader the CLI
     and library use — which handles:
 
-    - ``NOTEBOOKLM_AUTH_JSON`` env var (for CI) and the profile storage file
-      (for local dev), via ``storage_path`` resolved by
-      :func:`resolve_storage_path`
+    - the profile storage file (what CI and local dev both use) and the
+      short-lived ``NOTEBOOKLM_AUTH_JSON`` env var, via ``storage_path``
+      resolved by :func:`resolve_storage_path`
     - cookie-domain filtering *and* per-cookie domain preservation
     - authuser / account-email routing and the CSRF + session token fetch
 
@@ -1105,19 +1138,22 @@ REBRAND_BATCHEXECUTE = "batchexecute"
 REBRAND_CHAT = "chat"
 REBRAND_UPLOAD = "upload"
 
-# What the repository already knows, used as the previous state on the very
-# first run (or whenever the state file is missing/unreadable). The cassette
-# corpus contains 12 recorded requests to the rebrand host, all ``GET /`` — zero
-# batchexecute, zero streamed chat. So ABSENT is the documented baseline, and an
-# ABSENT observation on the first run is "as expected", not news.
+# The last availability evidence acknowledged in the repository, used as the
+# previous state on the first run (or whenever the cached state is unavailable).
+# Keep each capability independent: the authenticated nightly probe at 36221e0
+# observed LIST_NOTEBOOKS over batchexecute (#2077) and parsed a streamed-chat
+# response (#2078) on the rebrand host. The entries remain independent so later
+# evidence can advance one capability without changing the other.
 REBRAND_BASELINE_STATE: dict[str, str] = {
-    REBRAND_BATCHEXECUTE: RebrandProbeStatus.ABSENT.value,
-    REBRAND_CHAT: RebrandProbeStatus.ABSENT.value,
+    REBRAND_BATCHEXECUTE: RebrandProbeStatus.PRESENT.value,
+    REBRAND_CHAT: RebrandProbeStatus.PRESENT.value,
 }
 
-# Bumped only if the state file's shape changes; a mismatch is treated as "no
-# usable previous state" and falls back to REBRAND_BASELINE_STATE.
-REBRAND_STATE_VERSION = 1
+# Bumped when the file shape changes or the checked-in evidence baseline
+# advances. A mismatch is treated as "no usable previous state" and falls back
+# to REBRAND_BASELINE_STATE; version 2 prevents a pre-#2077/#2078 cached ABSENT
+# document from overriding the newly acknowledged PRESENT observations.
+REBRAND_STATE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -1132,11 +1168,23 @@ class RebrandProbe:
 def rebrand_probe_host() -> str:
     """Return the host the rebrand lane probes.
 
-    Always the post-rebrand alias, regardless of what ``--base-url`` /
+    Always the post-rebrand host, regardless of what ``--base-url`` /
     ``NOTEBOOKLM_BASE_URL`` selected for the main lane: the lane's question is
     specifically "does *that* host serve RPC?".
+
+    .. note::
+
+       Since #2067 moved the default onto this same host, the lane duplicates
+       the main lane instead of adding a signal. That is deliberate for one
+       release: re-aiming it at :data:`~notebooklm._env.PERSONAL_LEGACY_HOST`
+       turns it into a *rollback-availability* monitor (ADR-0028, as amended),
+       which is the useful question post-flip -- but the nightly compares
+       against cached state (``rpc-health.yml``), so flipping the target
+       without bumping the state namespace would read the old host's history
+       as this host's and fire a spurious transition alert. Tracked as the
+       follow-up to this flip; kept redundant-but-honest until then.
     """
-    return PERSONAL_APP_ALIAS_HOST
+    return PERSONAL_BASE_HOST
 
 
 def retarget_url(url: str, host: str) -> str:
@@ -1156,7 +1204,12 @@ _REBRAND_AUTH_STATUS_CODES = frozenset({401, 403, 407})
 # as a 401: the host bounced an unauthenticated request, which says nothing
 # about whether it serves the RPC endpoint to a signed-in one.
 _LOGIN_REDIRECT_HOSTS = frozenset({"accounts.google.com", "accounts.youtube.com"})
-_LOGIN_REDIRECT_PATH_MARKERS = ("servicelogin", "signin", "accountchooser", "oauth")
+# ``login`` subsumes the older ``servicelogin`` entry and additionally catches the
+# app's own bounce, ``notebook.google.com/login?continue=…``, which is what an
+# unauthenticated fetch of the app shell actually receives (measured 2026-08-04).
+# Without it that bounce read as ABSENT — "the endpoint is gone" — on a lane whose
+# whole point (#2062) is that a signed-out run must not overwrite a recorded state.
+_LOGIN_REDIRECT_PATH_MARKERS = ("login", "signin", "accountchooser", "oauth")
 
 
 def is_login_redirect(location: str | None) -> bool:
@@ -1265,7 +1318,7 @@ async def probe_rebrand_batchexecute(
         # ``RPCError`` is what the decoder raises for a body it cannot read as
         # batchexecute at all (the HTML app shell hits exactly this). In THIS
         # lane that is the answer — "the host served something else" — not the
-        # drift signal it would be on the legacy lane.
+        # parse/drift signal it would be on the exit-coded main lane.
         return RebrandProbe(
             REBRAND_BATCHEXECUTE,
             RebrandProbeStatus.ABSENT,
@@ -1380,17 +1433,15 @@ async def probe_rebrand_host(
 
     Deliberately returns ``RebrandProbe`` objects, NOT ``CheckResult`` objects:
     nothing here may reach ``partition_errors`` / ``compute_exit_code``, because
-    the legacy lane's issue is deduped by title alone and a permanently-failing
+    the main lane's issue is deduped by title alone and a permanently-failing
     rebrand probe folded into it would suppress every subsequent
-    legacy-degradation issue.
+    main-lane degradation issue.
 
     Runs LAST in the check, and paced like the method loop, so it cannot push
-    the account into a rate limit that would then be attributed to a legacy
-    probe. Recorded decision: this is the first time this project's CI
-    credentials are presented to the rebrand host. Both hosts are Google's and
-    both are already the app's own origins, so the exposure is the same
-    credential to the same operator — but it is a deliberate choice, not a side
-    effect.
+    the account into a rate limit that would then be attributed to a main-lane
+    probe. When this lane was introduced, it deliberately presented the
+    project's CI credentials to the rebrand host for the first time; both hosts
+    are Google's and are origins of the same app.
     """
     target = host or rebrand_probe_host()
     await asyncio.sleep(CALL_DELAY)
@@ -1401,13 +1452,13 @@ async def probe_rebrand_host(
 
 
 def load_rebrand_state(path: Path | None) -> dict[str, str]:
-    """Return the previously recorded rebrand state, or the documented baseline.
+    """Return the previously recorded state or checked-in acknowledged baseline.
 
     Any problem — no path, no file, unreadable, wrong schema version — degrades
-    to :data:`REBRAND_BASELINE_STATE`. That degradation is safe by construction:
-    the baseline is ABSENT, so a lost state file can only ever *re-announce* a
-    PRESENT that is genuinely news; it can never manufacture a spurious alarm
-    out of the steady state.
+    to :data:`REBRAND_BASELINE_STATE`. That checked-in fallback records the last
+    acknowledged observation per capability. A missing cache therefore does not
+    replay a transition acknowledged by this checkout, while a contrary live
+    observation is still reported as a new transition.
     """
     if path is None or not path.exists():
         return dict(REBRAND_BASELINE_STATE)
@@ -1421,8 +1472,10 @@ def load_rebrand_state(path: Path | None) -> dict[str, str]:
     if not isinstance(recorded, dict):
         return dict(REBRAND_BASELINE_STATE)
     merged = dict(REBRAND_BASELINE_STATE)
-    for key, value in recorded.items():
-        if isinstance(key, str) and isinstance(value, str):
+    recorded_statuses = {status.value for status in RECORDED_REBRAND_STATUSES}
+    for key in REBRAND_BASELINE_STATE:
+        value = recorded.get(key)
+        if isinstance(value, str) and value in recorded_statuses:
             merged[key] = value
     return merged
 
@@ -1512,6 +1565,170 @@ def format_rebrand_lane(state: dict[str, Any], probes: list[RebrandProbe]) -> li
         "REBRAND  NOTE: an ABSENT verdict means 'not observed from this run's "
         "credentials', not 'unsupported'."
     )
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Build-label lane — is ``_env.DEFAULT_BL`` still close to what Google serves?
+# ---------------------------------------------------------------------------
+
+# How many hops the app-shell fetch will follow. Measured 2026-08-04: the default
+# host (``notebook.google.com`` since #2067) answers 200 directly, and the legacy
+# host answers 302 to it — so a run pointed at the rollback host takes exactly one
+# hop. Two is one spare; anything more is a redirect loop, not a shell.
+_SHELL_MAX_HOPS = 2
+
+
+@dataclass(frozen=True)
+class BuildLabelProbe:
+    """One pinned-vs-served build-label observation."""
+
+    status: BuildLabelStatus
+    detail: str
+    pinned: str
+    served: str | None = None
+    days_behind: int | None = None
+
+
+async def fetch_app_shell(client: httpx.AsyncClient, url: str) -> tuple[str | None, str]:
+    """GET the app shell at ``url``, following only app-host hops.
+
+    Returns ``(html, detail)``; ``html`` is ``None`` when no shell was reached,
+    and ``detail`` then says why.
+
+    Redirects are followed by hand rather than with ``follow_redirects=True`` so
+    this lane never carries the session jar somewhere it did not intend to go: a
+    hop is followed only when it lands on a personal app host at the site root.
+    A sign-in bounce (including ``notebook.google.com/login?continue=…``, which an
+    unauthenticated fetch gets) therefore ends the walk with no observation —
+    "this run was not signed in" is not evidence about the build label.
+    """
+    for _ in range(_SHELL_MAX_HOPS + 1):
+        try:
+            response = await client.get(url)
+        except httpx.RequestError as e:
+            return None, scrub_secrets(str(e) or type(e).__name__)
+        if response.status_code == 200:
+            return response.text, ""
+        if not 300 <= response.status_code < 400:
+            return None, f"HTTP {response.status_code}"
+        location = response.headers.get("location")
+        if is_login_redirect(location):
+            return None, f"HTTP {response.status_code} redirect to sign-in (not signed in)"
+        if not location:
+            return None, f"HTTP {response.status_code} with no Location header"
+        target = httpx.URL(url).join(location)
+        # ``https`` is checked alongside host and path: a downgrade to ``http``
+        # would put this run's jar on the wire in cleartext for every cookie not
+        # marked Secure. Refusing to follow is the only safe reading of it, and
+        # costs nothing — the app has never served the shell over cleartext.
+        if (
+            target.scheme != "https"
+            or target.host not in PERSONAL_APP_HOSTS
+            or target.path not in ("", "/")
+        ):
+            return None, (
+                f"HTTP {response.status_code} redirect to "
+                f"{scrub_secrets(str(target.copy_with(query=None)))} (not the app shell)"
+            )
+        url = str(target)
+    return None, f"more than {_SHELL_MAX_HOPS} redirects"
+
+
+def classify_build_label(served: str | None, detail: str) -> BuildLabelProbe:
+    """Score the served label against the pinned :data:`DEFAULT_BL`.
+
+    Pure, so the staleness policy is testable without a live shell. ``served``
+    is ``None`` when nothing was read; ``detail`` carries the reason.
+
+    Note what this does NOT do: it never consults the wall clock. The verdict is
+    a delta between two label dates, so it depends only on what Google served —
+    a replayed or delayed run cannot age into an alarm on its own.
+    """
+    if served is None:
+        return BuildLabelProbe(
+            BuildLabelStatus.UNKNOWN,
+            detail or "no build label found in the response",
+            DEFAULT_BL,
+        )
+    if served == DEFAULT_BL:
+        return BuildLabelProbe(
+            BuildLabelStatus.CURRENT, "pin matches served", DEFAULT_BL, served, 0
+        )
+
+    days = build_label_days_behind(DEFAULT_BL, served)
+    if days is None:
+        return BuildLabelProbe(
+            BuildLabelStatus.UNKNOWN,
+            f"served {served} but one of the labels is not datable",
+            DEFAULT_BL,
+            served,
+        )
+    if days > BUILD_LABEL_STALE_AFTER_DAYS:
+        return BuildLabelProbe(
+            BuildLabelStatus.STALE,
+            f"pin is {days} label-days behind {served} (limit {BUILD_LABEL_STALE_AFTER_DAYS})",
+            DEFAULT_BL,
+            served,
+            days,
+        )
+    # Negative days means the pin is *ahead* of the served shell — an older
+    # cohort, not staleness — so it gets its own wording rather than being
+    # reported as "N days behind, within the window".
+    if days < 0:
+        drift = f"pin is {-days} label-days AHEAD of {served} (older cohort — not stale)"
+    else:
+        drift = (
+            f"pin is {days} label-days behind {served} "
+            f"(within the {BUILD_LABEL_STALE_AFTER_DAYS}-day window)"
+        )
+    return BuildLabelProbe(BuildLabelStatus.DRIFTED, drift, DEFAULT_BL, served, days)
+
+
+async def check_build_label(client: httpx.AsyncClient) -> BuildLabelProbe:
+    """Read the served build label off the app shell and score the pin against it.
+
+    Exists because ``bl`` is a pinned constant with no other guard: cassettes
+    replay whatever was recorded, so the entire offline suite passes no matter how
+    old the pin gets, and the streaming endpoint accepts arbitrary labels — a live
+    A/B on 2026-08-04 got a complete cited answer from the pinned label, the served
+    label, and a fabricated 1970 one alike. Nothing fails until Google decides
+    otherwise, which is exactly why the gap needs a lane of its own (#2073).
+
+    **Never raises.** ``fetch_app_shell`` already absorbs transport errors, but
+    this lane runs immediately before the rebrand-host lane, so anything it let
+    escape would skip that lane and lose the night's rebrand observation
+    entirely. The lowest-severity lane in the script must not be able to do that
+    to a higher-severity one, so an unexpected failure degrades to UNKNOWN —
+    which alarms nothing — rather than propagating.
+    """
+    try:
+        html, detail = await fetch_app_shell(client, f"{get_base_url()}/")
+        if html is None:
+            return classify_build_label(None, detail)
+        return classify_build_label(extract_build_label(html), detail)
+    except Exception as e:  # noqa: BLE001 - see "Never raises" above
+        return classify_build_label(None, f"lane failed: {scrub_secrets(e) or type(e).__name__}")
+
+
+def format_build_label_lane(probe: BuildLabelProbe) -> list[str]:
+    """Render the build-label lane's report block as printable lines."""
+    lines = [
+        f"BUILDLBL {probe.status.value:8} - {scrub_secrets(probe.detail)}",
+        f"BUILDLBL pinned:   {probe.pinned} (src/notebooklm/_env.py)",
+        f"BUILDLBL served:   {probe.served or '(not observed)'}",
+    ]
+    active = get_default_bl()
+    if active != probe.pinned:
+        lines.append(
+            f"BUILDLBL NOTE: this run sent NOTEBOOKLM_BL={active} — the verdict "
+            "above is about the committed pin, not the override."
+        )
+    if probe.status is BuildLabelStatus.STALE:
+        lines.append(
+            "BUILDLBL ACTION: re-capture the served label and bump DEFAULT_BL in "
+            "src/notebooklm/_env.py."
+        )
     return lines
 
 
@@ -1816,14 +2033,16 @@ async def run_health_check(
     rebrand_state_path: Path | None = None,
     rebrand_previous_state_path: Path | None = None,
     rebrand_run_id: str | None = None,
-) -> tuple[list[CheckResult], CohortStatus, dict[str, Any]]:
+) -> tuple[list[CheckResult], CohortStatus, dict[str, Any], BuildLabelProbe]:
     """Run health check on all RPC methods.
 
-    Returns ``(results, cohort_status, rebrand_state)``: the per-method
-    ``CheckResult`` list, the ``sqTeoe`` studio-customization cohort tripwire
-    verdict (reported and exit-coded separately from RPC drift; see
-    :class:`CohortStatus`), and the rebrand-host lane's state document (reported
-    separately and NEVER exit-coded; see :func:`probe_rebrand_host`).
+    Returns ``(results, cohort_status, rebrand_state, build_label)``: the
+    per-method ``CheckResult`` list, the ``sqTeoe`` studio-customization cohort
+    tripwire verdict (reported and exit-coded separately from RPC drift; see
+    :class:`CohortStatus`), the rebrand-host lane's state document (reported
+    separately and NEVER exit-coded; see :func:`probe_rebrand_host`), and the
+    pinned-vs-served build-label verdict (its own exit code; see
+    :func:`check_build_label`).
 
     ``base_url_source`` names where the selected base host came from
     (``default`` / ``NOTEBOOKLM_BASE_URL`` / ``--base-url``) so the report says
@@ -1832,8 +2051,8 @@ async def run_health_check(
     reads the last run's from (defaulting to the same file, which is what a
     local invocation wants). CI keeps them apart so the file the workflow reads
     back can only be one this run wrote — see the "Detect rebrand-host state
-    change" step. ``None`` compares against the documented baseline and persists
-    nothing. ``rebrand_run_id`` stamps the written document; see
+    change" step. ``None`` compares against the checked-in acknowledged baseline
+    and persists nothing. ``rebrand_run_id`` stamps the written document; see
     :func:`build_rebrand_state`.
     """
     notebook_id = os.environ.get("NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID") or os.environ.get(
@@ -1846,6 +2065,9 @@ async def run_health_check(
     results: list[CheckResult] = []
     temp_resources = TempResources()
     cohort_status = CohortStatus.UNKNOWN
+    # A no-observation verdict, so an early failure yields a well-formed lane that
+    # alarms about nothing rather than a missing attribute in the summary.
+    build_label = classify_build_label(None, "lane did not run")
     # A no-observation document, so an early failure still yields a
     # well-formed (and change-free) rebrand lane rather than a KeyError.
     rebrand_state: dict[str, Any] = build_rebrand_state(
@@ -1921,9 +2143,18 @@ async def run_health_check(
                 f"{cohort_status.value} - {scrub_secrets(cohort_detail)}"
             )
 
+            # Build-label lane. One plain GET of the app shell, scored against
+            # the pinned ``_env.DEFAULT_BL``. CURRENT/DRIFTED/UNKNOWN are passes;
+            # only STALE is exit-coded, and it clears itself the moment the
+            # constant is bumped.
+            await asyncio.sleep(CALL_DELAY)
+            build_label = await check_build_label(client)
+            for line in format_build_label_lane(build_label):
+                print(line)
+
             # Rebrand-host lane. Runs LAST and in its own bucket: its probes
             # never join ``results``, so they cannot reach ``partition_errors``
-            # / ``compute_exit_code`` and cannot poison the legacy lane's
+            # / ``compute_exit_code`` and cannot poison the main lane's
             # title-deduped issue.
             rebrand_probes = await probe_rebrand_host(client, auth, notebook_id)
             rebrand_state = build_rebrand_state(
@@ -1942,7 +2173,7 @@ async def run_health_check(
                 print("Testing DELETE operations during cleanup...")
                 await cleanup_temp_resources(client, auth, temp_resources, results)
 
-    return results, cohort_status, rebrand_state
+    return results, cohort_status, rebrand_state, build_label
 
 
 # Substrings that mark an ERROR as a transient signal. Keep this list
@@ -2013,6 +2244,7 @@ def compute_exit_code(
     counts: Counter[CheckStatus],
     non_transient_errors: list[CheckResult],
     cohort_status: CohortStatus = CohortStatus.UNKNOWN,
+    build_label_status: BuildLabelStatus = BuildLabelStatus.UNKNOWN,
 ) -> int:
     """Compute the script exit code from result counts.
 
@@ -2021,17 +2253,20 @@ def compute_exit_code(
         2. AUTH      -> 2 (signaled by the caller via sys.exit, never reached here)
         3. non-transient ERROR -> 3
         4. cohort MIGRATED -> 4 (sqTeoe tripwire flipped; loud but not RPC drift)
-        5. OK        -> 0
+        5. build label STALE -> 5 (DEFAULT_BL left unattended; hygiene, not an outage)
+        6. OK        -> 0
 
     The cohort flip sits *below* the RPC-drift codes so a run that has both real
     drift AND a cohort flip still surfaces the higher-severity drift exit; the
-    flip is reported in the summary either way.
+    flip is reported in the summary either way. A stale build label sits lower
+    still: it is a maintenance signal about a constant the server does not even
+    validate today (#2073), so it must never mask a live breakage.
 
     The rebrand-host lane is deliberately absent from this signature. It has no
     exit code of its own and contributes to none of the above: the workflow's
     non-transient-ERROR issue is deduped by title alone, so a rebrand probe that
     failed every night would open one issue and then suppress every subsequent
-    legacy-degradation issue — disabling the gate the lane exists to feed.
+    main-lane degradation issue.
     """
     if counts[CheckStatus.MISMATCH] > 0:
         return 1
@@ -2039,6 +2274,8 @@ def compute_exit_code(
         return 3
     if cohort_status == CohortStatus.MIGRATED:
         return 4
+    if build_label_status == BuildLabelStatus.STALE:
+        return 5
     return 0
 
 
@@ -2046,11 +2283,13 @@ def print_summary(
     results: list[CheckResult],
     cohort_status: CohortStatus = CohortStatus.UNKNOWN,
     rebrand_state: dict[str, Any] | None = None,
+    build_label: BuildLabelProbe | None = None,
 ) -> int:
     """Print summary and return exit code.
 
     ``rebrand_state`` is echoed for the operator only — it is never read by
-    :func:`compute_exit_code`.
+    :func:`compute_exit_code`. ``build_label`` is echoed *and* exit-coded, but
+    only for a STALE verdict; omitting it scores as UNKNOWN, which alarms nothing.
     """
     print()
     print("=" * 60)
@@ -2120,10 +2359,20 @@ def print_summary(
                 f"{transition['from']}->{transition['to']}"
             )
 
+    # Build-label lane. CURRENT/DRIFTED/UNKNOWN are passes; STALE means the pin
+    # in ``_env.DEFAULT_BL`` has been left unattended past its freshness window.
+    build_label_status = build_label.status if build_label else BuildLabelStatus.UNKNOWN
+    if build_label is not None:
+        print(
+            f"BUILDLBL: {build_label_status.value} - "
+            f"pinned {build_label.pinned}, served {build_label.served or '(not observed)'}"
+        )
+
     # Return exit code.
-    # Priority: MISMATCH (1) > non-transient ERROR (3) > cohort MIGRATED (4) > OK (0).
+    # Priority: MISMATCH (1) > non-transient ERROR (3) > cohort MIGRATED (4)
+    # > build label STALE (5) > OK (0).
     # AUTH (2) is signaled earlier via sys.exit(2) and never reaches here.
-    exit_code = compute_exit_code(counts, non_transient_errors, cohort_status)
+    exit_code = compute_exit_code(counts, non_transient_errors, cohort_status, build_label_status)
 
     if exit_code == 1:
         print("RESULT: FAIL - RPC ID mismatches detected")
@@ -2137,6 +2386,12 @@ def print_summary(
         print("RESULT: COHORT FLIP - sqTeoe returned non-null (studio customization migrated)")
         print("       Re-capture VideoStyle / format codes in src/notebooklm/rpc/types.py.")
         return 4
+    if exit_code == 5:
+        detail = build_label.detail if build_label else ""
+        print(f"RESULT: STALE BUILD LABEL - {scrub_secrets(detail)}")
+        print("       Bump DEFAULT_BL in src/notebooklm/_env.py to the served label.")
+        print("       Chat is not broken by this; the pin has simply gone unattended.")
+        return 5
     if transient_errors:
         print("RESULT: PASS - Only transient errors observed (rate-limits / ReadTimeouts)")
         print("       Review ERROR DETAILS above for affected methods.")
@@ -2210,8 +2465,8 @@ def main() -> int:
         help=(
             "Point the whole run at a specific personal app host "
             f"({', '.join(sorted(PERSONAL_APP_HOSTS))}). Manual investigation only — "
-            "the nightly run must stay on the default host so the legacy signal "
-            "is preserved. Overrides NOTEBOOKLM_BASE_URL."
+            "the nightly run stays on the default host so the main signal exercises "
+            "that host. Overrides NOTEBOOKLM_BASE_URL."
         ),
     )
     parser.add_argument(
@@ -2221,8 +2476,8 @@ def main() -> int:
         help=(
             "Path the rebrand-host lane writes this run's state to (and, unless "
             "--rebrand-previous-state-file is given, also reads the previous "
-            "run's state from). Omitted: compare against the documented ABSENT "
-            "baseline and persist nothing."
+            "run's state from). Omitted: compare against the checked-in "
+            "last-acknowledged baseline and persist nothing."
         ),
     )
     parser.add_argument(
@@ -2257,7 +2512,7 @@ def main() -> int:
     print("=" * 60)
     print()
 
-    results, cohort_status, rebrand_state = asyncio.run(
+    results, cohort_status, rebrand_state, build_label = asyncio.run(
         run_health_check(
             full_mode=args.full,
             base_url_source=source,
@@ -2266,7 +2521,7 @@ def main() -> int:
             rebrand_run_id=args.rebrand_run_id,
         )
     )
-    return print_summary(results, cohort_status, rebrand_state)
+    return print_summary(results, cohort_status, rebrand_state, build_label)
 
 
 if __name__ == "__main__":

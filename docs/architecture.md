@@ -529,11 +529,15 @@ the default dependency.
 | [`_auth/headers.py`](../src/notebooklm/_auth/headers.py) | HTTP header construction. |
 | [`_auth/cookies.py`](../src/notebooklm/_auth/cookies.py) | Cookie maps + `_update_cookie_input` helper. |
 | [`_auth/cookie_policy.py`](../src/notebooklm/_auth/cookie_policy.py) | Domain allowlist, cookie-domain builder (`build_cookie_domain_allowlist`), and cookie policy decisions. |
+| [`_auth/cookie_semantics.py`](../src/notebooklm/_auth/cookie_semantics.py) | Shared cookie-shape and expiry semantics used by sanitized auth loaders and persistence boundaries. |
+| [`_auth/browser_cookie_recovery.py`](../src/notebooklm/_auth/browser_cookie_recovery.py) | Leaf bridge that validates captured browser cookies and retries in-memory PSIDTS recovery. |
+| [`_auth/browser_state_validation.py`](../src/notebooklm/_auth/browser_state_validation.py) | Best-effort in-memory PSIDTS heal for Playwright-captured state, preserving cookie attributes. Returns `(state, error)` and never raises, so a failed heal cannot discard a completed sign-in. |
 | [`_auth/browser_capture.py`](../src/notebooklm/_auth/browser_capture.py) | Transport-neutral browser launch→navigate→capture→filter→persist core (lazy `playwright`); shared by the interactive CLI login adapter and the layer-3 headless re-auth layer (ADR-0021). The headless arm classifies the landing URL (authenticated→capture, redirected-to-login→`HeadlessLoginRequiredError`). `run_cdp_capture` is an alternative credential source: attach to an operator-pointed already-running Chrome over CDP (`connect_over_cdp`, disconnect-only teardown) using the SAME landing classification + cookie-domain allowlist. |
 | [`_auth/_browser_cookie_filter.py`](../src/notebooklm/_auth/_browser_cookie_filter.py) | Pure storage-state cookie filter shared by browser-capture arms: applies the domain policy, skips malformed rows with value-free diagnostics, and deduplicates exact RFC 6265 identities. |
 | [`_auth/browser_launch_errors.py`](../src/notebooklm/_auth/browser_launch_errors.py) | Transport-neutral leaf for `browser_capture`: the `CHANNEL_BROWSERS` channel registry plus `classify_launch_failure`, which maps a Playwright launch failure to actionable help (system browser not installed, bundled Chromium not downloaded, or a Windows `spawn UNKNOWN` execution veto from AppLocker/WDAC/Defender) or to `None` so the original exception propagates. Pure string-in/string-out — no Playwright, no I/O, no CLI. |
 | [`_auth/login_wait_trace.py`](../src/notebooklm/_auth/login_wait_trace.py) | Transport-neutral leaf for `browser_capture`: `log_observed_navigations`, a context manager that logs each main-frame navigation observed during the five-minute interactive login wait at DEBUG so `notebooklm -vv login` is self-diagnosing when a login never lands. Inert unless DEBUG is enabled (no listener attached) and swallows every listener exception so it can never destabilise the wait. Redaction goes through its own `trace_url`, which keeps **only** scheme + host — deliberately stricter than `extraction._safe_url` (which preserves the path outside a Google-OAuth allowlist), because this traces arbitrary SSO redirects where a federated IdP can carry a one-time assertion in the path. |
 | [`_auth/headless_reauth.py`](../src/notebooklm/_auth/headless_reauth.py) | Layer-3 (deepest) auth recovery: when first-party cookies are dead, drive a headless browser against the persistent profile to silently re-mint cookies. Typed honest outcomes (`HeadlessReauthStatus` UNAVAILABLE/FAILED/SUCCESS — never silent `None`). Opt-in only (`refresh_auth(allow_headless=True)` or `NOTEBOOKLM_HEADLESS_REAUTH=1`); local-unattended-only, never the remote/MCP auth path. Alternative credential source: `NOTEBOOKLM_HEADLESS_REAUTH_CDP_URL` (or `attempt_headless_reauth(cdp_url=...)`) attaches to an operator-pointed running Chrome instead of the dedicated profile (freshness mitigation). Also exposes `headless_reauth_readiness()` — a credential-free, browser-free probe (profile present + playwright installed) surfaced by `doctor`. |
+| [`_auth/recovery.py`](../src/notebooklm/_auth/recovery.py) | Client-neutral L3/L4 recovery adapters plus same-loop cold-start coordination. Equivalent callers share one complete task; heterogeneous policies serialize mutation by canonical storage path. |
 | [`_auth/account.py`](../src/notebooklm/_auth/account.py) | Account profile + multi-account switching. |
 | [`_auth/session.py`](../src/notebooklm/_auth/session.py) | `refresh_auth_session(auth=..., kernel=..., auth_coord=..., lifecycle=..., cookie_persistence=...)` implementation called by `AuthRefreshCoordinator`. Takes five explicit keyword-only collaborators instead of a Session-shaped owner Protocol; the previous `RefreshAuthCore` Protocol and the `update_auth_tokens` / `update_auth_headers` Session-level forwards have been removed. |
 | [`_auth/refresh.py`](../src/notebooklm/_auth/refresh.py) | Token refresh driver (external login command, coalesced runs, secret redaction). |
@@ -644,6 +648,7 @@ The cross-command helpers form a small internal CLI stack:
 | [`cli/runtime.py`](../src/notebooklm/cli/runtime.py) | Leaf runtime helpers: root `--quiet` lookup and the single `asyncio.run(...)` bridge for sync Click handlers. |
 | [`cli/auth_runtime.py`](../src/notebooklm/cli/auth_runtime.py) | Shared auth bootstrap, command-body error wrapping, and optional opened-client workflow helper. |
 | [`cli/master_token_login.py`](../src/notebooklm/cli/master_token_login.py) | Command driver for `notebooklm login --master-token[-refresh]`, rendering over the master-token login service [`cli/services/login/master_token.py`](../src/notebooklm/cli/services/login/master_token.py) (mint/persist/refresh + browser `oauth_token` capture; ADR-0023). |
+| [`cli/services/auth_refresh.py`](../src/notebooklm/cli/services/auth_refresh.py) | Missing-storage preflight for `auth refresh`: conditionally mint from the exact sibling master token without changing healthy or malformed-storage behavior. |
 | [`cli/services/auth_source.py`](../src/notebooklm/cli/services/auth_source.py) | Single resolver for CLI auth-source precedence (`--storage`, `NOTEBOOKLM_AUTH_JSON`, active profile). |
 | [`cli/context.py`](../src/notebooklm/cli/context.py) | Profile/storage-scoped `context.json` persistence for active notebook, conversation, and account metadata. |
 | [`cli/resolve.py`](../src/notebooklm/cli/resolve.py) | Notebook/source/artifact/note ID resolution, including partial-ID matching against public client list calls. |
@@ -991,6 +996,9 @@ Per-file index plus the full `src/notebooklm` + `tests` repository tree. The tre
 | `_auth/headers.py` | HTTP header construction |
 | `_auth/cookies.py` | Cookie map manipulation + `_update_cookie_input` |
 | `_auth/cookie_policy.py` | Cookie-domain allowlist, `build_cookie_domain_allowlist` builder, and policy decisions |
+| `_auth/cookie_semantics.py` | Shared cookie-shape and expiry semantics at loader/persistence boundaries |
+| `_auth/browser_cookie_recovery.py` | Captured-cookie validation and in-memory PSIDTS recovery bridge |
+| `_auth/browser_state_validation.py` | Best-effort PSIDTS heal for captured state; returns `(state, error)`, never raises |
 | `_auth/browser_capture.py` | Transport-neutral browser launch→capture→filter→persist core (lazy `playwright`); shared by the interactive CLI login adapter (`cli/services/playwright_login.py`) and the layer-3 headless re-auth layer (ADR-0021) |
 | `_auth/_browser_cookie_filter.py` | Pure storage-state cookie filter shared by browser-capture arms; applies domain policy and normalizes malformed/duplicate rows |
 | `_auth/browser_launch_errors.py` | `CHANNEL_BROWSERS` registry + `classify_launch_failure` launch-failure triage (not-installed / bundled-Chromium-missing / Windows `spawn UNKNOWN` execution veto); pure leaf of `browser_capture.py` (ADR-0008) |
@@ -1067,7 +1075,8 @@ src/notebooklm/
 │   ├── auth_check.py            # Click-free `auth check` diagnostics core: run_auth_check(plan, read_env_auth_json=…) -> AuthCheckResult (storage-exists/json-valid/cookies-present/SID + optional token-fetch); AuthCheckPlan carries pre-resolved values + the auth_source display label; inline-auth read injected (CLI owns the AuthSource plan-build + Rich table + exit code)
 │   ├── chat.py                  # Click-free chat core: conversation-id selection ladder + configure mode/goal/length dispatch + history fetch/format-as-data + ask save-as-note workflow (raises public ValidationError; status emitted into injected ProgressSink)
 │   ├── doctor.py                # Click-free doctor core: run_checks(*, fix, paths) -> DoctorReport (five checks incl. headless-reauth readiness + fixes + has_failures; DoctorPaths injects the path helpers; CLI owns rendering/exit codes)
-│   ├── download.py              # Click-free download core: DownloadPlan/Result/TypeSpec + build_download_plan/execute_download (injected resolvers; CLI builds the --json envelope from the typed DownloadResult)
+│   ├── download.py              # Click-free download core: DownloadPlan/Result + build_download_plan/execute_download (injected resolvers; CLI builds the --json envelope from the typed DownloadResult)
+│   ├── download_specs.py        # Canonical artifact-download registry: type/binding + per-format extension/MIME descriptors; derives DownloadTypeSpec projections, MIME lookup, and adapter schema enums
 │   ├── errors.py                # classify(exc) -> ClassifiedError (category + retriable); class-sensitive
 │   ├── events.py                # ProgressEvent + ProgressSink Protocol (neutral progress seam)
 │   ├── generate.py              # Click-free `generate` executor: execute_generation (injected notebook/source resolvers preserve the RPC fast paths) + GenerationExecutionResult; re-exports the plan/retry surface so `_app.generate` is the single import point
@@ -1168,6 +1177,9 @@ src/notebooklm/
 │   ├── headers.py               # HTTP header construction
 │   ├── cookies.py               # Cookie maps + _update_cookie_input
 │   ├── cookie_policy.py         # Domain allowlist + cookie-domain builder and policy
+│   ├── cookie_semantics.py      # Shared cookie-shape and expiry semantics
+│   ├── browser_cookie_recovery.py # Captured-cookie validation + in-memory PSIDTS recovery bridge
+│   ├── browser_state_validation.py # Best-effort PSIDTS heal for captured state (never raises)
 │   ├── browser_capture.py       # Transport-neutral browser launch→capture→filter→persist core (lazy playwright)
 │   ├── _browser_cookie_filter.py # Shared storage-state cookie-domain filter + row normalization
 │   ├── browser_launch_errors.py # Channel registry + launch-failure triage (pure leaf of browser_capture)
@@ -1179,6 +1191,7 @@ src/notebooklm/
 │   ├── keepalive.py             # Cookie keepalive + __Secure-1PSIDTS rotation
 │   ├── psidts_recovery.py       # Inline PSIDTS recovery for cold-start (issue #865)
 │   ├── master_token.py          # Headless master-token auth: mint cookies + layer-4 re-mint (ADR-0023)
+│   ├── recovery.py              # Client-neutral cold-start L3/L4 adapters + same-loop coordination
 │   ├── refresh.py               # Token refresh driver (external login cmd, coalesced runs, redaction)
 │   └── tokens.py                # AuthTokens container + load_auth_from_storage loader
 ├── _types/                      # Dataclass implementation package re-exported by types.py
@@ -1229,7 +1242,7 @@ src/notebooklm/
 │       ├── _passthrough.py      # Shared pass-through resolvers (passthrough_notebook_id/passthrough_child_id) for the CLI-shaped _app executors
 │       ├── _preview.py          # title_for_id() — shared id→title lookup for the delete tools' needs_confirmation previews
 │       ├── _studio_items.py     # cross-type Studio plumbing: studio_items (merge notes+artifacts into one items list) + resolve_studio_item (cross-type ref → StudioResolvedItem) for studio_list/studio_rename/studio_delete (split from studio.py for the ADR-0008 size budget)
-│       ├── _studio_download.py  # download plumbing shared by studio.py + _fileroutes.py: _DOWNLOAD_SPECS registry (rebuilt from _app.download) + DownloadType + _resolve_artifact_id / _broker_download / _is_http_transport / _passthrough_download_notebook (split from studio.py for the ADR-0008 size budget)
+│       ├── _studio_download.py  # download plumbing shared by studio.py + _fileroutes.py: consumes _app.download_specs directly; registry-derived DownloadType/DownloadFormat schema aliases + _resolve_artifact_id / _broker_download / transport helpers (split from studio.py for the ADR-0008 size budget)
 │       ├── _studio_payloads.py  # wire-shape projection helpers for the Studio generate/rename tools: _generation_payload (GenerationExecutionResult → response dict; mind-map → bare node tree + mind_map_id via _mind_map_tree/_mind_map_id) + _artifact_rename_payload (split from studio.py for the ADR-0008 size budget)
 │       ├── _waitagg.py          # source-wait outcome aggregation shared by source_wait + source_add(wait=True): _wait_all_sources (concurrent per-source wait) + _aggregate_wait_outcomes (typed SourceWaitOutcome → {ok, ready, timed_out, failed, not_found} + thin-warning annotation) (split from sources.py for the ADR-0008 size budget)
 │       ├── notebooks.py         # notebook_list/create/describe/rename/delete over _app.notebooks
@@ -1251,7 +1264,7 @@ src/notebooklm/
     ├── __init__.py              # Re-exports click groups under historical names from *_cmd modules
     ├── _chromium_profiles.py    # Multi-user-data-profile cookie extraction for Chromium browsers
     ├── _cookie_import.py        # `auth import-cookies` helpers: parse/normalize/validate cookie JSON + backup-then-atomic-write storage_state
-    ├── _download_specs.py       # Registry data for `download <type>` leaf commands
+    ├── _download_specs.py       # Click projection of the shared download registry: help/examples + legacy slide_format parameter only
     ├── _encoding.py             # Encoding-safe CLI output helpers
     ├── _firefox_containers.py   # Container-aware Firefox cookie extraction
     ├── _session_render.py       # Session-command render helpers (status/auth tables)
@@ -1294,9 +1307,10 @@ src/notebooklm/
     └── services/                # CLI-specific service layer (ADR-0008 Click-to-service extraction)
         ├── __init__.py
         ├── auth_diagnostics.py  # `auth check` CLI adapter over `_app/auth_check.py` — re-exports AuthCheckPlan/Result; builds the plan from the AuthSource Click-context precedence (plan_from_click_context + the auth_source display label) and injects read_env_auth_json into the neutral run_auth_check
+        ├── auth_refresh.py      # Missing-storage bootstrap from the exact sibling master token
         ├── auth_source.py       # Single source of truth for the active CLI auth source (Click-context precedence resolver; stays in cli/ — reads ctx.obj + NOTEBOOKLM_AUTH_JSON)
         ├── confirming_mutation.py # Shared confirmed-mutation pipeline for CLI resources
-        ├── download.py          # CLI adapter over _app/download.py: re-exports plan types, injects cli.resolve resolvers (keeps resolve_notebook_id patch seam), projects DownloadResult → envelope dict
+        ├── download.py          # CLI adapter over _app/download.py: re-exports plan/spec types, injects cli.resolve resolvers (keeps resolve_notebook_id patch seam), projects DownloadResult → envelope dict
         ├── generate.py          # `generate` CLI adapter over `_app/generate.py` — re-exports plan/result/error + build_generation_plan; injects cli.resolve resolve_notebook_id/resolve_source_ids (read at call time, preserving the resolve_module monkeypatch seam) into the neutral execute_generation; re-exports _INFOGRAPHIC_STYLE_MAP from `_app/generate_plans.py` for generate_cmd
         ├── label_listing.py     # `label list` members→titles join service; re-exports resolve_label_id + LabelResolutionError from _app/labels.py
         ├── listing.py           # Shared list-command pipeline for CLI resources

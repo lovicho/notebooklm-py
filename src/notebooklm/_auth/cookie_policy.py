@@ -6,9 +6,18 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from notebooklm._env import PERSONAL_APP_ALIAS_HOST, PERSONAL_APP_HOSTS, get_base_host
+from notebooklm._env import (
+    PERSONAL_APP_HOSTS,
+    PERSONAL_BASE_HOST,
+    PERSONAL_LEGACY_HOST,
+    get_base_host,
+)
 
 logger = logging.getLogger("notebooklm.auth")
+
+
+class RequiredCookieValidationError(ValueError):
+    """Typed required-cookie/preflight failure used by recovery wrappers."""
 
 
 def cookie_names_from_storage(storage_state: Mapping[str, Any]) -> set[str]:
@@ -21,11 +30,22 @@ def cookie_names_from_storage(storage_state: Mapping[str, Any]) -> set[str]:
     ``None`` / empty-string names (so the returned set never contains ``""``).
     """
     cookies = storage_state.get("cookies", [])
-    return {
-        name
-        for entry in cookies
-        if isinstance(entry, dict) and isinstance(name := entry.get("name"), str) and name
-    }
+    names: set[str] = set()
+    if not isinstance(cookies, list):
+        return names
+    for entry in cookies:
+        # This helper is deliberately a lightweight diagnostic projection, not
+        # a loader/conversion boundary.  Doctor and compatibility callers have
+        # historically supplied minimal ``{"name": ..., "value": ...}``
+        # rows, so requiring storage-only fields such as ``domain`` here would
+        # turn a usable profile into a false "SID missing" report.  Full shape
+        # and expiry sanitization remains in the cookie loaders.
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
 
 
 # Tier 1: cookies whose absence Google rejects deterministically.
@@ -35,8 +55,8 @@ def cookie_names_from_storage(storage_state: Mapping[str, Any]) -> set[str]:
 #   recoverable via the RotateCookies POST when other auth cookies are intact.
 #   When neither path is viable the homepage GET 302s to login.
 #
-# See ``docs/auth-cookie-lifecycle.md`` §3.5 for the ablation methodology and the full
-# 16-pair failure table backing this set.
+# See ``docs/auth-cookie-lifecycle.md`` §3.3 for the singleton/pair-wise Tier 1
+# evidence and the corrected three-way secondary-binding table.
 MINIMUM_REQUIRED_COOKIES = {"SID", "__Secure-1PSIDTS"}
 
 
@@ -180,7 +200,7 @@ def _validate_required_cookies(
         if extra_diagnostics:
             parts.extend(extra_diagnostics)
         parts.append(_EXTRACTION_HINT)
-        raise ValueError("\n".join(parts))
+        raise RequiredCookieValidationError("\n".join(parts))
 
     if not _has_valid_secondary_binding(cookie_names):
         global _SECONDARY_BINDING_WARNED
@@ -220,21 +240,20 @@ def app_host_scope_note() -> str:
     2. Select the host that actually holds the cookies via
        ``NOTEBOOKLM_BASE_URL``.
 
-    Recovery 2 carries a caveat, but only in one direction. The sibling host is
-    computed *relative to the configured one*, so it is the rebrand host
-    (:data:`notebooklm._env.PERSONAL_APP_ALIAS_HOST`) for a default-host user and
-    the long-established default for a rebrand-host user. Attaching the caveat
-    unconditionally therefore warned rebrand-host users off the legacy host —
-    exactly backwards, and it discourages the one fallback whose behavior this
-    project has exercised end to end.
+    Recovery 2 used to carry a caveat marking the rebrand host "experimental —
+    not the documented default", asymmetrically so it could never land on the
+    legacy host and warn users off the one fallback this project had exercised
+    end to end.
 
-    What the caveat may and may not claim: a live probe (issue #1977) reached
-    ``batchexecute`` on the rebrand host — a 400 on a deliberately malformed
-    payload proves the endpoint is there. So the host is *not* "unverified to
-    serve the API". It is simply experimental here: not the documented default,
-    and not covered by this repository's cassettes. The note says that and no
-    more — overclaiming in either direction sends users into a different failure,
-    which is the bug this note exists to avoid.
+    **#2067 retired that caveat rather than inverting it.** The flip made the
+    rebrand host the documented default and moved the cassettes onto it, so
+    every clause of the old wording became false for it. Re-pointing the same
+    words at the legacy host would have been false in the other direction: that
+    host is long-exercised, still served, and is now the documented rollback
+    lever (ADR-0028, as amended). Neither host is experimental today, so the
+    note recommends the sibling without an editorial. Overclaiming in either
+    direction sends users into a different failure, which is the bug this note
+    exists to avoid.
 
     Returns:
         The note as plain text (no trailing newline), or ``""`` when the
@@ -246,14 +265,6 @@ def app_host_scope_note() -> str:
     if base_host not in PERSONAL_APP_HOSTS or not siblings:
         return ""
     other_host = siblings[0]
-    # Asymmetric by design — see the "only in one direction" paragraph above.
-    # Never inline the alias literal here: the centralization guardrail AST-walks
-    # f-string parts too, so the host must arrive via the constant.
-    caveat = (
-        " (that host is experimental — not the documented default)"
-        if other_host == PERSONAL_APP_ALIAS_HOST
-        else ""
-    )
     return (
         f"Heads-up: Google serves the personal app from both {base_host} and "
         f"{other_host} and redirects between them, but the OSID binding is "
@@ -264,7 +275,7 @@ def app_host_scope_note() -> str:
         f"account-wide binding APISID+SAPISID+LSID, none of which are "
         f"host-scoped, so both hosts accept it), or select the host that has "
         f"the cookies with "
-        f"NOTEBOOKLM_BASE_URL=https://{other_host}{caveat}."
+        f"NOTEBOOKLM_BASE_URL=https://{other_host}."
     )
 
 
@@ -365,9 +376,12 @@ def missing_cookies_hint(
 # (``tests/cassettes/*.yaml``) and the live auth-refresh path. Only the
 # following domains are actually exercised during login + token refresh +
 # source-add + chat-ask flows:
-#   - ``notebooklm.google.com`` (the API host — all CLI RPCs land here)
-#   - ``notebook.google.com`` (the Gemini Notebook rebrand host; Google sets
-#     the per-product ``OSID`` / ``__Secure-OSID`` binding cookies here too)
+#   - ``notebook.google.com`` (the default app host since #2067 — CLI RPCs
+#     land here, and Google sets the per-product ``OSID`` /
+#     ``__Secure-OSID`` binding cookies here)
+#   - ``notebooklm.google.com`` (the pre-rebrand host; still served, still
+#     selectable via ``NOTEBOOKLM_BASE_URL``, and sets the same binding
+#     cookies — both must stay accepted)
 #   - ``.google.com`` (carries ``SID``/``HSID``/``SSID``/etc.)
 #   - ``accounts.google.com`` (token refresh + ``RotateCookies`` endpoint at
 #     :data:`KEEPALIVE_ROTATE_URL`)
@@ -376,37 +390,37 @@ def missing_cookies_hint(
 #   - ``drive.google.com`` (Drive-source ingest follows redirects through
 #     here; kept in REQUIRED for source-add safety)
 #
-# YouTube / Docs / Mail / myaccount cookies do NOT appear in any traced
-# flow. They are now :data:`OPTIONAL_COOKIE_DOMAINS` — opted in via
-# ``notebooklm login --include-domains=...``. This narrows the blast
-# radius if ``storage_state.json`` is ever leaked.
+# YouTube / Docs / Mail / myaccount cookies do NOT appear in any traced flow.
+# Their hosts are not explicitly requested unless opted in via
+# ``notebooklm login --include-domains=...``. The write-time compatibility
+# policy still preserves cookies an extractor returns under trusted Google
+# roots; distinct roots such as ``youtube.com`` remain opt-in.
 #
 # ``REQUIRED_COOKIE_DOMAINS`` is included in the default extractor allowlist
 # built by ``_build_google_cookie_domains`` / ``build_cookie_domain_allowlist``.
 # Those builders also add regional ``.google.<ccTLD>`` variants by default.
 #
 # This frozenset is the required-domain chokepoint for the cookie-domain
-# narrowing security control: extraction requests required domains plus regional
-# ccTLDs by default, while sibling Google product domains (YouTube, Mail, etc.)
-# are excluded unless the user opts in via ``--include-domains=...``. Enforcement
-# starts at extraction time (what ``rookiepy`` returns); the runtime gate stays
-# permissive over the ``REQUIRED | OPTIONAL`` union so opted-in cookies survive
-# downstream filters (see :func:`_is_allowed_cookie_domain`).
+# narrowing control: extraction explicitly requests required domains plus
+# regional ccTLDs by default. The runtime and write gates stay
+# compatibility-permissive for boundary-matched trusted Google roots because
+# browser extractors may return host-scoped subdomain cookies required by an
+# untraced flow. Optional domains on distinct roots remain opt-in.
 REQUIRED_COOKIE_DOMAINS: frozenset[str] = frozenset(
     {
         ".google.com",
         "google.com",  # Host-only Domain=google.com cookies (rare but possible)
         # Playwright storage_state may preserve the leading dot for NotebookLM cookies.
-        ".notebooklm.google.com",
-        "notebooklm.google.com",
+        f".{PERSONAL_LEGACY_HOST}",
+        PERSONAL_LEGACY_HOST,
         # Gemini Notebook rebrand (July 2026, issue #2013): Google now also serves
         # the app from ``notebook.google.com`` and sets the per-product binding
         # cookies (``OSID`` / ``__Secure-OSID``) on this host. Both dotted and
         # non-dotted variants are listed (same defensive pattern as
         # ``notebooklm.google.com`` above) so http.cookiejar normalization does
         # not drop them at extraction / load time.
-        f".{PERSONAL_APP_ALIAS_HOST}",
-        PERSONAL_APP_ALIAS_HOST,
+        f".{PERSONAL_BASE_HOST}",
+        PERSONAL_BASE_HOST,
         ".notebooklm.cloud.google.com",
         "notebooklm.cloud.google.com",
         ".googleusercontent.com",
@@ -422,11 +436,12 @@ REQUIRED_COOKIE_DOMAINS: frozenset[str] = frozenset(
     }
 )
 
-# Sibling Google product domains — NOT exercised by any current code path
-# but historically extracted "for symmetry with a logged-in browser session"
-# (issue #360). Now opt-in via ``--include-domains=...`` to reduce
-# storage_state.json blast radius. The keys here (``youtube``, ``docs``,
-# ``myaccount``, ``mail``) are also the labels accepted by ``--include-domains``.
+# Sibling Google product domains — NOT exercised by any current code path but
+# historically requested "for symmetry with a logged-in browser session"
+# (issue #360). They are now explicit-request labels for
+# ``--include-domains=...``. Cookies already returned under a trusted Google
+# root may still survive the compatibility-first write policy; YouTube uses a
+# distinct root and remains excluded by default.
 #
 # Both dotted and non-dotted variants are listed so that http.cookiejar
 # normalization (which can add a leading dot) doesn't drop a cookie at the
@@ -484,9 +499,9 @@ def build_cookie_domain_allowlist(
     extractors (``rookiepy.load(domains=...)``) and the Playwright
     browser-capture cookie filter consume. Defaults to
     :data:`REQUIRED_COOKIE_DOMAINS` plus every regional ``.google.<ccTLD>``
-    variant; sibling-product cookies (YouTube, Docs, myaccount, Mail) are
-    excluded unless the caller opts in via ``include_optional=True`` or a
-    non-empty ``include_domains`` label set (``"all"`` = every label).
+    variant. Optional sibling hosts are not explicitly requested unless the
+    caller opts in via ``include_optional=True`` or a non-empty
+    ``include_domains`` label set (``"all"`` = every label).
 
     Args:
         include_optional: When ``True``, include every optional sibling domain
@@ -496,8 +511,8 @@ def build_cookie_domain_allowlist(
             for every label.
 
     Returns:
-        A list of cookie-domain strings. Order is not significant; callers that
-        need set semantics build a ``frozenset`` from it.
+        A sorted list of cookie-domain strings. Matching uses set semantics,
+        but deterministic order keeps extractor calls and diagnostics stable.
     """
     selected_optional: frozenset[str]
     if include_domains:
@@ -507,12 +522,9 @@ def build_cookie_domain_allowlist(
     else:
         selected_optional = frozenset()
 
-    domains: list[str] = list(REQUIRED_COOKIE_DOMAINS | selected_optional)
-    for cctld in GOOGLE_REGIONAL_CCTLDS:
-        domain = f".google.{cctld}"
-        if domain not in domains:
-            domains.append(domain)
-    return domains
+    domains = set(REQUIRED_COOKIE_DOMAINS | selected_optional)
+    domains.update(f".google.{cctld}" for cctld in GOOGLE_REGIONAL_CCTLDS)
+    return sorted(domains)
 
 
 # Backward-compatible union — preserves the old constant name so external
@@ -607,6 +619,39 @@ GOOGLE_REGIONAL_CCTLDS = frozenset(
     }
 )
 
+# Compatibility-first roots for cookie domains Google may use during auth,
+# Drive ingest, or authenticated downloads.  Keep this derived from the
+# existing regional whitelist so a new regional root has one maintenance
+# chokepoint.  The boundary-aware matcher below accepts both the root and its
+# subdomains (for example ``accounts.google.com.hk``), but never lookalikes
+# such as ``evilgoogle.com`` or ``google.com.evil.example``.
+_TRUSTED_GOOGLE_COOKIE_ROOTS: frozenset[str] = frozenset(
+    {
+        "google.com",
+        "googleusercontent.com",
+        *(f"google.{cctld}" for cctld in GOOGLE_REGIONAL_CCTLDS),
+    }
+)
+
+
+def _is_trusted_google_cookie_domain(domain: str) -> bool:
+    """Return whether ``domain`` is a trusted Google root or subdomain.
+
+    Cookie domains may carry one leading dot to express domain scope.  Strip
+    exactly that one dot, normalize DNS case, then require a label boundary
+    before a trusted root.  This deliberately keeps unknown ``*.google.com``
+    and regional Google subdomains for compatibility until live-flow evidence
+    lets the persisted set be narrowed without breaking authentication.
+    """
+    normalized = domain[1:] if domain.startswith(".") else domain
+    normalized = normalized.lower()
+    if not normalized or normalized.startswith(".") or normalized.endswith("."):
+        return False
+    return any(
+        normalized == root or normalized.endswith(f".{root}")
+        for root in _TRUSTED_GOOGLE_COOKIE_ROOTS
+    )
+
 
 def _is_google_domain(domain: str) -> bool:
     """Check if a cookie domain is a valid Google domain.
@@ -656,9 +701,10 @@ def _is_allowed_auth_domain(domain: str) -> bool:
     2. Regional Google ccTLDs (``.google.com.sg``, ``.google.co.uk``,
        ``.google.de``, …) where SID cookies may be set for users in those
        regions.
-    3. Suffix matches for Google subdomains (``lh3.google.com``,
-       ``accounts.google.com``) and ``.googleusercontent.com`` /
-       ``.usercontent.google.com`` for authenticated media downloads.
+    3. Boundary-aware suffix matches for ``google.com``,
+       ``googleusercontent.com``, and every explicitly whitelisted regional
+       root. This preserves host-scoped cookies such as
+       ``drive.usercontent.google.com`` and ``accounts.google.com.hk``.
 
     The previous strict / broad split (#334 / fea8315) created an asymmetry
     where ``save_cookies_to_storage`` would persist cookies that the next
@@ -704,22 +750,23 @@ def _auth_domain_priority(domain: str) -> int:
     """
     if domain == ".google.com":
         return 4
-    if domain == ".notebooklm.google.com":
+    if domain == f".{PERSONAL_LEGACY_HOST}":
         return 3
-    if domain == "notebooklm.google.com":
+    if domain == PERSONAL_LEGACY_HOST:
         return 2
-    # Gemini Notebook rebrand host (issue #2013). The dotted variant sits at the
-    # same tier as ``.notebooklm.google.com`` and the bare variant at the same
-    # tier as ``notebooklm.google.com`` -- deliberately, so neither host is
-    # ranked below the other now that Google mints host-scoped cookies on both.
+    # The other personal app host (issue #2013), which #2067 made the default.
+    # The dotted variant sits at the same tier as the legacy host's dotted
+    # variant and the bare at the same tier as its bare -- deliberately, so
+    # neither host is ranked below the other now that Google mints host-scoped
+    # cookies on both.
     #
-    # It does NOT mean the canonical app host wins when both carry a name:
-    # 3 == 3 and 2 == 2, so those pairs tie and the winner falls to
-    # ``storage_state`` iteration order. This comment claimed the opposite until
-    # #2054; the docstring above now describes the real tier structure.
-    if domain == f".{PERSONAL_APP_ALIAS_HOST}":
+    # It does NOT mean the default host wins when both carry a name: 3 == 3 and
+    # 2 == 2, so those pairs tie and the winner falls to ``storage_state``
+    # iteration order. This comment claimed the opposite until #2054; the
+    # docstring above describes the real tier structure.
+    if domain == f".{PERSONAL_BASE_HOST}":
         return 3
-    if domain == PERSONAL_APP_ALIAS_HOST:
+    if domain == PERSONAL_BASE_HOST:
         return 2
     if domain == ".notebooklm.cloud.google.com":
         return 3
@@ -748,21 +795,23 @@ def _is_allowed_cookie_domain(domain: str) -> bool:
        may normalize to).
     2. Valid Google domain via :func:`_is_google_domain` (regional ccTLDs:
        ``.google.com.sg``, ``.google.co.uk``, ``.google.de``, …).
-    3. Subdomain of ``.google.com``, ``.googleusercontent.com``, or
-       ``.usercontent.google.com`` (e.g. ``lh3.google.com``,
-       ``lh3.googleusercontent.com``).
+    3. Root or subdomain accepted by the compatibility-first trusted-Google
+       matcher. This covers ``*.google.com``, ``*.googleusercontent.com``, and
+       every regional root in :data:`GOOGLE_REGIONAL_CCTLDS` (for example
+       ``accounts.google.com.hk`` and ``lh3.google.co.uk``).
 
     The leading-dot suffix check ensures lookalikes like ``evil-google.com``
     are rejected.
 
     Note: the runtime gate consults the
     :data:`ALLOWED_COOKIE_DOMAINS` union (REQUIRED ∪ OPTIONAL). The
-    blast-radius reduction is enforced at **extraction time** —
+    blast-radius reduction starts with the **requested extraction set** —
     ``_build_google_cookie_domains`` defaults to
-    :data:`REQUIRED_COOKIE_DOMAINS` plus regional ``.google.<ccTLD>`` variants,
-    so rookiepy never returns sibling-product cookies (e.g. ``.youtube.com``) unless the user
-    opts in via ``--include-domains=...``. The runtime gate must stay
-    permissive over the full union so that opted-in cookies survive
+    :data:`REQUIRED_COOKIE_DOMAINS` plus regional ``.google.<ccTLD>`` variants.
+    Some extractors suffix-match those requests, so the runtime and write
+    gates deliberately retain trusted Google-root subdomains for compatibility.
+    Distinct optional roots still require ``--include-domains=...``. The
+    runtime gate must stay permissive so that opted-in cookies survive
     the downstream filters in :func:`convert_rookiepy_cookies_to_storage_state`,
     :func:`extract_cookies_with_domains`, and
     :func:`build_httpx_cookies_from_storage`.
@@ -779,20 +828,11 @@ def _is_allowed_cookie_domain(domain: str) -> bool:
     if domain in ALLOWED_COOKIE_DOMAINS:
         return True
 
-    # Check if it's a valid Google domain (base or regional)
-    # This handles .google.com, .google.com.sg, .google.co.uk, .google.de, etc.
+    # Check if it's a valid canonical Google domain (base or regional).
     if _is_google_domain(domain):
         return True
 
-    # Suffixes for allowed download domains (leading dot provides boundary check)
-    # - Subdomains of .google.com (e.g., lh3.google.com, accounts.google.com)
-    # - googleusercontent.com domains for media downloads
-    allowed_suffixes = (
-        ".google.com",
-        ".googleusercontent.com",
-        ".usercontent.google.com",
-    )
-
-    # Check if domain is a subdomain of allowed suffixes
-    # The leading dot ensures 'evil-google.com' does NOT match
-    return any(domain.endswith(suffix) for suffix in allowed_suffixes)
+    # Compatibility-first suffix policy shared with the write-time filter.
+    # This includes regional subdomains and ``drive.usercontent.google.com``;
+    # label-boundary matching rejects ``evilgoogle.com``.
+    return _is_trusted_google_cookie_domain(domain)

@@ -63,7 +63,7 @@ jobs:
     concurrency:
       group: rpc-health-${{ needs.resolve-branch.outputs.branch }}
       cancel-in-progress: true
-    # Secret-bearing job. ``NOTEBOOKLM_AUTH_JSON`` and friends live only in
+    # Secret-bearing job. ``NOTEBOOKLM_MASTER_TOKEN_JSON`` and friends live only in
     # the ``protected-readonly`` GitHub Environment (issue #1009: relying on
     # repo-level fallback for the scheduled-cron branch broke when those
     # secrets were migrated env-only). Binding the env unconditionally is
@@ -121,18 +121,17 @@ jobs:
     # auth never engages the layer-4 master-token re-mint (it only fires when
     # master_token.json sits BESIDE the profile's storage_state.json —
     # src/notebooklm/_auth/session.py), so a rotated cookie secret used to
-    # hard-fail the run. With a file-based profile plus the optional
-    # NOTEBOOKLM_MASTER_TOKEN_JSON secret, expired cookies are re-minted
-    # in-process and the job survives rotation.
+    # hard-fail the run. The master token is now MANDATORY (empty secret or
+    # 3 failed mints both exit 1) — it is the only credential shipped, so
+    # there is no snapshot to degrade onto.
     - name: Materialize auth profile
       env:
-        NOTEBOOKLM_AUTH_JSON: ${{ secrets.NOTEBOOKLM_AUTH_JSON }}
         NOTEBOOKLM_MASTER_TOKEN_JSON: ${{ secrets.NOTEBOOKLM_MASTER_TOKEN_JSON }}
         NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID: ${{ secrets.NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID }}
       shell: bash
       run: |
-        if [ -z "${NOTEBOOKLM_AUTH_JSON:-}" ]; then
-          echo "::error::NOTEBOOKLM_AUTH_JSON resolved to empty. Env binding or secret config is broken — see docs/development.md → Workflow secret gates."
+        if [ -z "${NOTEBOOKLM_MASTER_TOKEN_JSON:-}" ]; then
+          echo "::error::NOTEBOOKLM_MASTER_TOKEN_JSON resolved to empty. Env binding or secret config is broken — see docs/development.md → Workflow secret gates."
           exit 1
         fi
         if [ -z "${NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID:-}" ]; then
@@ -141,40 +140,50 @@ jobs:
         fi
         umask 077
         mkdir -p ~/.notebooklm/profiles/default
-        printf '%s' "$NOTEBOOKLM_AUTH_JSON" > ~/.notebooklm/profiles/default/storage_state.json
-        chmod 600 ~/.notebooklm/profiles/default/storage_state.json
-        if [ -n "${NOTEBOOKLM_MASTER_TOKEN_JSON:-}" ]; then
-          printf '%s' "$NOTEBOOKLM_MASTER_TOKEN_JSON" > ~/.notebooklm/profiles/default/master_token.json
-          chmod 600 ~/.notebooklm/profiles/default/master_token.json
-          # Pre-mint fresh cookies NOW: the health/drift scripts fetch tokens
-          # eagerly (load_auth / direct homepage read) and fail on a dead
-          # cookie snapshot before any client-side recovery can run, so the
-          # sibling master_token.json alone cannot rescue a stale secret at
-          # startup. The explicit re-mint overwrites storage_state.json with
-          # a fresh session. Non-fatal: if the mint fails but the cookie
-          # snapshot is still live, the run can proceed on cookies alone.
-          # unset is load-bearing: `login` refuses to run while
-          # NOTEBOOKLM_AUTH_JSON is set (env-var auth conflicts with
-          # file-writing login), and both secrets are already on disk.
-          unset NOTEBOOKLM_AUTH_JSON NOTEBOOKLM_MASTER_TOKEN_JSON
+        printf '%s' "$NOTEBOOKLM_MASTER_TOKEN_JSON" > ~/.notebooklm/profiles/default/master_token.json
+        chmod 600 ~/.notebooklm/profiles/default/master_token.json
+        # The master token is now the ONLY credential shipped. A cookie
+        # snapshot cannot be: Google supersedes __Secure-1PSIDTS on a ~600 s
+        # cadence and a superseded value is rejected shortly after, so a
+        # secret minted on a workstation is routinely dead before the run
+        # starts. A master token does not rotate, so it cannot go stale.
+        # The health/drift scripts fetch tokens eagerly, which is exactly why
+        # the mint runs here rather than relying on in-run recovery; it also
+        # bootstraps storage_state.json when none exists. `unset` is
+        # load-bearing: `login` refuses to run while inline env auth is set,
+        # and the secret is already on disk.
+        unset NOTEBOOKLM_MASTER_TOKEN_JSON
+        minted=""
+        for attempt in 1 2 3; do
           if uv run notebooklm login --master-token-refresh; then
-            echo "Auth profile materialized (master token; fresh cookies minted)."
-          else
-            echo "::warning::master-token re-mint failed — proceeding with the cookie snapshot only."
+            minted=1
+            break
           fi
-        else
-          echo "::warning::NOTEBOOKLM_MASTER_TOKEN_JSON secret is empty/absent — cookie-only profile (no rotation immunity)."
+          echo "::warning::master-token mint attempt ${attempt} failed."
+          if [ "$attempt" -lt 3 ]; then
+            # Jitter: nightly's ubuntu/windows legs mint concurrently from the
+            # same token, so a fixed backoff would have them retry in lockstep
+            # and collide again on whatever throttled the first attempt.
+            sleep $((attempt * 15 + RANDOM % 20))
+          fi
+        done
+        # Fatal, unlike before: there is no cookie snapshot left to fall back
+        # to, so a failed mint means the job has no credentials at all.
+        if [ -z "$minted" ]; then
+          echo "::error::master-token mint failed after 3 attempts — no auth available."
+          exit 1
         fi
+        echo "Auth profile materialized (master token; fresh cookies minted)."
 
     # Rebrand-host lane state, carried between nightly runs so the lane can
     # report a *state change* rather than re-announcing the same observation
     # forever. Restore-only + a run-scoped save key, because cache entries are
     # immutable: a fixed key would pin the first night's answer permanently.
     #
-    # A cache miss is harmless by construction: ``load_rebrand_state`` falls
-    # back to the documented ABSENT baseline, so the worst case is that a
-    # genuine PRESENT is announced twice — never a false alarm out of the
-    # steady state.
+    # On a cache miss, ``load_rebrand_state`` falls back to the checkout's
+    # last-acknowledged status for each capability. A transition acknowledged
+    # in that checked-in baseline is not replayed merely because the cache
+    # disappeared; a contrary live observation is still reported as new.
     - name: Restore rebrand-host lane state
       uses: actions/cache/restore@v6
       continue-on-error: true
@@ -200,8 +209,8 @@ jobs:
 
     - name: Run RPC Health Check
       id: health
-      # Auth comes from the profile materialized above (NOT an inline
-      # NOTEBOOKLM_AUTH_JSON env var) so the layer-4 re-mint can engage.
+      # Auth comes from the profile materialized above (no inline env-var
+      # credential is shipped at all) so the layer-4 re-mint can engage.
       #
       # The rebrand-host lane reads its previous state from the restored-and-
       # renamed ``rebrand-state-prev.json`` and writes this run's state to
@@ -211,9 +220,9 @@ jobs:
       # cannot change ``exit_code`` here — see the "Rebrand host" steps below
       # for its own, separately-deduped issues.
       #
-      # No ``--base-url``: the nightly MUST stay on the default host, otherwise
-      # the legacy signal (the only named trigger for a future default flip)
-      # stops being collected. The flag exists for manual investigation.
+      # No ``--base-url``: the nightly stays on the default host so the main,
+      # exit-coded signal exercises the host users receive. The flag exists for
+      # manual investigation.
       continue-on-error: true
       shell: bash
       env:
@@ -495,19 +504,49 @@ jobs:
         content-filepath: health-report.txt
         labels: rpc-breakage, automated
 
+    # Exit code 5 = the pinned frontend build label (``_env.DEFAULT_BL``) trails
+    # the label the app shell serves by more than the freshness window. Chat is
+    # not broken by this — the server does not validate the value today — but the
+    # constant has gone unattended, which is how it reached five months of drift
+    # unnoticed (#2073). Bumping it clears the signal; ordinary week-to-week drift
+    # exits 0 and never reaches this branch.
+    - name: Check for existing stale-build-label issue
+      if: steps.health.outputs.exit_code == '5'
+      id: dup_build_label
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        if ! count=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+          --state open --label automated --label rpc-breakage \
+          --search 'in:title "Pinned frontend build label is stale"' \
+          --json number --jq 'length'); then
+          echo "::warning::Stale-build-label dedup probe failed; allowing issue creation"
+          count=0
+        fi
+        echo "open=${count}" >> "$GITHUB_OUTPUT"
+
+    - name: Create Issue on stale build label
+      if: |
+        steps.health.outputs.exit_code == '5'
+        && steps.dup_build_label.outputs.open == '0'
+      uses: peter-evans/create-issue-from-file@fca9117c27cdc29c6c4db3b86c48e4115a786710  # @ v6.0.0
+      with:
+        title: "Pinned frontend build label is stale — bump DEFAULT_BL"
+        content-filepath: health-report.txt
+        labels: rpc-breakage, automated
+
     # ------------------------------------------------------------------
     # Rebrand-host lane (notebook.google.com) — SEPARATE from everything
     # above. It has no exit code: the script keeps its probes out of
     # ``compute_exit_code`` entirely. That separation is the whole point.
-    # The legacy "Non-transient ERROR detected" issue is deduped by TITLE
+    # The main "Non-transient ERROR detected" issue is deduped by TITLE
     # ALONE, so a rebrand probe reported through it would open one issue on
-    # the first failing night and then suppress every legacy-degradation
+    # the first failing night and then suppress every main-lane degradation
     # issue after it — disabling the very gate this lane feeds.
     #
     # This lane therefore has: its own titles, its own PER-CAPABILITY dedup
-    # keys, and a state-change trigger (ABSENT -> PRESENT) rather than a
-    # recurring error. A rebrand host that never serves RPC files nothing,
-    # ever.
+    # keys, and a state-change trigger (for example, PRESENT -> ABSENT) rather
+    # than a recurring error. An unchanged capability files nothing.
     #
     # Step order matters: detect -> report -> save. The cached state is the
     # baseline the NEXT run compares against, so it may only be advanced once
@@ -603,8 +642,8 @@ jobs:
             echo "**Commit:** ${GITHUB_SHA}"
             echo ""
             echo "This is the rebrand-host lane of the nightly RPC health check. It"
-            echo "carries NO exit code and is independent of the legacy-host signal;"
-            echo "the legacy lane's issues are unaffected by anything reported here."
+            echo "carries NO exit code and is independent of the exit-coded main signal;"
+            echo "the main lane's issues are unaffected by anything reported here."
             echo ""
             grep '^REBRAND' health-report.txt || echo "(no rebrand lane output)"
             echo ""
@@ -616,8 +655,9 @@ jobs:
             echo "manual authenticated capture (upload-session start only, no bytes),"
             echo "scrubbed via \`tests/cassette_patterns.py\` before it leaves the machine."
             echo ""
-            echo "A PRESENT verdict here is evidence the host serves that endpoint from"
-            echo "these credentials — it is NOT on its own a reason to change any default."
+            echo "A PRESENT verdict is evidence the host served the endpoint from these"
+            echo "credentials. ABSENT means a non-auth, non-transient response did not"
+            echo "demonstrate it. Neither verdict alone is a reason to change any default."
           } > rebrand-issue-body.md
           if ! existing=$(TITLE="$TITLE" gh issue list --repo "$GITHUB_REPOSITORY" \
             --state open --label automated \

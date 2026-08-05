@@ -35,7 +35,20 @@ from notebooklm._auth.browser_capture import (
     _reject_unsupported_mode,
     run_browser_capture,
 )
+from notebooklm._env import get_base_url
 from notebooklm.exceptions import HeadlessLoginRequiredError
+
+
+def _landed_on_app() -> str:
+    """The URL a healthy session lands on, tracking the configured host.
+
+    Production navigates the captured page to ``get_base_url()``, so the
+    simulated landing has to follow it. Pinned to the legacy alias, these tests
+    reached their "authenticated" branch only through the alias-accept in
+    ``accepted_login_hosts`` and would have stayed green if the configured host
+    stopped being accepted at all.
+    """
+    return f"{get_base_url()}/"
 
 
 class _RaisingCaptureIO:
@@ -125,12 +138,18 @@ def test_headless_authenticated_landing_persists_storage(tmp_path: Path) -> None
 
     cookies = [
         {"name": "SID", "value": "v", "domain": ".google.com", "path": "/"},
+        {"name": "APISID", "value": "a", "domain": ".google.com", "path": "/"},
+        {"name": "SAPISID", "value": "s", "domain": ".google.com", "path": "/"},
+        {
+            "name": "__Secure-1PSIDTS",
+            "value": "ts",
+            "domain": ".google.com",
+            "path": "/",
+        },
         # A sibling-product cookie that the domain filter must DROP.
-        {"name": "X", "value": "y", "domain": "mail.google.com", "path": "/"},
+        {"name": "X", "value": "y", "domain": ".youtube.com", "path": "/"},
     ]
-    playwright, _context, _page = _fake_playwright_landing(
-        "https://notebooklm.google.com/", cookies=cookies
-    )
+    playwright, _context, _page = _fake_playwright_landing(_landed_on_app(), cookies=cookies)
     io = _RaisingCaptureIO()
 
     result = _run_headless(
@@ -139,7 +158,7 @@ def test_headless_authenticated_landing_persists_storage(tmp_path: Path) -> None
         playwright,
     )
 
-    # Persisted, and the domain allowlist filtered out the mail.google.com row.
+    # Persisted, and the domain allowlist filtered out unrequested YouTube.
     assert storage.exists()
     persisted = json.loads(storage.read_text(encoding="utf-8"))
     names = {c["name"] for c in persisted["cookies"]}
@@ -185,7 +204,7 @@ def test_headless_browser_close_is_typed_instead_of_session_expired(
     storage = tmp_path / "storage_state.json"
     profile = tmp_path / "browser_profile"
     profile.mkdir()
-    playwright, context, page = _fake_playwright_landing("https://notebooklm.google.com/")
+    playwright, context, page = _fake_playwright_landing(_landed_on_app())
     from playwright.sync_api import Error as PlaywrightError
 
     closed = PlaywrightError(TARGET_CLOSED_ERROR)
@@ -210,7 +229,7 @@ def test_headless_connection_retry_exhaustion_is_typed(tmp_path: Path, monkeypat
     storage = tmp_path / "storage_state.json"
     profile = tmp_path / "browser_profile"
     profile.mkdir()
-    playwright, context, page = _fake_playwright_landing("https://notebooklm.google.com/")
+    playwright, context, page = _fake_playwright_landing(_landed_on_app())
     from playwright.sync_api import Error as PlaywrightError
 
     page.goto.side_effect = PlaywrightError(RETRYABLE_CONNECTION_ERRORS[0])

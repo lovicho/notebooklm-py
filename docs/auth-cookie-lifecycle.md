@@ -28,10 +28,12 @@ friends) extracted from a real browser sign-in. Two clocks govern their validity
 
 - **`__Secure-1PSIDTS` has a *recommended* rotation cadence of ~600 s**
   (self-reported by Google as `["identity.hfcr",600]` on the `RotateCookies`
-  response). This is a *hint*, not a hard rejection TTL: the prior value keeps
-  authenticating far longer — commonly hours to days on a stable IP / non-Workspace
-  account. Worst-case profiles (datacenter egress, cross-IP, Workspace policy,
-  incomplete extraction) can collapse that to hours or less.
+  response). This is a *hint*, not a hard rejection TTL — but see §2.5: once a
+  newer value has been issued, the **superseded** one is now rejected within
+  roughly half an hour. The "hours to days" figure below applies only while no
+  other client has rotated the session out from under you; a copied snapshot
+  does not qualify. Worst-case profiles (datacenter egress, cross-IP, Workspace
+  policy, incomplete extraction) collapse it further.
 - **`SID` and `__Secure-1PSID`** have very long server-side lifetimes (months to
   years) and effectively don't expire under normal usage.
 - **Cookie set completeness matters more than freshness.** Google rejects cookie
@@ -127,11 +129,13 @@ expiry, and no `storage_state.json` to keep re-shipping.
 3. Ship the bootstrapped profile — **both** `master_token.json` and the
    `storage_state.json` the bootstrap just minted (each `0600`) — to the server.
    (A clean server with *only* `master_token.json` and no `storage_state.json`
-   needs one `notebooklm -p <profile> login --master-token-refresh` to mint the
-   initial cookies first; shipping both skips that step.)
+   needs one `notebooklm -p <profile> auth refresh` to mint and passively
+   validate the initial cookies; shipping both skips that step.)
 4. Run commands normally. Cookies are minted on bootstrap and **re-minted
    automatically** when the session dies (L4, [§4.4](#44-l4--master-token-re-mint));
-   force one by hand with `notebooklm -p <profile> login --master-token-refresh`.
+   request conditional recovery with `notebooklm -p <profile> auth refresh`, or
+   use the legacy forced route
+   `notebooklm -p <profile> login --master-token-refresh` when specifically needed.
 
 Caveats: the master token is a full-account, infostealer-grade credential — use a
 dedicated account, keep the file `0600`, never log or commit it. One account is
@@ -153,7 +157,9 @@ on a schedule:
    (off-minute schedule avoids fleet collision).
 4. Keeping the source browser running with a Google tab adds resilience, but even
    a closed browser works for hours-to-days while `RotateCookies` keeps
-   succeeding from `SID` alone.
+   succeeding from `SID` alone — provided this is the only client using the
+   session. A second client rotating the same session supersedes your value;
+   see §2.5.
 
 > **Browser support:** `--browser-cookies` accepts any of the ~16 browsers rookiepy
 > reads on the host (`arc`, `brave`, `chrome`, `edge`, `firefox`, `opera`, `safari`,
@@ -324,17 +330,39 @@ Playwright-minted one. Extraction asks for the full multi-domain set
 specific paths (e.g. losing `.notebooklm.google.com` cookies breaks artifact
 downloads).
 
-### 2.5 Three timers people confuse
+### 2.5 Four timers people confuse
 
 | Timer | Magnitude | Lives in | Meaning |
 |---|---|---|---|
-| **`*PSIDTS` rotation cadence** | ~600 s | Google's identity surface | Recommended active-client refresh interval (`["identity.hfcr",600]`). Not a hard rejection TTL — prior values stay valid much longer on stable profiles. |
+| **`*PSIDTS` rotation cadence** | ~600 s | Google's identity surface | Recommended active-client refresh interval, advertised in the `RotateCookies` response body as `["identity.hfcr",600]`. Re-measured 2026-08-05: still 600. |
+| **`*PSIDTS` supersede grace** | **short, and not ours to set** | Google's identity surface | How long a *superseded* value keeps working after a newer one is issued. Undocumented, server-side, and observed to have tightened sharply — see the warning below. |
 | **`*SIDCC` sliding window** | ~5 min | Google's RPC surface | A different cookie family; rotates on nearly every request; not load-bearing for our auth. |
 | **Client-side rotation throttle** | 60 s | `_auth/keepalive.py` | Don't fire two `RotateCookies` POSTs within a minute (avoids 429). Unrelated to how often Google *requires* rotation. |
 
-Reports that "cookies are expiring faster" usually trace to the session entering a
-risk-flagged state (§3.1) or to the rotation mechanism failing until `*SID` finally
-ages out — not to a shorter hard rejection TTL.
+> **The supersede grace collapsed (observed 2026-08).** This document used to
+> assert that "prior values stay valid much longer on stable profiles," and that
+> reports of faster expiry trace to a risk-flagged session (§3.1) rather than a
+> shorter TTL. That advice is no longer safe to follow. A cookie snapshot copied
+> out of a working profile has been observed dying **within ~30 minutes**, while
+> the cadence (600 s) and the cookie's own `expires` stamp (365 days, verified
+> across every local profile) are both unchanged.
+>
+> Two consequences worth internalising:
+>
+> * **The expiry field tells you nothing.** A snapshot whose `__Secure-1PSIDTS`
+>   is a year from expiring can already be rejected. Nothing client-side can
+>   detect this in advance — the only signal is the request failing.
+> * **Any other active client kills your copy.** At a 600 s cadence, a
+>   workstation, a second CI job, or a keepalive supersedes the value you
+>   shipped within ten minutes; the grace period then decides how long your copy
+>   limps on. That is why a cookie snapshot is no longer a viable CI credential
+>   and why the ladder's persistence steps are load-bearing rather than an
+>   optimisation.
+>
+> The durable answer is a credential that does not rotate: ship
+> `master_token.json` and let §4.4 mint a session per run. All four of this
+> repo's secret-bearing workflows do exactly that and ship no cookie snapshot at
+> all.
 
 ### 2.6 Domain tiering: REQUIRED vs OPTIONAL cookie domains
 
@@ -384,7 +412,7 @@ Cookie decay clocks by class:
 
 | Cookie | Rotation / expiry signal | Lifecycle |
 |---|---|---|
-| `__Secure-1PSIDTS` / `*-3PSIDTS` | Recommended cadence ~600 s (`["identity.hfcr",600]`); not a hard TTL | Refreshed opportunistically; stale values work for hours-to-days, then drift into sign-in redirects |
+| `__Secure-1PSIDTS` / `*-3PSIDTS` | Recommended cadence ~600 s (`["identity.hfcr",600]`); not a hard TTL | Refreshed opportunistically. An *un-superseded* stale value works for hours-to-days; a **superseded** one dies within ~30 min (§2.5) |
 | `SIDCC` / `__Secure-*SIDCC` | ~5 min sliding window | Ephemeral; generally not load-bearing for auth |
 | `SID`, `HSID`, `SSID`, `APISID`, `SAPISID` (+ `__Secure-` cousins) | Months → ~1 year | Long-lived identity; not rotated by us |
 | `OSID`, `__Secure-OSID` | Per-product session | Re-issued on each sign-in |
@@ -406,16 +434,18 @@ anything.
 ### 3.3 Empirical cookie requirements
 
 Which cookies does Google *actually* require? This backs the library's two-tier
-`_validate_required_cookies()` pre-flight (see `_auth/cookies.py` —
+`_validate_required_cookies()` pre-flight (see `_auth/cookie_policy.py` —
 `MINIMUM_REQUIRED_COOKIES` and `_has_valid_secondary_binding()` for the
 authoritative values; the historical permissive `{"SID"}` check was replaced in
 [#371](https://github.com/teng-lin/notebooklm-py/issues/371)).
 
-Method: take a known-good `storage_state.json`, drop one or two cookies at a time,
-run `notebooklm list`, and record whether Google accepts the call or redirects to
-login. Single-cookie removal is highly recoverable — every cookie except `SID` can
-be dropped individually with the call still succeeding (Google reissues most of
-them mid-call). Pair-wise removal exposes a precise accept-rule.
+Method: take a known-good `storage_state.json`, drop one, two, or three cookies
+at a time, run `notebooklm list`, and record whether Google accepts the call or
+redirects to login. Single-cookie removal is highly recoverable — every cookie
+except `SID` can be dropped individually with the call still succeeding (Google
+reissues most of them mid-call). Pair-wise removal exposed the original
+accept-rule; a follow-up three-way ablation of `OSID`, the `APISID`/`SAPISID`
+pair, and bare `LSID` corrected its secondary-binding branch.
 
 **The accept-rule model.** Google accepts the NotebookLM homepage GET when both
 hold:
@@ -423,8 +453,11 @@ hold:
 1. **Identity present:** `SID` is valid, and `__Secure-1PSIDTS` is either directly
    present or recoverable via a `RotateCookies` POST — which itself requires the
    full ambient cookie set to authenticate.
-2. **At least one secondary binding present:** `OSID`, OR both `APISID` and
-   `SAPISID`.
+2. **At least one secondary binding present:** `OSID`, OR all three of
+   `APISID`, `SAPISID`, and bare `LSID`.
+
+The singleton and pair-wise ablations established Tier 1 and the two candidate
+secondary-binding routes:
 
 | Variant | `SID` | `OSID` | `APISID+SAPISID` | `__Secure-1PSIDTS` (or recoverable) | Result |
 |---|:-:|:-:|:-:|:-:|:-:|
@@ -436,6 +469,23 @@ hold:
 | Drop `APISID + OSID` | ✓ | ✗ | ✗ | ✓ | FAIL |
 | Drop `SAPISID + OSID` | ✓ | ✗ | ✗ | ✓ | FAIL |
 
+Holding `SID` and a live (or recoverable) `__Secure-1PSIDTS` constant, the
+corrected three-way ablation is:
+
+| `OSID` | `APISID` + `SAPISID` | bare `LSID` | Result |
+|:-:|:-:|:-:|:-:|
+| present | absent | absent | OK |
+| present | present | absent | OK |
+| absent | present | present | OK |
+| absent | present | absent | **FAIL** |
+| absent | absent | present | FAIL |
+
+The first row confirms that `OSID` alone is sufficient, even when every
+`accounts.google.com` cookie (including `LSID`) is absent. `LSID` is required
+only for the `APISID`/`SAPISID` branch. The fourth row retains
+`__Host-1PLSID` and `__Host-3PLSID`, so neither host-prefixed cookie substitutes
+for bare `LSID`.
+
 Before #371 the library trusted any storage with `SID` present, which let
 Google-rejected cookie sets reach the wire — the "auth expires immediately after
 `notebooklm login`" pattern
@@ -446,7 +496,14 @@ catches it with a two-tier check:
 ```python
 MINIMUM_REQUIRED_COOKIES = {"SID", "__Secure-1PSIDTS"}  # Tier 1: raise
 
+
 def _has_valid_secondary_binding(cookie_names: set[str]) -> bool:  # Tier 2: warn
+    if "OSID" in cookie_names:
+        return True
+    return {"APISID", "SAPISID", "LSID"} <= cookie_names
+
+
+def _has_rotatable_secondary_binding(cookie_names: set[str]) -> bool:  # recovery only
     if "OSID" in cookie_names:
         return True
     return {"APISID", "SAPISID"} <= cookie_names
@@ -456,11 +513,13 @@ Tier 1 raises on unambiguous evidence; Tier 2 warns once per process so partial
 extractions surface without breaking edge-case flows (e.g. Workspace SSO) that
 haven't been ablated.
 
-**Caveats.** These observations came from a single non-Workspace, stable-IP
-profile, testing `notebooks.list`. Workspace accounts may have different
-accept-rules. This is a model fit, not a confirmed server mechanism, and the
-freshness clock (§3.1) still applies on top of it — a session with a valid
-accept-tuple can still be killed by Google's risk model.
+**Caveats.** The singleton and pair-wise observations came from a single
+non-Workspace, stable-IP profile, testing `notebooks.list`. The corrected
+three-way secondary-binding ablation was replicated on two unrelated accounts
+(2026-08-04, issue #1977). Workspace accounts may have different accept-rules.
+This is a model fit, not a confirmed server mechanism, and the freshness clock
+(§3.1) still applies on top of it — a session with a valid accept-tuple can still
+be killed by Google's risk model.
 
 ---
 
@@ -495,8 +554,9 @@ MCP servers, and long-running workers.
 ### 4.3 L3 — headless re-auth / CDP attach
 
 When the homepage GET 302s to the Google login page, the first-party cookies are
-fully dead and neither L1 nor L2 can help. `refresh_auth(allow_headless=True)` (or
-`NOTEBOOKLM_HEADLESS_REAUTH=1` for automatic mid-RPC opt-in) drives an unattended
+fully dead and neither L1 nor L2 can help. `from_storage(allow_headless=True)`,
+`refresh_auth(allow_headless=True)`, `auth refresh --allow-headless`, or
+`NOTEBOOKLM_HEADLESS_REAUTH=1` drives an unattended
 headless browser against the **persisted profile that is a sibling of this client's
 storage file** — `browser_profile/` beside a conventional `storage_state.json`,
 or `<storage_path>.browser_profile/` for a normal-length custom filename; names
@@ -511,8 +571,8 @@ to an already-running local Chrome instead; non-loopback hosts are refused becau
 a CDP endpoint is account-equivalent. If the profile is missing, Playwright is
 unavailable, env-var auth has no writeable file, or the browser session is also
 dead, the original auth-expiry error stands. Owner:
-`_auth/headless_reauth.py`; integration point:
-`_auth/session.py::refresh_auth_session`.
+`_auth/headless_reauth.py`; shared cold/mid-session adapters and cold
+single-flight coordination live in `_auth/recovery.py`.
 
 ### 4.4 L4 — master-token re-mint
 
@@ -526,16 +586,16 @@ headless-browser ladder can't provide off-device.
   on demand (`perform_oauth → OAuthLogin?issueuberauth=1 → MergeSession`) and
   survives password changes until explicitly revoked. It also bootstraps the initial
   `storage_state.json`.
-- **Where it fires.** `_auth/session.py::_try_master_token_reauth`, as **layer 4 of
-  `refresh_auth_session`** — only after L1 (homepage), L2 (`RotateCookies`), and L3
-  (headless browser) are exhausted. It mints a new session, persists it (replacing
-  the dead cookies under the storage lock), reloads the jar into the live HTTP
-  client, and retries the homepage GET once. Reached through the
-  `AuthRefreshCoordinator` single-flight, so concurrent RPCs coalesce **one**
-  re-mint.
-- **Cold start.** A session already dead at process start is recovered by
-  `notebooklm login --master-token-refresh` (or the next bootstrap); the in-process
-  layer-4 covers the mid-session case long-lived workers hit.
+- **Where it fires.** `_auth/recovery.py::try_master_token_reauth`, as layer 4
+  after L1 (homepage), L2 (`RotateCookies`), and L3 (headless browser) are
+  exhausted. Both cold token loading and mid-session `refresh_auth_session`
+  delegate to this adapter. It mints a new session, persists it under the
+  storage lock, reloads the jar, and retries the homepage GET once. Equivalent
+  same-loop cold callers share one complete recovery task; live-client RPCs
+  retain their `AuthRefreshCoordinator` single-flight.
+- **Cold start.** The normal file-backed token loader invokes the same L4 adapter
+  after a confirmed login redirect, so a session already dead at process start
+  recovers without a forced pre-mint.
 - **PSIDTS interaction.** A re-mint yields `SID`+`APISID`+`SAPISID` but not
   `__Secure-1PSIDTS`; the mint itself fires one best-effort `RotateCookies` POST to
   add it, and the inline PSIDTS recovery
@@ -637,18 +697,58 @@ When a profile has the persistent `__Secure-1PSID` but no transient
 `__Secure-1PSIDTS` (a common cold-start snapshot), `_recover_psidts_inline`
 (`_auth/psidts_recovery.py`) makes a preflight `RotateCookies` POST during client
 startup to mint the missing cookie before the first RPC. It fires only when `SID`
-is present, a secondary binding is intact (`OSID`, or `APISID` + `SAPISID`), and
-no live `__Secure-1PSIDTS` would be **sent to** `accounts.google.com` — that is,
-the cookie is absent, expired, or scoped to a domain that does not route to the
+is present, a **rotatable** secondary binding is intact (`OSID`, or `APISID` +
+`SAPISID`), and no live `__Secure-1PSIDTS` would be **sent to**
+`accounts.google.com` — that is, the cookie is absent, expired, or scoped to a
+domain that does not route to the
 rotate URL. That last condition is RFC 6265 selection against the URL the
 decision is about, not a domain-priority ranking: a `__Secure-1PSIDTS` scoped to
 `.notebooklm.google.com` (or, post-rebrand, `.notebook.google.com`) never reaches
 `accounts.google.com`, while a host-scoped one on `accounts.google.com` does
 (issue #2057).
 
+**The gate is only reachable because the cookie-load preflight asks the same
+question.** Recovery is invoked from the `except` arm around the loaders'
+required-cookie validation, so whatever that validation accepts, recovery never
+sees. Validating cookie *names* alone made a present-but-unusable
+`__Secure-1PSIDTS` — expired, or scoped so it never routes to
+`accounts.google.com` — satisfy the preflight and skip recovery entirely, which
+left the expiry arm of the gate above largely unreachable through the built-in
+callers. The loaders now run `_validate_routable_entries`: required names, then
+the same RFC 6265 routing predicate the gate uses. The two conditions are
+written against one function so they cannot drift apart silently (issue #2061).
+
+**The routing preflight belongs only where a heal follows it, and it is never
+stricter than that heal.** The condition asks whether `__Secure-1PSIDTS` would
+be *sent to the rotate URL* — a question about whether the cookie can be
+**refreshed**, not whether it can be **used**. One scoped to the app host is
+delivered on every app request while never reaching `accounts.google.com`:
+unrotatable, but not unusable. So:
+
+- Loaders with a recovery arm (`build_httpx_cookies_from_storage`,
+  `load_auth_from_storage`) raise it — and when recovery *declines* (inline
+  `NOTEBOOKLM_AUTH_JSON` has no writable store, no rotatable secondary binding,
+  a contended lock, a throttled slot) they retry name-only rather than harden
+  into a failure nothing can repair.
+- Loaders without one stay name-only: `load_httpx_cookies` (artifact downloads)
+  and `_build_httpx_cookies_from_storage_strict` (the `fetch_tokens_passive`
+  probe, which exists precisely so no heal fires).
+
+The net effect is a heal *attempt* in states that previously went straight to a
+failing RPC, and no new terminal failures: every state that loaded before still
+loads.
+
+This is deliberately the weaker `_has_rotatable_secondary_binding()` recovery
+precondition: unlike the strict post-recovery predicate in §3.3, it does not
+require bare `LSID`, because the rotation hop may restore that accounts-side
+cookie. See `_auth/cookie_policy.py` for why
+`_has_rotatable_secondary_binding` and `_has_valid_secondary_binding` must
+remain distinct.
+
 The separate "did the heal land?" check (`_psidts_is_live`) is deliberately
 domain-blind instead, because it must predict the retrying preflight rather than
-the request jar. **Do not merge the two predicates.** Their differences are
+the request jar. **Do not merge `_psidts_routes_to_rotate` and
+`_psidts_is_live`.** Their differences are
 intentional, and each one has a failure mode behind it:
 
 | | should we fire? (`_psidts_routes_to_rotate`) | did it land? (`_psidts_is_live`) |
@@ -664,7 +764,28 @@ working session into a permanent failure loop: `save_cookies_to_storage`
 CAS-matches the *first* stored row for an identity, so a stale same-identity
 twin survives the save, and the heal would report failure on every load while
 the preflight keeps passing. That twin is issue #1523's data shape — #1523 fixed
-the producer, and nothing on the load/save path removes an existing one.
+the producer, and nothing on the load/save path removed an existing one.
+
+**One heal check is routed, and only one.** There are two "did it land?"
+questions, asked by different processes:
+
+- The process that *made* the POST re-reads disk through `_psidts_save_succeeded`
+  → `_is_psidts_persisted` → the domain-blind `_psidts_is_live`. Unchanged, for
+  the reason above.
+- A process that found the flock **held** asks whether the holder's heal makes
+  *its own* load succeed, so it must ask the routed question
+  (`_is_psidts_routed_on_disk`). A domain-blind answer there reports "healed",
+  the caller retries, and the routed preflight rejects the state anyway.
+
+The routed variant is safe only because the save collapses the twin instead of
+leaving it: when `save_cookies_to_storage` receives a `recovery_observation`, an
+observed recovery-target identity is replaced in place and its exact duplicates
+are removed, across leading-dot domain variants. A row the observation saw as
+unusable — empty, non-string, or malformed `expires` — is replaceable; a
+non-empty value that was *not* observed before the POST is still a CAS conflict
+and is left alone. Without that collapse the routed check would reproduce the
+permanent failure loop described above, which is why the two changes have to
+travel together.
 
 Note also that `_psidts_is_live` models `extract_cookies_from_storage`
 specifically; the sibling loader `_build_httpx_cookies_from_storage_strict`

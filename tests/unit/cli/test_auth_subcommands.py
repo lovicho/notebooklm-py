@@ -170,9 +170,9 @@ class TestAuthImportCookiesCommand:
                 _valid_cookie_export(
                     [
                         {
-                            "name": "DOCS_PREF",
-                            "value": "docs-cookie",
-                            "domain": "docs.google.com",
+                            "name": "YOUTUBE_PREF",
+                            "value": "youtube-cookie",
+                            "domain": ".youtube.com",
                             "path": "/",
                         }
                     ]
@@ -190,7 +190,7 @@ class TestAuthImportCookiesCommand:
             cookie["name"]
             for cookie in json.loads(storage_path.read_text(encoding="utf-8"))["cookies"]
         }
-        assert "DOCS_PREF" not in default_names
+        assert "YOUTUBE_PREF" not in default_names
 
         result_optin = runner.invoke(
             cli,
@@ -201,7 +201,7 @@ class TestAuthImportCookiesCommand:
                 "import-cookies",
                 str(input_path),
                 "--include-domains",
-                "docs",
+                "youtube",
             ],
         )
 
@@ -210,7 +210,7 @@ class TestAuthImportCookiesCommand:
             cookie["name"]
             for cookie in json.loads(storage_path.read_text(encoding="utf-8"))["cookies"]
         }
-        assert "DOCS_PREF" in optin_names
+        assert "YOUTUBE_PREF" in optin_names
 
     def test_import_cookies_sets_private_file_and_directory_permissions(self, runner, tmp_path):
         if sys.platform == "win32":
@@ -1166,7 +1166,7 @@ class TestLoginBrowserCookies:
                 "value": "abc",
                 "path": "/",
                 "secure": True,
-                "expires": 1234567890,
+                "expires": None,
                 "http_only": False,
             },
             {
@@ -1175,7 +1175,7 @@ class TestLoginBrowserCookies:
                 "value": "test_1psidts",
                 "path": "/",
                 "secure": True,
-                "expires": 1234567890,
+                "expires": None,
                 "http_only": False,
             },
         ]
@@ -1280,7 +1280,7 @@ class TestLoginBrowserCookies:
                 "value": "mysid",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
             },
             {
@@ -1289,7 +1289,7 @@ class TestLoginBrowserCookies:
                 "value": "test_1psidts",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
             },
             {
@@ -1298,7 +1298,7 @@ class TestLoginBrowserCookies:
                 "value": "ts",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
             },
             {
@@ -1307,7 +1307,7 @@ class TestLoginBrowserCookies:
                 "value": "apisid",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
             },
             {
@@ -1316,7 +1316,7 @@ class TestLoginBrowserCookies:
                 "value": "sapisid",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
             },
         ]
@@ -1372,7 +1372,7 @@ class TestLoginBrowserCookies:
                 "value": "work_sid",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
                 "same_site": 0,
             },
@@ -1382,7 +1382,7 @@ class TestLoginBrowserCookies:
                 "value": "ts",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
                 "same_site": 0,
             },
@@ -1433,7 +1433,7 @@ class TestLoginBrowserCookies:
                 "value": "default_sid",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
                 "same_site": 0,
             },
@@ -1443,7 +1443,7 @@ class TestLoginBrowserCookies:
                 "value": "ts",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
                 "same_site": 0,
             },
@@ -1552,7 +1552,7 @@ class TestLoginBrowserCookies:
                 "value": "x",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
             },
             {
@@ -1561,7 +1561,7 @@ class TestLoginBrowserCookies:
                 "value": "ts",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
             },
         ]
@@ -1603,7 +1603,7 @@ class TestLoginBrowserCookies:
                 "value": "x",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
             },
             {
@@ -1612,7 +1612,7 @@ class TestLoginBrowserCookies:
                 "value": "ts",
                 "path": "/",
                 "secure": True,
-                "expires": 9999,
+                "expires": 4102444800,
                 "http_only": False,
             },
         ]
@@ -1989,6 +1989,78 @@ class TestAuthRefreshCommand:
         assert "ok" in result.output.lower()
         mock_fetch.assert_awaited_once()
 
+    def test_auth_refresh_allow_headless_is_lazy_opt_in(self, runner, mock_storage_path):
+        """The command forwards the one-invocation L3 permission to auth recovery."""
+        with patch.object(
+            auth_module, "fetch_tokens_with_domains", new_callable=AsyncMock
+        ) as mock_fetch:
+            mock_fetch.return_value = ("csrf_ok", "session_ok")
+            result = runner.invoke(cli, ["auth", "refresh", "--allow-headless"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_fetch.await_args.kwargs == {"allow_headless": True}
+
+    def test_auth_refresh_omitted_headless_flag_forwards_false(self, runner, mock_storage_path):
+        with patch.object(
+            auth_module,
+            "fetch_tokens_with_domains",
+            new_callable=AsyncMock,
+            return_value=("csrf_ok", "session_ok"),
+        ) as mock_fetch:
+            result = runner.invoke(cli, ["auth", "refresh"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_fetch.await_args.kwargs == {"allow_headless": False}
+
+    def test_auth_refresh_allow_headless_conflicts_with_browser_cookies(
+        self, runner, mock_storage_path
+    ):
+        result = runner.invoke(
+            cli, ["auth", "refresh", "--allow-headless", "--browser-cookies", "chrome"]
+        )
+
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert result.stderr.strip() == (
+            "Error: --allow-headless only applies to the stored-session refresh path; "
+            "omit --browser-cookies."
+        )
+
+    def test_auth_refresh_json_browser_conflict_wins_over_allow_headless(
+        self, runner, mock_storage_path
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "auth",
+                "refresh",
+                "--allow-headless",
+                "--browser-cookies",
+                "chrome",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert result.stderr == ""
+        assert json.loads(result.stdout) == {
+            "error": True,
+            "code": "json_unsupported_with_browser_cookies",
+            "message": (
+                "--json is not supported with --browser-cookies; use the default "
+                "keepalive refresh with --json instead."
+            ),
+        }
+
+    def test_auth_refresh_help_describes_lazy_headless_recovery(self, runner):
+        result = runner.invoke(cli, ["auth", "refresh", "--help"])
+
+        assert result.exit_code == 0, result.output
+        assert "--allow-headless" in result.output
+        assert "Does not launch or attach to a browser unless ordinary refresh fails." in " ".join(
+            result.output.split()
+        )
+
     def test_auth_refresh_json_success(self, runner, mock_storage_path):
         """--json emits a single structured keepalive result on stdout."""
         with patch.object(
@@ -2197,6 +2269,26 @@ class TestAuthRefreshCommand:
         # Critical: no token fetch should run when the env var is set —
         # otherwise we'd be doing a server-side rotation that gets lost.
         mock_fetch.assert_not_awaited()
+
+    def test_auth_refresh_storage_override_beats_env_auth(self, runner, monkeypatch, tmp_path):
+        storage = tmp_path / "explicit.json"
+        storage.write_text(json.dumps({"cookies": []}), encoding="utf-8")
+        monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", '{"cookies":[]}')
+
+        with patch.object(
+            auth_module,
+            "fetch_tokens_with_domains",
+            new_callable=AsyncMock,
+            return_value=("csrf_ok", "session_ok"),
+        ) as mock_fetch:
+            result = runner.invoke(
+                cli,
+                ["--storage", str(storage), "auth", "refresh", "--allow-headless"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock_fetch.await_args.args[0] == storage.resolve()
+        assert mock_fetch.await_args.kwargs == {"allow_headless": True}
 
     def test_auth_refresh_propagates_global_profile_flag(self, runner, tmp_path):
         """`notebooklm --profile work auth refresh` resolves the work profile.

@@ -451,7 +451,7 @@ class TestRefreshAuthOnBoundSessionIsNoOp:
 
         # Bound-session homepage GET: no Set-Cookie header, so no rotation.
         httpx_mock.add_response(
-            url="https://notebooklm.google.com/",
+            url="https://notebook.google.com/",
             content=(
                 b"<html><script>window.WIZ_global_data="
                 b'{"SNlM0e":"new_csrf","FdrFJe":"new_sid"};</script></html>'
@@ -572,7 +572,7 @@ class TestSnapshotRefreshedAfterSave:
         # Two homepage responses — refresh_auth is called twice.
         for _ in range(2):
             httpx_mock.add_response(
-                url="https://notebooklm.google.com/",
+                url="https://notebook.google.com/",
                 content=(
                     b"<html><script>window.WIZ_global_data="
                     b'{"SNlM0e":"csrf","FdrFJe":"sid"};</script></html>'
@@ -768,22 +768,22 @@ class TestSaveReturnsBoolSuccess:
         assert save_cookies_to_storage(jar, storage, original_snapshot=snapshot) is False
 
     @pytest.mark.parametrize(
-        "storage_state",
+        ("storage_state", "expected"),
         [
-            pytest.param({"origins": []}, id="missing-cookies"),
-            pytest.param({"cookies": "not-a-list"}, id="cookies-not-list"),
-            pytest.param({"cookies": ["not-a-dict"]}, id="cookie-row-not-dict"),
+            pytest.param({"origins": []}, False, id="missing-cookies"),
+            pytest.param({"cookies": "not-a-list"}, False, id="cookies-not-list"),
+            pytest.param({"cookies": ["not-a-dict"]}, True, id="cookie-row-not-dict"),
         ],
     )
-    def test_returns_false_when_cookies_payload_is_malformed(self, tmp_path, storage_state):
-        """Malformed cookie payloads must fail gracefully before merge logic."""
+    def test_handles_malformed_cookies_payload(self, tmp_path, storage_state, expected):
+        """Invalid schema fails; non-dict rows are retained while merging."""
         storage = tmp_path / "storage_state.json"
         storage.write_text(json.dumps(storage_state), encoding="utf-8")
         jar = httpx.Cookies()
         jar.set("SID", "new", domain=".google.com", path="/")
         snapshot: dict = {}
 
-        assert save_cookies_to_storage(jar, storage, original_snapshot=snapshot) is False
+        assert save_cookies_to_storage(jar, storage, original_snapshot=snapshot) is expected
 
     def test_returns_false_when_file_missing(self, tmp_path):
         """Storage file vanished between snapshot capture and save (e.g. an
@@ -908,7 +908,9 @@ class TestRefreshCmdResnapshot:
 
         # Stub the token fetch to return refreshed=True and mutate the jar
         # in place (mirroring _replace_cookie_jar after NOTEBOOKLM_REFRESH_CMD).
-        async def fake_fetch_with_refresh(cookie_jar, storage_path, profile, *, authuser=0):
+        async def fake_fetch_with_refresh(
+            cookie_jar, storage_path, profile, *, authuser=0, env_auth=False
+        ):
             # Simulate the wholesale jar swap: clear & repopulate with new values.
             cookie_jar.jar.clear()
             cookie_jar.set("SID", "post", domain=".google.com", path="/")
@@ -955,7 +957,9 @@ class TestRefreshCmdResnapshot:
             ],
         )
 
-        async def fake_fetch_with_refresh(cookie_jar, storage_path, profile, *, authuser=0):
+        async def fake_fetch_with_refresh(
+            cookie_jar, storage_path, profile, *, authuser=0, env_auth=False
+        ):
             cookie_jar.jar.clear()
             cookie_jar.set("SID", "post", domain=".google.com", path="/")
             cookie_jar.set("__Secure-1PSIDTS", "post_refresh", domain=".google.com", path="/")
@@ -1182,7 +1186,9 @@ class TestBaselineNotAdvancedOnSaveFailure:
             ],
         )
 
-        async def fake_fetch_with_refresh(cookie_jar, storage_path, profile, *, authuser=0):
+        async def fake_fetch_with_refresh(
+            cookie_jar, storage_path, profile, *, authuser=0, env_auth=False
+        ):
             _set_cookie_value(cookie_jar, "__Secure-1PSIDTS", "mutated")
             return ("csrf", "session", False, None)
 
@@ -1516,7 +1522,9 @@ class TestCASVariantAware:
             ],
         )
 
-        async def fake_fetch_with_refresh(cookie_jar, storage_path, profile, *, authuser=0):
+        async def fake_fetch_with_refresh(
+            cookie_jar, storage_path, profile, *, authuser=0, env_auth=False
+        ):
             # Drop the bare-host OSID from the jar and re-key it on the
             # leading-dot variant so the in-memory jar diverges from disk on
             # domain shape — the exact variance the variant-aware CAS lookup
