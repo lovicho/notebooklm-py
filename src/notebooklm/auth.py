@@ -49,8 +49,22 @@ from ._auth import tokens as _auth_tokens
 # consumes (cli/ may not import private ``_auth.*`` modules — see
 # tests/_guardrails/test_cli_boundary.py) and as the documented programmatic
 # headless-auth surface (docs/python-api.md). Blessed in ``__all__`` below.
+#
+# #2103 PR-2 structural follow-up: the CLI now invokes whole audited
+# TRANSACTIONS (``master_token_bootstrap`` / ``master_token_remint`` /
+# ``master_token_bootstrap_storage`` / ``assert_account_writable``) rather than
+# assembling them from primitives itself. ``exchange_master_token`` /
+# ``mint_cookies`` / ``persist_minted_jar`` / ``write_master_token`` /
+# ``generate_android_id`` are de-blessed accordingly (kept importable —
+# ``_AUTH_DEBLESSED_KEEP_IMPORTABLE`` — for the documented low-level recipe and
+# any existing external caller, but no first-party importer remains). Import
+# them from ``notebooklm._auth.master_token`` below for that reason: they stay
+# reachable via ``notebooklm.auth.<name>`` (attribute access, unaffected by
+# ``__all__``) without being re-blessed as this facade's primary surface.
 from ._auth.master_token import (  # noqa: F401
+    BootstrapOutcome,
     MasterTokenError,
+    assert_account_writable,  # noqa: F401
     exchange_master_token,
     generate_android_id,
     mint_cookies,
@@ -58,6 +72,11 @@ from ._auth.master_token import (  # noqa: F401
     read_master_token,
     write_master_token,
 )
+from ._auth.master_token import bootstrap_from_oauth_token as master_token_bootstrap  # noqa: F401
+from ._auth.master_token import (  # noqa: F401
+    bootstrap_storage_from_master_token as master_token_bootstrap_storage,
+)
+from ._auth.master_token import remint_from_stored_token as master_token_remint  # noqa: F401
 
 # Canonical login/import storage writer (refactor (b), b-PR3). Re-exported here
 # as the public boundary the CLI login/import writers consume — ``cli/`` may not
@@ -221,7 +240,9 @@ _resolve_token_route_kwargs = _auth_headers._resolve_token_route_kwargs
 Account = _auth_account.Account
 MAX_AUTHUSER_PROBE = _auth_account.MAX_AUTHUSER_PROBE
 _ACCOUNT_CONTEXT_KEY = _auth_account._ACCOUNT_CONTEXT_KEY
-_account_context_path = _auth_account._account_context_path
+# ``_account_context_path`` is no longer aliased here: it survives in
+# ``_auth.account`` solely as the private site of the legacy-key scrub and the
+# one-shot promotion (whitebox tests patch the canonical home directly).
 extract_email_from_html = _auth_account.extract_email_from_html
 _probe_authuser = _auth_account._probe_authuser
 read_account_metadata = _auth_account.read_account_metadata
@@ -232,14 +253,14 @@ format_authuser_value = _auth_account.format_authuser_value
 authuser_query = _auth_account.authuser_query
 write_account_metadata = _auth_account.write_account_metadata
 clear_account_metadata = _auth_account.clear_account_metadata
-# The sibling ``context.json`` legacy-account cleanup. ``replace_from_login`` now
-# embeds/clears the in-band ``notebooklm.account`` record in the same atomic
-# storage-state write, but the legacy sibling ``context.json[account]`` key lives
-# in a DIFFERENT file under a DIFFERENT lock and is deliberately NOT relocated
-# into the storage writer (plan §b.1). The CLI login writers call this facade
-# helper after a successful write so a default-account (cleared) login can't keep
-# routing to a stale legacy account, matching the pre-refactor
-# ``write_account_metadata`` / ``clear_account_metadata`` migration side effect.
+# The legacy sibling ``context.json[account]`` READ path was removed (the reader
+# is in-band-only); ``promote_legacy_account`` in ``_auth.account`` owns the
+# one-shot in-band migration, invoked from the standard cookie-load path and the
+# startup layout migration. The legacy-key scrub survives INSIDE
+# ``write_account_metadata`` / ``clear_account_metadata`` (privacy: a stale key
+# must not leave the account email at rest), so the CLI login writers no longer
+# call a facade helper after their writes — ``drop_legacy_account_key`` remains
+# importable here for back-compat only (de-blessed; no first-party importer).
 drop_legacy_account_key = _auth_account._drop_legacy_account_key
 
 

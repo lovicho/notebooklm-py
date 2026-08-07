@@ -146,8 +146,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     logged in" and re-mint nothing, because the login accept-set matches either
     personal host.
 
+### Removed
+
+- **The pre-v0.5.0 legacy account-metadata read fallback.** `read_account_metadata`
+  no longer returns a raw pass-through of the sibling `context.json[account]`
+  key when `storage_state.json` has no in-band record. That standing fallback was
+  a silent wrong-account hazard: a profile whose `authuser` lived only in the
+  legacy sibling would keep being re-derived from that file forever — a missed
+  or stale value routes requests to a *different* signed-in Google account (an
+  issue-#2103-class bug) with no failure to notice. In its place,
+  `read_account_metadata` calls a one-shot `promote_legacy_account` migration on
+  every read where in-band is absent, embedding the legacy record in-band
+  (durably, once) and scrubbing the legacy key — so no existing user loses their
+  account binding, and the result is always genuinely in-band truth rather than
+  a value re-derived from an unmigrated file each call. A transient promotion
+  failure (disk full, permission error, lock timeout) falls back to the legacy
+  record already read rather than to "no account" — the failure is logged at
+  WARNING (default-visible), since a persistent cause would otherwise silently
+  reintroduce the same hazard via a different trigger. The startup profiles
+  migration promotes proactively too, as a completeness nicety.
+  `drop_legacy_account_key` (whose two remaining call sites in the CLI login
+  writers are gone — the scrub now lives inside `replace_from_login` itself) is
+  de-blessed rather than removed: still importable from `notebooklm.auth` for
+  back-compat.
+
+### Deprecated
+
+- **The pre-profiles home-root layout** (`~/.notebooklm/storage_state.json` /
+  `context.json` / `browser_profile/` read directly, outside `profiles/<name>/`)
+  now emits a `DeprecationWarning` on each read. It is reached only when the
+  profile-dir path doesn't exist and the resolved profile is `"default"`; running
+  any `notebooklm` command once triggers the existing crash-safe migration and
+  the fallback is never hit again. Scheduled for removal in v1.0. Suppress with
+  `NOTEBOOKLM_QUIET_DEPRECATIONS=1`. See [docs/deprecations.md](docs/deprecations.md).
+
 ### Fixed
 
+- **Chat turn numbers now come from server history instead of the client-local
+  cache.** Stateless remote MCP requests create a fresh client for each call, so
+  a real continuation could previously report the contradictory pair
+  `is_follow_up=True, turn_number=1`. `chat.ask()` now counts complete
+  newest-first server history by user-question rows under the conversation lock,
+  uses that count to classify implicit continuations, and assigns the new answer
+  the next ordinal. Explicit-conversation asks retain explicit follow-up intent
+  while using the same server count for their ordinal, and stale local cache
+  entries no longer control the result
+  ([#1976](https://github.com/teng-lin/notebooklm-py/issues/1976)).
+- **Research that finds nothing is no longer an undifferentiated `failed`.** A
+  Google Drive research run whose query matched no file came back as
+  `status: failed` with no sources, no code, no message and no remediation —
+  indistinguishable from a genuine error, so a caller could not tell "refine the
+  query" from "fix permissions" or "back off" (issue #1964). The backend status
+  codes were live-captured against the serving API and are now documented in
+  `docs/rpc-reference.md`: `1` in-flight, `2` completed, `3` no matches (observed
+  only on Drive), `4` cancelled, `6` completed (deep). `ResearchTask` gains a
+  `termination_reason` (`no_results` / `cancelled` / `completed` / `in_progress`
+  / `unknown`) plus a `reason_message` and a source-specific `hint` — an empty
+  Drive search now suggests the exact filename, document URL, or document id,
+  while an empty web search suggests broadening the query. The coarse `status`
+  field is **unchanged**, so existing `status == "failed"` checks keep working;
+  an unrecognised terminal code maps to `unknown` rather than being guessed at.
+  The MCP `research_status` tool surfaces all three fields (and now reports a
+  cancelled run from the wire code alone, so a cancel from another process — or
+  from before a server restart — is still reported honestly), and  `research_import`'s refusal message no longer tells you to "start a new
+  research session" when your query simply matched nothing. The CLI
+  (`research status` / `research wait` / `source add-research`) and the REST
+  `GET .../research/{run_id}` route report the same reason, so no surface is
+  left showing a bare `failed`. `research status --json` is deliberately
+  unchanged — it emits the byte-stable public dict, as `status_code` did.
+
+  `ResearchTask` also gains `source_type` (the search source echoed by the
+  backend) and `is_drive_search` / `is_web_search`. Both `source_type` and the
+  existing `status_code` are ordinary dataclass fields, so they participate in
+  `ResearchTask.__eq__` / `__hash__` / `__repr__`: a parsed task no longer
+  compares equal to one hand-built without them. That is deliberate — the
+  reason, message and hint all derive from those two fields, so excluding them
+  would let two "equal" tasks carry different explanations.
 - **`login --master-token` now honors `--storage` for `master_token.json` too
   (#2103).** The login writer resolved the storage path from `--storage` but the
   master-token path from the profile dir, so under a `--storage` override the
@@ -173,6 +247,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cli.services.auth_source` resolver already does, so every syntactic spelling
   of one storage file collapses to one token location. Profile-derived paths
   were already absolute and are unaffected.
+
+- **`_app/auth_check.py`'s `auth check` and `cli/services/auth_refresh.py`'s
+  missing-storage bootstrap now also canonicalize the `master_token.json`
+  sibling for a symlinked or relative `--storage` (#2103 structural
+  follow-up, PR-1).** #2104/#2105 fixed this for the CLI login writer only,
+  one of four sites that each derived the sibling independently: the L4
+  recovery rung resolved via `canonical_storage_key`, `auth check` used an
+  unresolved `with_name`, and the missing-storage bootstrap used a raw
+  `.parent` join — three different policies that could each derive a
+  different sibling for the same alias. All four (plus `get_master_token_path`,
+  previously derived from the profile directory directly rather than from
+  `get_storage_path`, so it disagreed with every other reader for a legacy
+  home-root profile) now call the new
+  `notebooklm.paths.master_token_path_for(storage_path)`, the sole derivation
+  site, guarded by a lint against a second one reappearing. `auth check`
+  reporting `present: false`/`false` account presence for such a profile
+  under `--storage`, and the missing-storage bootstrap failing to find a
+  token beside a symlinked/relative `--storage`, are the two behavior changes
+  this fixes; ordinary absolute-path profiles are unaffected.
+
+- **A stale or circular `--storage`/profile symlink no longer crashes `auth
+  check` or the cold-start bootstrap (#2103 PR-1 review).** The new
+  `master_token_path_for` canonicalizes via `Path.resolve()`, which raises
+  `RuntimeError` (not `OSError`) on a symlink loop on Python 3.10-3.12 — a
+  CPython pathlib behavior fixed upstream in 3.13, where the same call
+  degrades silently instead. `master_token_path_for` now catches both
+  exception types on every supported Python version and falls back to a
+  best-effort, non-canonicalized path rather than propagating.
+
+- **The master-token transaction no longer lets a mint silently overwrite a
+  different account's session (#2103 structural follow-up, PR-2).** Before
+  this, `notebooklm._auth.storage_writer.persist_minted_jar` — the function
+  every master-token mint (bootstrap, L4 recovery, operator refresh, and the
+  documented low-level recipe that calls it directly) ultimately writes
+  through — applied no account check at all: a wrong `--account`, a stale
+  profile alias, or a hand-rolled `mint_cookies` + `persist_minted_jar` call
+  could clobber an existing, different account's cookies *and* durable master
+  token with no warning. It now refuses (raising `MasterTokenError`, or
+  returning a typed `False` on the L4 ladder) when existing storage is bound
+  to a recorded account different from the one being minted, unless `force` —
+  enforced under the storage-write lock itself, closing both the
+  check-before-mint TOCTOU race and the bypass a direct low-level call sat
+  outside of. This closes the #2104 review thread
+  (`discussion_r3731673393`) that bound ADR-0023 to fixing the L4 read-side
+  cross-account re-mint.
+
+- **`notebooklm auth refresh`'s missing-storage bootstrap no longer conflates
+  four different outcomes into one boolean (#2103 structural follow-up,
+  PR-2).** The flock/shield/recheck machinery moved from
+  `cli/services/auth_refresh.py` into `notebooklm._auth.master_token` as
+  `bootstrap_storage_from_master_token`, returning an explicit
+  `BootstrapOutcome` (`MINTED` / `PRESENT_AFTER_WAIT` / `PRESENT_ON_ENTRY` /
+  `NO_TOKEN`) instead of a bool that could not distinguish "this call minted
+  it" from "a concurrent leader already had", nor "nothing to do because
+  storage already existed" from "nothing to do because there's no token".
+  External behavior for `notebooklm auth refresh` is unchanged — the CLI maps
+  the same two outcome pairs onto the same boolean as before.
+
+### Changed
+
+- **The CLI no longer assembles the master-token transaction from minting
+  primitives (#2103 structural follow-up, PR-2).** `bootstrap` (oauth_token →
+  durable token → minted session) and `refresh` (no-prompt re-mint), formerly
+  in `cli/services/login/master_token.py` and `cli/services/auth_refresh.py`,
+  moved into `notebooklm._auth.master_token` as
+  `bootstrap_from_oauth_token`/`remint_from_stored_token`, exposed via the
+  `notebooklm.auth` facade as `master_token_bootstrap`/`master_token_remint`.
+  The CLI now invokes these whole, audited transactions instead of composing
+  `exchange_master_token` + `mint_cookies` + `persist_minted_jar` +
+  `write_master_token` + `generate_android_id` itself; those five primitives
+  remain importable from `notebooklm.auth` (de-blessed, not removed) for the
+  documented low-level recipe, but the CLI no longer imports them. The L4
+  recovery rung (`_auth/recovery.py`) and the operator refresh path
+  previously assembled the same read→mint→persist sequence independently and
+  disagreed on error handling and reload; both now call the shared kernel,
+  `remint_from_stored_token`. `android_id` resolution (explicit → stored →
+  generated) moved from the CLI driver into `bootstrap_from_oauth_token`
+  itself; the CLI keeps only its cheap pre-capture `read_master_token` probe
+  and the inherently-interactive browser `oauth_token` capture.
+
+- **A new lint (#2103 structural follow-up, PR-3) locks in the above:** no
+  module under `cli/` may import or attribute-access `exchange_master_token`,
+  `mint_cookies`, `persist_minted_jar`, or `write_master_token` from the
+  `notebooklm.auth` facade, by name or via a module-alias attribute call
+  (`tests/_guardrails/test_master_token_minting_denylist.py`). `cli/`'s
+  broader access to `notebooklm.auth` for every other name is unaffected.
+
+- **`persist_minted_jar` gained a `force` keyword (default `False`) and, on
+  `notebooklm._auth.storage_writer.persist_minted_jar`, a
+  `refuse_unknown_owner` keyword (default `True`).** Existing callers that
+  always mint into the same account they already control are unaffected;
+  callers assembling a custom transaction that mints across accounts should
+  pass `force=True` explicitly.
 
 - **`NOTEBOOKLM_AUTH_JSON` now beats a profile everywhere, as documented.** The
   precedence `--storage` > `NOTEBOOKLM_AUTH_JSON` > profile file is stated in
