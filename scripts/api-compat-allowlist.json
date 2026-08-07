@@ -1,10 +1,156 @@
 {
-  "schema_version": 1,
+  "allowed_breaks": [
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.Account",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.Account, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.GOOGLE_REGIONAL_CCTLDS",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.GOOGLE_REGIONAL_CCTLDS, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.MasterTokenError",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.MasterTokenError, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.build_cookie_jar",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.build_cookie_jar, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.build_httpx_cookies_from_storage",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.build_httpx_cookies_from_storage, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.clear_account_metadata",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.clear_account_metadata, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.cookie_names_from_storage",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.cookie_names_from_storage, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.enumerate_accounts",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.enumerate_accounts, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.exchange_master_token",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.exchange_master_token, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.extract_cookies_from_storage",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.extract_cookies_from_storage, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.extract_cookies_with_domains",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.extract_cookies_with_domains, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.extract_email_from_html",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.extract_email_from_html, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.fetch_tokens_passive",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.fetch_tokens_passive, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.fetch_tokens_with_domains",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.fetch_tokens_with_domains, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.generate_android_id",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.generate_android_id, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.get_account_email_for_storage",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.get_account_email_for_storage, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.get_authuser_for_storage",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.get_authuser_for_storage, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.mint_cookies",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.mint_cookies, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.missing_cookies_hint",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.missing_cookies_hint, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.persist_minted_jar",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.persist_minted_jar, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.read_account_metadata",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.read_account_metadata, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.read_account_metadata_from_storage_state",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.read_account_metadata_from_storage_state, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.read_master_token",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.read_master_token, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.validate_with_recovery",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.validate_with_recovery, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.write_account_metadata",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.write_account_metadata, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "removed-export",
+      "object": "notebooklm.auth.write_master_token",
+      "reason": "De-blessed from notebooklm.auth.__all__ when the module's public surface was pinned to the six names docs/stability.md promises. It was published only because __all__ doubled as the cli/_app cross-boundary import allowlist, never as a documented API. De-advertisement, not removal: still importable as notebooklm.auth.write_master_token, frozen by AUTH_CROSS_BOUNDARY_NAMES in tests/_guardrails/test_public_surface.py."
+    },
+    {
+      "code": "changed-constant-value",
+      "object": "notebooklm.config.DEFAULT_BASE_URL",
+      "reason": "Gemini Notebook rebrand (#2013 / #2067, shipped in #2072): the default app host moved to notebook.google.com while both hosts still serve. Reviewed and documented in CHANGELOG + ADR-0028; NOTEBOOKLM_BASE_URL remains the rollback lever. Surfaced only now because constant VALUES were invisible to this audit."
+    },
+    {
+      "code": "changed-constant-value",
+      "object": "notebooklm.config.PERSONAL_BASE_HOST",
+      "reason": "Gemini Notebook rebrand (#2013 / #2067, shipped in #2072): companion flip to DEFAULT_BASE_URL \u2014 the personal-tier host constant now names notebook.google.com. Same review and rollback lever."
+    },
+    {
+      "code": "changed-constant-value",
+      "object": "notebooklm.auth.REQUIRED_COOKIE_DOMAINS",
+      "reason": "Gemini Notebook rebrand (#2013, shipped in #2020): notebook.google.com and .notebook.google.com joined the required cookie-domain tier because Google sets the per-product binding cookies (OSID / __Secure-OSID) on that host. Additive for the constant's documented use (an extractor allowlist); a narrower set would drop binding cookies and break login."
+    }
+  ],
   "extra_public_names": {
     "notebooklm": [
       "configure_logging",
       "DEFAULT_STORAGE_PATH"
     ]
   },
-  "allowed_breaks": []
+  "schema_version": 1
 }

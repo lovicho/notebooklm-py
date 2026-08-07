@@ -30,6 +30,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`notebooklm.auth.__all__` is now exactly the documented public surface (38 →
+  6 names).** `__all__` had been doing double duty: the CLI boundary lint forbids
+  `cli/` from importing `notebooklm._*`, so every auth helper the CLI needed was
+  reached through the `notebooklm.auth` facade — and the external-imports audit
+  then *forced* that name into `__all__`. "The CLI needs it" silently became "it
+  is public API", and the published surface grew to 38 names against the 6 that
+  docs/stability.md ever promised (`AuthTokens`,
+  `convert_rookiepy_cookies_to_storage_state`, the three cookie-domain constants,
+  and `LockUnavailableError`).
+
+  The other 32 are **de-advertised, not removed** — the #1592 mechanism:
+  `notebooklm.auth.<name>` keeps resolving exactly as before, with one reviewed
+  `removed-export` allowance each in `scripts/api-compat-allowlist.json`. No
+  runtime behaviour changes and no import breaks; only `from notebooklm.auth
+  import *` (which no supported usage relies on) and static-analysis views of the
+  advertised surface are affected. The 30 names first-party code genuinely needs
+  across the boundary are now tracked by their own list,
+  `AUTH_CROSS_BOUNDARY_NAMES` in `tests/_guardrails/test_public_surface.py`, which
+  grants importability *without* publishing — so a future CLI need can no longer
+  re-inflate the public API. Two names (`KEEP_ACCOUNT`, `LoginWriteOutcome`) had
+  no importer at all and are simply unblessed. Publishing a name now requires
+  changing `__all__`, the docs, and the manifest together:
+  `test_auth_all_matches_documented_public_surface` fails the build if the three
+  disagree.
+
+- **The API-compat audit now compares the VALUE of designated public constants.**
+  `scripts/audit_public_api_compat.py` reasoned about shape only — a module
+  constant contributed just its `kind`, so rebinding one compared as "str vs str"
+  and passed. The Gemini Notebook rebrand went through that blind spot: the audit
+  stayed green while `config.DEFAULT_BASE_URL` and `config.PERSONAL_BASE_HOST`
+  changed host and `auth.REQUIRED_COOKIE_DOMAINS` gained members. Constants listed
+  in the new `VALUE_TRACKED_CONSTANTS` (those five, minus the unchanged optional
+  tiers) now carry an order-insensitive fingerprint — sorted so a `frozenset`
+  cannot fingerprint differently under a different `PYTHONHASHSEED` — and a change
+  surfaces as a `changed-constant-value` break requiring an allowlist entry. The
+  three real changes above are recorded there now rather than being invisible.
+
 - **`NOTEBOOKLM_AUTH_JSON` is now read through a single helper.** The env var was
   checked at ~7 auth-layer call sites that had drifted on
   presence-vs-truthiness (the #2057 / #2083 class of bug, where a *set-but-empty*
@@ -110,6 +147,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     personal host.
 
 ### Fixed
+
+- **`login --master-token` now honors `--storage` for `master_token.json` too
+  (#2103).** The login writer resolved the storage path from `--storage` but the
+  master-token path from the profile dir, so under a `--storage` override the
+  durable token landed where no reader ever looks — the L4 master-token recovery
+  rung silently reported "no token", `auth check` reported `present: False`
+  immediately after a successful login, and the full-account credential was
+  written into the default profile dir the user had explicitly redirected away
+  from. The writer now derives the token path as a sibling of the storage path,
+  matching every reader (`_auth/recovery.py`, `_app/auth_check.py`,
+  `cli/services/auth_refresh.py`). Behavior without `--storage` is unchanged.
+  The same fix covers `login --master-token-refresh --storage …`, and the
+  account-ownership guard now checks the token that actually sits beside the
+  target storage instead of the active profile's.
+
+- **A symlinked or relative `--storage` alias now selects the same
+  `master_token.json` the recovery ladder reads (#2104 review).** `--storage`
+  was used verbatim when deriving the token sibling, so an alias — a relative
+  path, a `~` prefix, or a symlinked directory — wrote the token beside the
+  *alias* while the L4 master-token recovery rung, which canonicalizes through
+  `canonical_storage_key` (`expanduser().resolve()`) before taking the parent
+  directory, looked beside the resolved target and found nothing. The login
+  driver now canonicalizes an explicit `--storage` the same way the
+  `cli.services.auth_source` resolver already does, so every syntactic spelling
+  of one storage file collapses to one token location. Profile-derived paths
+  were already absolute and are unaffected.
 
 - **`NOTEBOOKLM_AUTH_JSON` now beats a profile everywhere, as documented.** The
   precedence `--storage` > `NOTEBOOKLM_AUTH_JSON` > profile file is stated in

@@ -28,73 +28,13 @@ from tests._baselines.registry import (
     baseline_by_name,
 )
 
+# The documented public import manifest (stability spec) lives in a shared
+# ``_``-prefixed module because ``test_public_surface.py`` cross-checks
+# ``notebooklm.auth.__all__`` against it, and one ``test_*`` module may not import
+# another (tests/_guardrails/test_no_cross_test_imports.py).
+from tests._guardrails._public_import_manifest import _DOCUMENTED_PUBLIC_IMPORTS
+
 pytestmark = pytest.mark.repo_lint
-
-# ---------------------------------------------------------------------------
-# Documented public import manifest (stability spec)
-#
-# This is the public import surface documented in the user-facing API docs.
-# Keep this manifest explicit: if docs add a new supported import path, add it
-# here in the same PR; if docs intentionally remove one, remove it here with
-# the docs change.
-# ---------------------------------------------------------------------------
-
-
-_DOCUMENTED_PUBLIC_IMPORTS = {
-    "notebooklm": [
-        "ArtifactType",
-        "AudioFormat",
-        "AudioLength",
-        "AuthTokens",
-        "ChatGoal",
-        "ChatResponseLength",
-        "ConnectionLimits",
-        "correlation_id",
-        "ExportType",
-        "NonIdempotentRetryError",
-        "NotebookLMClient",
-        "QuizDifficulty",
-        "QuizQuantity",
-        "ReportFormat",
-        "RPCError",
-        "SharePermission",
-        "ShareViewLevel",
-        "SourceType",
-        "VideoFormat",
-        "VideoStyle",
-    ],
-    "notebooklm.auth": [
-        "AuthTokens",
-        "convert_rookiepy_cookies_to_storage_state",
-        "LockUnavailableError",
-        "OPTIONAL_COOKIE_DOMAINS",
-        "OPTIONAL_COOKIE_DOMAINS_BY_LABEL",
-        "REQUIRED_COOKIE_DOMAINS",
-    ],
-    "notebooklm.config": [
-        "DEFAULT_BASE_URL",
-        "get_base_url",
-    ],
-    "notebooklm.log": [
-        "install_redaction",
-    ],
-    "notebooklm.research": [
-        "extract_report_urls",
-        "normalize_url",
-        "select_cited_sources",
-    ],
-    "notebooklm.rpc": [
-        "resolve_rpc_id",
-        "RPCMethod",
-    ],
-    "notebooklm.types": [
-        "ConnectionLimits",
-    ],
-    "notebooklm.urls": [
-        "is_google_auth_redirect",
-        "is_youtube_url",
-    ],
-}
 
 
 @pytest.mark.parametrize(

@@ -305,9 +305,10 @@ def test_missing_marker_from_failed_probe_does_not_install(monkeypatch, capsys) 
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.reality
 @pytest.mark.requires_playwright
 def test_probe_source_detects_both_states_against_real_playwright(tmp_path, monkeypatch) -> None:
-    """The probe answers correctly against a REAL Playwright install (#2031).
+    """The probe source answers correctly against REAL Playwright (#2031).
 
     Regression guard for the class of bug this replaced: the previous
     pre-flight scraped ``playwright install --dry-run chromium`` for a
@@ -343,6 +344,22 @@ def test_probe_source_detects_both_states_against_real_playwright(tmp_path, monk
     resolved.touch()
 
     assert run_source(CHROMIUM_PROBE_SOURCE) == CHROMIUM_PRESENT_MARKER
+
+
+@pytest.mark.reality
+@pytest.mark.requires_chromium
+def test_chromium_launches_headless_against_real_playwright() -> None:
+    """A package import and executable path are not proof that Chromium launches."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.set_content("<title>reality probe</title>")
+            assert page.title() == "reality probe"
+        finally:
+            browser.close()
 
 
 # ---------------------------------------------------------------------------

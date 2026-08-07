@@ -921,7 +921,7 @@ async def fetch_tokens_with_domains(
     jar = await asyncio.to_thread(build_httpx_cookies_from_storage, path)
     # Capture the open-time snapshot before any rotation could fire. The
     # snapshot is the input to the dirty-flag/delta merge that closes the
-    # stale-overwrite-fresh race (docs/auth-cookie-lifecycle.md §3.4.1).
+    # stale-overwrite-fresh race (docs/auth-cookie-lifecycle.md Appendix A2).
     snapshot = snapshot_cookie_jar(jar)
     refresh_options: dict[str, Any] = {"env_auth": path is None}
     if authuser is not None:

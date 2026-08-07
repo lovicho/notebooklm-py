@@ -141,58 +141,39 @@ _is_allowed_cookie_domain = _cookie_policy._is_allowed_cookie_domain
 
 
 # Public surface for ``from notebooklm.auth import *`` and for downstream
-# static-analysis tools (mypy, ruff F401 checks). ``notebooklm.auth.*`` is internal
-# (docs/stability.md) except the documented power-user imports plus the cohesive
-# operations the CLI/_app need across the public boundary. The 23 core/test-only
-# re-exports de-blessed in #1592 were removed from this list but remain importable
-# as module attributes for back-compat — first-party code now imports them from
-# their ``notebooklm._auth.<sub>`` home, and one ``removed-export`` allowance each
-# lives in scripts/api-compat-allowlist.json. Underscore-prefixed names remain
-# accessible on the module as whitebox test affordances but are intentionally NOT
-# blessed here. See ``tests/_guardrails/test_public_surface.py``:
-# ``test_auth_module_has_expected_all`` snapshot-checks the exact ordering, and
+# static-analysis tools (mypy, ruff F401 checks). This list is EXACTLY the
+# ``notebooklm.auth`` surface documented in docs/stability.md — nothing else.
+# Everything else in this module is internal (docs/stability.md: "notebooklm.auth.*
+# — Auth internals").
+#
+# ``__all__`` used to double as the CLI/_app cross-boundary import allowlist: the
+# CLI boundary lint (tests/_guardrails/test_cli_boundary.py) forbids ``cli/`` from
+# importing ``notebooklm._*``, so every helper the CLI needed was reached through
+# this facade — and the external-imports audit then FORCED that name into
+# ``__all__``. "The CLI needs it" silently became "it is public API", and the list
+# grew to 38 names, 32 of which docs/stability.md never promised. Those 32 are
+# de-blessed here (the #1592 mechanism: dropped from ``__all__``, still importable
+# as module attributes, one ``removed-export`` allowance each in
+# scripts/api-compat-allowlist.json) and are now tracked by their own
+# first-party-only list, ``AUTH_CROSS_BOUNDARY_NAMES`` in
+# ``tests/_guardrails/test_public_surface.py``. Adding a name there does NOT
+# publish it. Underscore-prefixed names remain accessible on the module as whitebox
+# test affordances but are intentionally NOT blessed here.
+#
+# See ``tests/_guardrails/test_public_surface.py``:
+# ``test_auth_module_has_expected_all`` snapshot-checks the exact ordering,
+# ``test_auth_all_matches_documented_public_surface`` pins this list to
+# docs/stability.md and the manifest in ``test_public_surface_manifest.py``, and
 # ``test_auth_all_matches_external_imports_audit`` AST-scans ``src/``/``tests/``/
-# ``docs/`` to fail if a public name is imported externally from ``notebooklm.auth``
-# without being added here.
+# ``docs/`` to fail if a name is imported externally from ``notebooklm.auth``
+# without being in ``__all__`` OR ``AUTH_CROSS_BOUNDARY_NAMES``.
 __all__ = [
-    "Account",
-    "AccountRecord",
     "AuthTokens",
-    "build_cookie_jar",
-    "build_httpx_cookies_from_storage",
-    "CLEAR_ACCOUNT",
-    "clear_account_metadata",
     "convert_rookiepy_cookies_to_storage_state",
-    "cookie_names_from_storage",
-    "drop_legacy_account_key",
-    "enumerate_accounts",
-    "exchange_master_token",
-    "extract_cookies_from_storage",
-    "extract_cookies_with_domains",
-    "extract_email_from_html",
-    "fetch_tokens_passive",
-    "fetch_tokens_with_domains",
-    "generate_android_id",
-    "get_account_email_for_storage",
-    "get_authuser_for_storage",
-    "GOOGLE_REGIONAL_CCTLDS",
-    "KEEP_ACCOUNT",
     "LockUnavailableError",
-    "LoginWriteOutcome",
-    "MasterTokenError",
-    "mint_cookies",
-    "missing_cookies_hint",
     "OPTIONAL_COOKIE_DOMAINS",
     "OPTIONAL_COOKIE_DOMAINS_BY_LABEL",
-    "persist_minted_jar",
-    "read_account_metadata",
-    "read_account_metadata_from_storage_state",
-    "read_master_token",
-    "replace_from_login",
     "REQUIRED_COOKIE_DOMAINS",
-    "validate_with_recovery",
-    "write_account_metadata",
-    "write_master_token",
 ]
 
 

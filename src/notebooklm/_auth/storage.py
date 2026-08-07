@@ -366,12 +366,12 @@ def snapshot_cookie_jar(cookie_jar: httpx.Cookies) -> CookieSnapshot:
     in-memory value differs from the snapshot — plus cookies absent from
     the jar but present in the snapshot (deletions) — are propagated to
     disk. Cookies the in-process code never touched are left to whatever
-    a sibling process may have written (closes the §3.4.1
+    a sibling process may have written (closes the Appendix A2
     stale-overwrite-fresh hazard).
 
     The key shape is path-aware ``(name, domain, path)`` (also closes
-    §3.4.2). Cookies with no name or no domain are skipped — the storage
-    format requires both.
+    the Appendix A2 path-collapse hazard). Cookies with no name or no domain
+    are skipped — the storage format requires both.
 
     Args:
         cookie_jar: The httpx.Cookies object to snapshot.
@@ -494,7 +494,7 @@ def save_cookies_to_storage(
 
     - **Legacy (``original_snapshot=None``)**: every in-memory cookie whose
       value differs from disk wins. Vulnerable to the stale-overwrite-fresh
-      race documented in ``docs/auth-cookie-lifecycle.md`` §3.4.1 and emits a
+      race documented in ``docs/auth-cookie-lifecycle.md`` Appendix A2 and emits a
       ``RuntimeWarning`` safety advisory about that race (this is a permanent
       back-compat shim, not a scheduled deprecation, so the advisory is a
       ``RuntimeWarning`` and is not silenced by ``NOTEBOOKLM_QUIET_DEPRECATIONS``).
@@ -506,7 +506,7 @@ def save_cookies_to_storage(
       deleted from disk. Cookies the in-process code never touched are
       left untouched on disk so a sibling-process write survives.
       Path-aware ``(name, domain, path)`` keys are used here (also closes
-      §3.4.2).
+      the Appendix A2 path-collapse hazard).
 
     Args:
         cookie_jar: The httpx.Cookies object containing the latest cookies.
@@ -528,7 +528,7 @@ def save_cookies_to_storage(
     """
     if original_snapshot is None and path is not None:
         # NOT a deprecation: the original_snapshot=None form is a *permanent*
-        # public-API back-compat shim (docs/auth-cookie-lifecycle.md §3.4.1),
+        # public-API back-compat shim (docs/auth-cookie-lifecycle.md Appendix A2),
         # not a scheduled removal — every in-tree caller already passes a
         # snapshot. The warning is a runtime safety advisory about the
         # stale-overwrite-fresh race that path is vulnerable to, so it is a
@@ -540,7 +540,7 @@ def save_cookies_to_storage(
         warnings.warn(
             "save_cookies_to_storage called without original_snapshot; the "
             "legacy full-merge path is vulnerable to the stale-overwrite-fresh "
-            "race (docs/auth-cookie-lifecycle.md §3.4.1). Pass an original_snapshot "
+            "race (docs/auth-cookie-lifecycle.md Appendix A2). Pass an original_snapshot "
             "captured via snapshot_cookie_jar() at jar-open time.",
             RuntimeWarning,
             stacklevel=2,
@@ -579,7 +579,7 @@ def _preserved_same_site(stored_cookie: dict[str, Any], fresh_state: dict[str, A
 def _merge_cookies_legacy(cookie_jar: httpx.Cookies, storage_data: dict[str, Any]) -> int:
     """Legacy merge: trust in-memory whenever it differs from disk.
 
-    Vulnerable to the stale-overwrite-fresh race (§3.4.1). Kept only for
+    Vulnerable to the stale-overwrite-fresh race (Appendix A2). Kept only for
     callers that have not yet opted into snapshot semantics. New callers
     must pass ``original_snapshot`` to :func:`save_cookies_to_storage`.
 
@@ -754,7 +754,7 @@ def _merge_cookies_with_snapshot(
 ) -> tuple[int, frozenset[CookieSnapshotKey]]:
     """Snapshot/delta merge: write only what this process actually changed.
 
-    Closes §3.4.1 (stale-overwrite-fresh) and §3.4.2 (path collapse):
+    Closes the Appendix A2 stale-overwrite-fresh and path-collapse hazards:
 
     - **Deltas (CAS-guarded for keys in the snapshot)**: cookies in the
       jar whose snapshot tuple (``value, expires, secure, http_only``)

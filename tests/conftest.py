@@ -12,6 +12,20 @@ from notebooklm.rpc import RPCMethod
 
 _PLAYWRIGHT_INSTALLED = importlib.util.find_spec("playwright") is not None
 
+# Reality probes are intentionally an explicit, small set. Inferring the
+# expected set from markers would let a deleted or deselected probe disappear
+# while the required lane still passed.
+REQUIRED_REALITY_PROBES = frozenset(
+    {
+        "tests/unit/cli/test_playwright_login_coverage.py::"
+        "test_probe_source_detects_both_states_against_real_playwright",
+        "tests/unit/cli/test_playwright_login_coverage.py::"
+        "test_chromium_launches_headless_against_real_playwright",
+    }
+)
+_REALITY_DEPENDENCY_MARKERS = frozenset({"requires_playwright", "requires_chromium"})
+_REALITY_REPORTS: dict[str, list[tuple[str, str]]] = {}
+
 
 # Mirror of ``tests/vcr_config._is_vcr_record_mode`` — duplicated (not imported)
 # so the *root* conftest, loaded for every test, stays free of the heavier
@@ -227,6 +241,15 @@ def pytest_addoption(parser):
             "Prefer `python scripts/regen_baselines.py`."
         ),
     )
+    parser.addoption(
+        "--require-reality",
+        action="store_true",
+        default=False,
+        help=(
+            "Require every expected external-reality probe to be collected and "
+            "pass exactly once; intended for the explicit browser CI lane."
+        ),
+    )
 
 
 @pytest.fixture
@@ -249,6 +272,15 @@ def update_baselines(request) -> bool:
 
 def pytest_configure(config):
     """Register custom markers and configure test environment."""
+    xdist_active = (
+        config.getoption("numprocesses", default=None) not in (None, 0)
+        or config.getoption("dist", default="no") != "no"
+    )
+    if config.getoption("--require-reality") and xdist_active:
+        raise pytest.UsageError(
+            "--require-reality cannot be combined with xdist; run the required "
+            "reality lane serially so the controller can account for every probe"
+        )
     config.addinivalue_line(
         "markers",
         "vcr: marks tests that use VCR cassettes (may be skipped if cassettes unavailable)",
@@ -291,13 +323,118 @@ def pytest_collection_modifyitems(config, items):
     no-op there.
     """
     if _PLAYWRIGHT_INSTALLED:
+        chromium_available = None
+        for item in items:
+            if "requires_chromium" not in item.keywords:
+                continue
+            if chromium_available is None:
+                chromium_available = _chromium_available()
+            if not chromium_available:
+                item.add_marker(
+                    pytest.mark.skip(
+                        reason=(
+                            "Chromium is not installed or launchable; run: "
+                            "uv run playwright install chromium"
+                        )
+                    )
+                )
         return
     skip_marker = pytest.mark.skip(
         reason="playwright not installed; install with: uv sync --extra browser"
     )
     for item in items:
-        if "requires_playwright" in item.keywords:
+        if _REALITY_DEPENDENCY_MARKERS.intersection(item.keywords):
             item.add_marker(skip_marker)
+
+
+def _chromium_available() -> bool:
+    """Return whether Playwright can launch the installed Chromium executable."""
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            if not os.path.isfile(playwright.chromium.executable_path):
+                return False
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                return True
+            finally:
+                browser.close()
+    except Exception:
+        return False
+
+
+def _is_xdist_worker(config) -> bool:
+    """Required reality accounting belongs to the xdist controller only."""
+    return getattr(config, "workerinput", None) is not None
+
+
+def pytest_collection_finish(session) -> None:
+    """Validate the exact reality-probe set after all selection filters apply."""
+    if not session.config.getoption("--require-reality") or _is_xdist_worker(session.config):
+        return
+
+    selected = {item.nodeid: item for item in session.items}
+    missing = sorted(REQUIRED_REALITY_PROBES - selected.keys())
+    unexpected = sorted(
+        item.nodeid
+        for item in session.items
+        if "reality" in item.keywords and item.nodeid not in REQUIRED_REALITY_PROBES
+    )
+    invalid_dependencies = sorted(
+        item.nodeid
+        for item in session.items
+        if item.nodeid in REQUIRED_REALITY_PROBES
+        and not _REALITY_DEPENDENCY_MARKERS.intersection(item.keywords)
+    )
+    unmarked_expected = sorted(
+        nodeid
+        for nodeid in REQUIRED_REALITY_PROBES
+        if nodeid in selected and "reality" not in selected[nodeid].keywords
+    )
+    if missing or unexpected or invalid_dependencies or unmarked_expected:
+        problems = []
+        if missing:
+            problems.append(f"missing expected probes: {missing}")
+        if unexpected:
+            problems.append(f"unexpected reality probes: {unexpected}")
+        if invalid_dependencies:
+            problems.append(f"probes lack a recognized dependency marker: {invalid_dependencies}")
+        if unmarked_expected:
+            problems.append(f"expected probes lack the reality marker: {unmarked_expected}")
+        raise pytest.UsageError(
+            "--require-reality collection contract failed: " + "; ".join(problems)
+        )
+
+    _REALITY_REPORTS.clear()
+    for nodeid in REQUIRED_REALITY_PROBES:
+        _REALITY_REPORTS[nodeid] = []
+
+
+def pytest_runtest_logreport(report) -> None:
+    """Record every phase so skipped/setup-error probes cannot count as passes."""
+    if report.nodeid in _REALITY_REPORTS:
+        _REALITY_REPORTS[report.nodeid].append((report.when, report.outcome))
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    """Turn a missing or non-passing reality call phase into a hard failure."""
+    if not session.config.getoption("--require-reality") or _is_xdist_worker(session.config):
+        return
+
+    failures = []
+    for nodeid in sorted(REQUIRED_REALITY_PROBES):
+        reports = _REALITY_REPORTS.get(nodeid, [])
+        calls = [outcome for phase, outcome in reports if phase == "call"]
+        if calls != ["passed"] or any(outcome != "passed" for _phase, outcome in reports):
+            failures.append(f"{nodeid}: phases={reports!r}")
+    if failures:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        terminal = session.config.pluginmanager.get_plugin("terminalreporter")
+        if terminal is not None:
+            terminal.write_line("--require-reality execution contract failed:")
+            for failure in failures:
+                terminal.write_line(f"  {failure}")
 
 
 @pytest.fixture
