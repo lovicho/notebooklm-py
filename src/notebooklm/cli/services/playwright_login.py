@@ -104,36 +104,6 @@ ACCOUNT_METADATA_REMEDIATION = (
 # ---------------------------------------------------------------------------
 
 
-def _select_playwright_account(
-    accounts: list[Any],
-    *,
-    active_email: str | None,
-) -> tuple[Any | None, str | None]:
-    """Select the account Playwright just logged into, or return an ambiguity reason."""
-    if active_email:
-        normalized = active_email.casefold()
-        matches = [
-            account
-            for account in accounts
-            if isinstance(getattr(account, "email", None), str)
-            and account.email.casefold() == normalized
-        ]
-        if len(matches) == 1:
-            return matches[0], None
-        if matches:
-            return None, f"multiple discovered accounts matched {active_email}"
-        return None, f"current NotebookLM page email {active_email} was not discovered"
-
-    if len(accounts) == 1:
-        return accounts[0], None
-    if accounts:
-        return (
-            None,
-            "multiple Google accounts were discovered but the active page email was unavailable",
-        )
-    return None, "no Google accounts were discovered"
-
-
 def repair_playwright_account_metadata(
     storage_path: Path,
     io: LoginIO,
@@ -150,44 +120,27 @@ def repair_playwright_account_metadata(
     ``quiet`` stays a service-level parameter (the Protocol has no silencing
     concept). Returns ``True`` when metadata was written, ``False`` when it
     was cleared or left absent.
-    """
-    from ...auth import (
-        build_httpx_cookies_from_storage,
-        clear_account_metadata,
-        enumerate_accounts,
-        extract_email_from_html,
-        write_account_metadata,
-    )
 
-    active_email = extract_email_from_html(page_html) if isinstance(page_html, str) else None
+    The discovery/select/write recipe itself lives in
+    :func:`notebooklm._auth.account.repair_account_metadata_from_playwright_storage`
+    (auth cross-boundary ledger shrink, follow-up to #2103) — this wrapper owns
+    only the ``LoginIO``-mediated presentation, keyed off which field of the
+    returned result is set. ``io.run_async`` itself is still wrapped here (not
+    just the coroutine's own try/except): a ``RuntimeError`` from ``run_async``
+    scheduling the coroutine (e.g. the nested-event-loop guard) happens outside
+    the coroutine's own exception handling, and must degrade to the same
+    best-effort warning the pre-consolidation code gave the whole sequence
+    rather than aborting login/refresh (review finding on PR #2139).
+    """
+    from ...auth import repair_account_metadata_from_playwright_storage
+
+    if not quiet:
+        io.emit("[dim]Identifying Google account...[/dim]")
     try:
-        if not quiet:
-            io.emit("[dim]Identifying Google account...[/dim]")
-        jar = build_httpx_cookies_from_storage(storage_path)
-        accounts = io.run_async(enumerate_accounts(jar))
-        selected, reason = _select_playwright_account(accounts, active_email=active_email)
-        if selected is None:
-            clear_account_metadata(storage_path)
-            if not quiet:
-                io.emit(
-                    "[yellow]Warning: account metadata was not written; "
-                    f"{reason}. {ACCOUNT_METADATA_REMEDIATION}[/yellow]"
-                )
-            return False
-        write_account_metadata(
-            storage_path,
-            authuser=selected.authuser,
-            email=selected.email,
+        result = io.run_async(
+            repair_account_metadata_from_playwright_storage(storage_path, page_html=page_html)
         )
     except (OSError, ValueError, RuntimeError, httpx.HTTPError) as exc:
-        try:
-            clear_account_metadata(storage_path)
-        except Exception as clear_exc:
-            logger.warning(
-                "Failed to clear stale account metadata for %s: %s",
-                storage_path,
-                clear_exc,
-            )
         if not quiet:
             io.emit(
                 "[yellow]Warning: account metadata was not written. "
@@ -196,9 +149,24 @@ def repair_playwright_account_metadata(
                 f"{ACCOUNT_METADATA_REMEDIATION} Details: {exc}[/yellow]"
             )
         return False
+    if not result.written:
+        if not quiet:
+            if result.error is not None:
+                io.emit(
+                    "[yellow]Warning: account metadata was not written. "
+                    "NotebookLM auth still saved, but multi-account routing may "
+                    "fall back to authuser=0. "
+                    f"{ACCOUNT_METADATA_REMEDIATION} Details: {result.error}[/yellow]"
+                )
+            else:
+                io.emit(
+                    "[yellow]Warning: account metadata was not written; "
+                    f"{result.ambiguity_reason}. {ACCOUNT_METADATA_REMEDIATION}[/yellow]"
+                )
+        return False
 
     if not quiet:
-        io.emit(f"[green]Account:[/green] {selected.email}")
+        io.emit(f"[green]Account:[/green] {result.email}")
     return True
 
 

@@ -12,10 +12,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import notebooklm.auth as auth_module
 import notebooklm.cli.playwright_login_io as playwright_login_io_module
 import notebooklm.cli.services.playwright_login as _pl
 import notebooklm.cli.session_cmd as session_cmd_module
+from notebooklm._auth import account as _auth_account
 from notebooklm._env import get_base_host
 from notebooklm.notebooklm_cli import cli
 from tests._fixtures import patch_session_login_dual
@@ -794,7 +794,7 @@ class TestLoginCommand:
                 return_value=browser_dir,
             ),
             patch_session_login_dual("_sync_server_language_to_config"),
-            patch.object(auth_module, "enumerate_accounts", new=_enum),
+            patch.object(_auth_account, "enumerate_accounts", new=_enum),
         ):
             mock_context = MagicMock()
             mock_page = MagicMock()
@@ -909,7 +909,7 @@ class TestLoginCommand:
                 return_value=browser_dir,
             ),
             patch_session_login_dual("_sync_server_language_to_config"),
-            patch.object(auth_module, "enumerate_accounts", new=_enum),
+            patch.object(_auth_account, "enumerate_accounts", new=_enum),
         ):
             mock_context = MagicMock()
             mock_page = MagicMock()
@@ -956,7 +956,7 @@ class TestLoginCommand:
                 return_value=browser_dir,
             ),
             patch_session_login_dual("_sync_server_language_to_config"),
-            patch.object(auth_module, "enumerate_accounts", new=_enum),
+            patch.object(_auth_account, "enumerate_accounts", new=_enum),
         ):
             mock_context = MagicMock()
             mock_page_stale = MagicMock()
@@ -1025,7 +1025,7 @@ class TestLoginCommand:
                 return_value=browser_dir,
             ),
             patch_session_login_dual("_sync_server_language_to_config"),
-            patch.object(auth_module, "enumerate_accounts", new=_enum),
+            patch.object(_auth_account, "enumerate_accounts", new=_enum),
         ):
             mock_context = MagicMock()
             mock_page = MagicMock()
@@ -1058,7 +1058,7 @@ class TestLoginCommand:
 
         with (
             patch_session_login_dual("get_storage_path", return_value=storage_file),
-            patch.object(auth_module, "enumerate_accounts", new=_enum),
+            patch.object(_auth_account, "enumerate_accounts", new=_enum),
             patch.object(
                 session_cmd_module, "fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch,
@@ -1095,7 +1095,7 @@ class TestLoginCommand:
 
         with (
             patch_session_login_dual("get_storage_path", return_value=storage_file),
-            patch.object(auth_module, "enumerate_accounts", new=_enum),
+            patch.object(_auth_account, "enumerate_accounts", new=_enum),
             patch.object(
                 session_cmd_module, "fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch,

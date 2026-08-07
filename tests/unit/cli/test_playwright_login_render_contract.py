@@ -54,6 +54,8 @@ import notebooklm.auth as auth_module
 import notebooklm.cli.services.playwright_login as _pl
 import notebooklm.cli.session_cmd as session_cmd_module
 import notebooklm.paths as paths_module
+from notebooklm._auth import account as _auth_account
+from notebooklm._auth import cookies as _auth_cookies
 from notebooklm._env import PERSONAL_BASE_HOST
 from notebooklm.notebooklm_cli import cli
 from tests._fixtures import patch_session_login_dual
@@ -321,13 +323,24 @@ def _drive_refresh(runner, *, enumerate_accounts: Any, args: list[str]):
         mock_fetch.return_value = ("csrf_ok", "session_ok")
         stack.enter_context(patch.object(auth_module, "read_account_metadata", return_value={}))
         # Repair collaborators (file-touching) stubbed; only enumeration varies.
-        stack.enter_context(patch.object(auth_module, "enumerate_accounts", new=enumerate_accounts))
+        # Patched on the owning _auth modules (not the notebooklm.auth facade):
+        # the repair recipe now lives entirely in
+        # _auth.account.repair_account_metadata_from_playwright_storage and
+        # calls these as bare names / a local import, so a facade-level patch
+        # would not reach it (auth cross-boundary ledger shrink, #2103).
         stack.enter_context(
-            patch.object(auth_module, "build_httpx_cookies_from_storage", return_value=MagicMock())
+            patch.object(_auth_account, "enumerate_accounts", new=enumerate_accounts)
         )
-        stack.enter_context(patch.object(auth_module, "write_account_metadata"))
-        stack.enter_context(patch.object(auth_module, "clear_account_metadata"))
-        stack.enter_context(patch.object(auth_module, "extract_email_from_html", return_value=None))
+        stack.enter_context(
+            patch.object(
+                _auth_cookies, "build_httpx_cookies_from_storage", return_value=MagicMock()
+            )
+        )
+        stack.enter_context(patch.object(_auth_account, "write_account_metadata"))
+        stack.enter_context(patch.object(_auth_account, "clear_account_metadata"))
+        stack.enter_context(
+            patch.object(_auth_account, "extract_email_from_html", return_value=None)
+        )
         return runner.invoke(cli, args)
 
 
@@ -638,10 +651,12 @@ class TestLoginProgressSuccess:
             return [Account(authuser=0, email="alice@example.com", is_default=True)]
 
         with (
-            patch.object(auth_module, "enumerate_accounts", new=_enum),
-            patch.object(auth_module, "build_httpx_cookies_from_storage", return_value=MagicMock()),
-            patch.object(auth_module, "write_account_metadata"),
-            patch.object(auth_module, "extract_email_from_html", return_value=None),
+            patch.object(_auth_account, "enumerate_accounts", new=_enum),
+            patch.object(
+                _auth_cookies, "build_httpx_cookies_from_storage", return_value=MagicMock()
+            ),
+            patch.object(_auth_account, "write_account_metadata"),
+            patch.object(_auth_account, "extract_email_from_html", return_value=None),
         ):
             result, _ = _drive_login(
                 runner,

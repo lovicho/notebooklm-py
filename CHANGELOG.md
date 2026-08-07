@@ -30,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One RotateCookies wire contract (ADR-0031 Stage 0).** The POST to
+  `accounts.google.com/RotateCookies` was independently assembled at four
+  sites — the keepalive poke, the file-based and in-memory PSIDTS recoveries,
+  and the master-token mint's completing leg — and the mint leg alone omitted
+  `raise_for_status`, so a 429/5xx there passed silently. All four now route
+  through a single wire implementation in `notebooklm._auth.keepalive`
+  (guardrail-enforced). Two observable deltas, both on the mint leg only: a
+  rejected rotation is now logged and skipped instead of silently ignored, and
+  the leg uses the canonical 15 s rotation timeout instead of inheriting the
+  mint client's 30 s. See the new
+  [ADR-0031](docs/adr/0031-credential-tier-auth-model.md) for the
+  credential-tier model this is the first stage of.
+
 - **`notebooklm.auth.__all__` is now exactly the documented public surface (38 →
   6 names).** `__all__` had been doing double duty: the CLI boundary lint forbids
   `cli/` from importing `notebooklm._*`, so every auth helper the CLI needed was
@@ -294,16 +307,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cross-account re-mint.
 
 - **`notebooklm auth refresh`'s missing-storage bootstrap no longer conflates
-  four different outcomes into one boolean (#2103 structural follow-up,
-  PR-2).** The flock/shield/recheck machinery moved from
+  four different outcomes into one boolean internally (#2103 structural
+  follow-up, PR-2).** The flock/shield/recheck machinery moved from
   `cli/services/auth_refresh.py` into `notebooklm._auth.master_token` as
   `bootstrap_storage_from_master_token`, returning an explicit
   `BootstrapOutcome` (`MINTED` / `PRESENT_AFTER_WAIT` / `PRESENT_ON_ENTRY` /
   `NO_TOKEN`) instead of a bool that could not distinguish "this call minted
   it" from "a concurrent leader already had", nor "nothing to do because
-  storage already existed" from "nothing to do because there's no token".
-  External behavior for `notebooklm auth refresh` is unchanged — the CLI maps
-  the same two outcome pairs onto the same boolean as before.
+  storage already existed" from "nothing to do because there's no token" —
+  each outcome is now logged at DEBUG. The CLI reaches the collapsed
+  boolean directly via `bootstrap_missing_storage_from_master_token`
+  (auth cross-boundary ledger shrink: `BootstrapOutcome` never needed to
+  cross the CLI boundary, since the CLI always collapsed it immediately).
+  External behavior for `notebooklm auth refresh` is unchanged.
 
 ### Changed
 

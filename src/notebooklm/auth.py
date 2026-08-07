@@ -52,8 +52,8 @@ from ._auth import tokens as _auth_tokens
 #
 # #2103 PR-2 structural follow-up: the CLI now invokes whole audited
 # TRANSACTIONS (``master_token_bootstrap`` / ``master_token_remint`` /
-# ``master_token_bootstrap_storage`` / ``assert_account_writable``) rather than
-# assembling them from primitives itself. ``exchange_master_token`` /
+# ``bootstrap_missing_storage_from_master_token`` / ``assert_account_writable``)
+# rather than assembling them from primitives itself. ``exchange_master_token`` /
 # ``mint_cookies`` / ``persist_minted_jar`` / ``write_master_token`` /
 # ``generate_android_id`` are de-blessed accordingly (kept importable —
 # ``_AUTH_DEBLESSED_KEEP_IMPORTABLE`` — for the documented low-level recipe and
@@ -61,10 +61,16 @@ from ._auth import tokens as _auth_tokens
 # them from ``notebooklm._auth.master_token`` below for that reason: they stay
 # reachable via ``notebooklm.auth.<name>`` (attribute access, unaffected by
 # ``__all__``) without being re-blessed as this facade's primary surface.
+#
+# ``BootstrapOutcome`` is deliberately NOT re-exported here (auth
+# cross-boundary ledger shrink): its only real first-party importer collapsed
+# it to a bool immediately, so ``bootstrap_missing_storage_from_master_token``
+# below does that collapse inside ``_auth`` instead of publishing the enum
+# across the boundary for one caller that never needed the fine-grained type.
 from ._auth.master_token import (  # noqa: F401
-    BootstrapOutcome,
     MasterTokenError,
     assert_account_writable,  # noqa: F401
+    bootstrap_missing_storage_from_master_token,
     exchange_master_token,
     generate_android_id,
     mint_cookies,
@@ -73,9 +79,6 @@ from ._auth.master_token import (  # noqa: F401
     write_master_token,
 )
 from ._auth.master_token import bootstrap_from_oauth_token as master_token_bootstrap  # noqa: F401
-from ._auth.master_token import (  # noqa: F401
-    bootstrap_storage_from_master_token as master_token_bootstrap_storage,
-)
 from ._auth.master_token import remint_from_stored_token as master_token_remint  # noqa: F401
 
 # Canonical login/import storage writer (refactor (b), b-PR3). Re-exported here
@@ -244,15 +247,39 @@ _ACCOUNT_CONTEXT_KEY = _auth_account._ACCOUNT_CONTEXT_KEY
 # ``_auth.account`` solely as the private site of the legacy-key scrub and the
 # one-shot promotion (whitebox tests patch the canonical home directly).
 extract_email_from_html = _auth_account.extract_email_from_html
+repair_account_metadata_from_playwright_storage = (
+    _auth_account.repair_account_metadata_from_playwright_storage
+)
 _probe_authuser = _auth_account._probe_authuser
 read_account_metadata = _auth_account.read_account_metadata
+# ``read_account_metadata_from_storage_state``'s only facade importers
+# (cli/auth_runtime.py, _app/auth_check.py) now call ``resolve_account_identity``
+# instead (auth cross-boundary ledger shrink, follow-up to #2103), so it drops
+# out of ``AUTH_CROSS_BOUNDARY_NAMES`` — but the alias below stays: unlike the
+# other names this PR moved to ``_AUTH_DEBLESSED_KEEP_IMPORTABLE``,
+# ``scripts/api-compat-allowlist.json`` explicitly records this one as
+# retained/importable, a promise dropping the alias would silently break
+# (caught in review — PR #2139).
 read_account_metadata_from_storage_state = _auth_account.read_account_metadata_from_storage_state
 get_authuser_for_storage = _auth_account.get_authuser_for_storage
 get_account_email_for_storage = _auth_account.get_account_email_for_storage
+# Both kept importable here for the frozen first-party compatibility manifest
+# (tests/_guardrails/test_public_surface_manifest.py::_AUTH_FIRST_PARTY_COMPATIBILITY_NAMES)
+# even though no cli/_app caller reaches them through the facade anymore — see
+# ``resolve_account_identity`` below and ``_AUTH_DEBLESSED_KEEP_IMPORTABLE`` in
+# test_public_surface.py.
+resolve_account_identity = _auth_account.resolve_account_identity
 format_authuser_value = _auth_account.format_authuser_value
 authuser_query = _auth_account.authuser_query
 write_account_metadata = _auth_account.write_account_metadata
 clear_account_metadata = _auth_account.clear_account_metadata
+# ``write_account_metadata`` / ``clear_account_metadata`` / ``extract_email_from_html``
+# above: their last cli/_app facade importer
+# (``cli/services/playwright_login.py::repair_playwright_account_metadata``)
+# switched to ``repair_account_metadata_from_playwright_storage`` (auth
+# cross-boundary ledger shrink, follow-up to #2103); all three stay importable
+# here for the frozen first-party compatibility manifest
+# (``_AUTH_FIRST_PARTY_COMPATIBILITY_NAMES``) and existing test callers.
 # The legacy sibling ``context.json[account]`` READ path was removed (the reader
 # is in-band-only); ``promote_legacy_account`` in ``_auth.account`` owns the
 # one-shot in-band migration, invoked from the standard cookie-load path and the

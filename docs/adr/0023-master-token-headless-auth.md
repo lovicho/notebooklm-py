@@ -85,9 +85,9 @@ previously assembled from minting primitives inside
 `cli/services/login/master_token.py` and `cli/services/auth_refresh.py` — moved
 into `_auth/master_token.py`. The CLI now invokes whole audited transactions
 (`notebooklm.auth.master_token_bootstrap` / `master_token_remint` /
-`master_token_bootstrap_storage` / `assert_account_writable`) and never
-assembles minting primitives itself; only the inherently-interactive browser
-`oauth_token` capture (Directive B) stays CLI-side.
+`bootstrap_missing_storage_from_master_token` / `assert_account_writable`) and
+never assembles minting primitives itself; only the inherently-interactive
+browser `oauth_token` capture (Directive B) stays CLI-side.
 
 - **One re-mint kernel.** `remint_from_stored_token(storage_path)` (read the
   stored token → mint → persist → reload) replaced two independent
@@ -122,13 +122,17 @@ assembles minting primitives itself; only the inherently-interactive browser
   {MINTED, PRESENT_AFTER_WAIT, PRESENT_ON_ENTRY, NO_TOKEN}` instead of a plain
   bool that conflated "this call minted it" with "a concurrent leader already
   had", and "nothing to do because storage already existed" with "nothing to
-  do because there is no token". `cli/services/auth_refresh.py` maps
-  `{MINTED, PRESENT_AFTER_WAIT} → True` (take the mandatory passive-validation
-  path) and `{PRESENT_ON_ENTRY, NO_TOKEN} → False` (ordinary recovery) —
-  identical external behavior to before this amendment, now backed by an
-  explicit state machine. The bootstrap flock (distinct from the storage-write
-  lock — holding that lock here would self-deadlock against the kernel's own
-  persist) is an ADR-0030 cold-start ENTRY POINT, not a recovery rung.
+  do because there is no token" — each outcome is logged at DEBUG, closing
+  the observability gap the enum exists to fix. The CLI never needs the
+  fine-grained type: `bootstrap_missing_storage_from_master_token` (also in
+  `_auth/master_token.py`, the only one of the two that crosses the CLI
+  boundary) does the `{MINTED, PRESENT_AFTER_WAIT} → True` /
+  `{PRESENT_ON_ENTRY, NO_TOKEN} → False` collapse internally — identical
+  external behavior to before this amendment, now backed by an explicit
+  state machine that stays fully inside `_auth`. The bootstrap flock
+  (distinct from the storage-write lock — holding that lock here would
+  self-deadlock against the kernel's own persist) is an ADR-0030 cold-start
+  ENTRY POINT, not a recovery rung.
 - **`android_id` resolution internalized.** `bootstrap_from_oauth_token`
   resolves `android_id` explicit → stored → generated inside the library; the
   CLI driver keeps only its cheap pre-capture `read_master_token` probe (fail

@@ -113,7 +113,7 @@ def test_master_token_refresh_storage_symlink_canonicalizes_to_target(tmp_path, 
     ref.assert_awaited_once_with(resolved)
 
 
-def test_master_token_bootstrap_storage_override_canonicalizes_storage_path(tmp_path, monkeypatch):
+def test_master_token_login_storage_override_canonicalizes_path(tmp_path, monkeypatch):
     """#2103: the bootstrap call must honor a canonicalized ``--storage``."""
     monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
     storage = tmp_path / "elsewhere" / "foo.json"

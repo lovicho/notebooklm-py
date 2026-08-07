@@ -191,32 +191,21 @@ def _psidts_status(storage_state: dict[str, Any]) -> dict[str, Any]:
 def _account_info(plan: AuthCheckPlan, storage_state: dict[str, Any]) -> dict[str, Any]:
     """Resolve the persisted account ``{email, authuser}`` for this profile.
 
-    For env-var auth the in-band record lives in the parsed inline JSON. For a
-    file profile, ``read_account_metadata`` (via ``get_authuser_for_storage`` /
-    ``get_account_email_for_storage``) self-heals a pre-v0.5.0 legacy
-    ``context.json[account]`` record in-band on first read — a write side
-    effect, not a "consult" — rather than returning a raw pass-through of it
-    (see ``_auth.account.promote_legacy_account``, #2103 PR-0).
+    Thin call into :func:`notebooklm._auth.account.resolve_account_identity`
+    (auth cross-boundary ledger shrink, follow-up to #2103): for env-var auth
+    the in-band record lives in the already-parsed ``storage_state``; for a
+    file profile it self-heals a pre-v0.5.0 legacy ``context.json[account]``
+    record in-band on first read — a write side effect, not a "consult" —
+    rather than returning a raw pass-through of it (see
+    ``_auth.account.promote_legacy_account``, #2103 PR-0).
     """
-    from ..auth import (
-        get_account_email_for_storage,
-        get_authuser_for_storage,
-        read_account_metadata_from_storage_state,
-    )
+    from ..auth import resolve_account_identity
 
-    if plan.has_env_auth:
-        meta = read_account_metadata_from_storage_state(storage_state)
-        raw_email = meta.get("email")
-        email = raw_email.strip() if isinstance(raw_email, str) else ""
-        raw_authuser = meta.get("authuser")
-        # Match the file path's get_authuser_for_storage: a real int only (``bool``
-        # is an ``int`` subclass, so exclude it), negatives clamped to 0.
-        authuser = raw_authuser if type(raw_authuser) is int and raw_authuser >= 0 else 0
-        return {"email": email or None, "authuser": authuser}
-    return {
-        "email": get_account_email_for_storage(plan.storage_path),
-        "authuser": get_authuser_for_storage(plan.storage_path),
-    }
+    return resolve_account_identity(
+        has_env_auth=plan.has_env_auth,
+        storage_path=plan.storage_path,
+        env_auth_storage_state=storage_state,
+    )
 
 
 def _master_token_status(plan: AuthCheckPlan) -> dict[str, Any]:

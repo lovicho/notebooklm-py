@@ -88,32 +88,27 @@ AUTH_CROSS_BOUNDARY_NAMES: list[str] = [
     "Account",
     "AccountRecord",
     "assert_account_writable",
-    "BootstrapOutcome",
+    "bootstrap_missing_storage_from_master_token",
     "build_cookie_jar",
     "build_httpx_cookies_from_storage",
     "CLEAR_ACCOUNT",
-    "clear_account_metadata",
     "cookie_names_from_storage",
     "enumerate_accounts",
     "extract_cookies_from_storage",
     "extract_cookies_with_domains",
-    "extract_email_from_html",
     "fetch_tokens_passive",
     "fetch_tokens_with_domains",
-    "get_account_email_for_storage",
-    "get_authuser_for_storage",
     "GOOGLE_REGIONAL_CCTLDS",
     "master_token_bootstrap",
-    "master_token_bootstrap_storage",
     "master_token_remint",
     "MasterTokenError",
     "missing_cookies_hint",
     "read_account_metadata",
-    "read_account_metadata_from_storage_state",
     "read_master_token",
+    "repair_account_metadata_from_playwright_storage",
     "replace_from_login",
+    "resolve_account_identity",
     "validate_with_recovery",
-    "write_account_metadata",
 ]
 
 # Names de-blessed from ``auth.__all__``: removed from the advertised surface but
@@ -137,10 +132,30 @@ AUTH_CROSS_BOUNDARY_NAMES: list[str] = [
 # (docs/python-api.md) and any external caller that already depends on them.
 # All entries here are covered rather than in ``AUTH_CROSS_BOUNDARY_NAMES``
 # (which requires a live first-party importer).
+#
+# ``get_account_email_for_storage`` / ``get_authuser_for_storage`` /
+# ``clear_account_metadata`` / ``extract_email_from_html`` / ``write_account_metadata``
+# are the exception to the "de-blessed from __all__" history above: they were
+# never public API, only cross-boundary. Their last cli/_app facade importers
+# switched to coarse ops (``resolve_account_identity`` for the first two,
+# ``repair_account_metadata_from_playwright_storage`` for the latter three —
+# auth cross-boundary ledger shrink, follow-up to #2103), but all five names
+# stay frozen on ``notebooklm.auth`` for first-party test callers
+# (``tests/_guardrails/test_public_surface_manifest.py``'s
+# ``_AUTH_FIRST_PARTY_COMPATIBILITY_NAMES``), so they land here rather than
+# disappearing from the facade entirely.
+#
+# ``read_account_metadata_from_storage_state`` joined the same follow-up for a
+# different reason: it is not in ``_AUTH_FIRST_PARTY_COMPATIBILITY_NAMES``, but
+# ``scripts/api-compat-allowlist.json`` explicitly records it as a "de-advertisement,
+# not removal" that stays importable — dropping the facade alias entirely (as an
+# earlier revision of this PR did) silently broke that documented promise with no
+# guardrail catching it, since the audit script only diffs ``__all__`` membership.
 _AUTH_DEBLESSED_KEEP_IMPORTABLE: list[str] = [
     "advance_cookie_snapshot_after_save",
     "ALLOWED_COOKIE_DOMAINS",
     "authuser_query",
+    "clear_account_metadata",
     "CookieSaveResult",
     "CookieSnapshot",
     "CookieSnapshotKey",
@@ -148,11 +163,14 @@ _AUTH_DEBLESSED_KEEP_IMPORTABLE: list[str] = [
     "drop_legacy_account_key",
     "exchange_master_token",
     "extract_csrf_from_html",
+    "extract_email_from_html",
     "extract_session_id_from_html",
     "extract_wiz_field",
     "fetch_tokens",
     "format_authuser_value",
     "generate_android_id",
+    "get_account_email_for_storage",
+    "get_authuser_for_storage",
     "KEEP_ACCOUNT",
     "KEEPALIVE_ROTATE_URL",
     "load_auth_from_storage",
@@ -165,9 +183,11 @@ _AUTH_DEBLESSED_KEEP_IMPORTABLE: list[str] = [
     "NOTEBOOKLM_REFRESH_CMD_ENV",
     "NOTEBOOKLM_REFRESH_CMD_USE_SHELL_ENV",
     "persist_minted_jar",
+    "read_account_metadata_from_storage_state",
     "recover_psidts_in_memory",
     "save_cookies_to_storage",
     "snapshot_cookie_jar",
+    "write_account_metadata",
     "write_master_token",
 ]
 
@@ -466,9 +486,17 @@ def test_auth_deblessed_names_stay_importable_but_unblessed() -> None:
     master-token-relocation PR-0 (issue #2103), plus 5 master-token minting
     primitives (``exchange_master_token`` / ``mint_cookies`` /
     ``persist_minted_jar`` / ``write_master_token`` / ``generate_android_id``)
-    whose last ``src/`` importers were removed by the same relocation's PR-2.
+    whose last ``src/`` importers were removed by the same relocation's PR-2, plus
+    ``get_account_email_for_storage`` / ``get_authuser_for_storage`` / ``clear_account_metadata``
+    / ``extract_email_from_html`` / ``write_account_metadata``, whose last cli/_app
+    facade importers switched to ``resolve_account_identity`` /
+    ``repair_account_metadata_from_playwright_storage`` in the auth
+    cross-boundary ledger shrink (follow-up to #2103), plus
+    ``read_account_metadata_from_storage_state``, whose facade alias the same
+    follow-up must keep per ``scripts/api-compat-allowlist.json``'s explicit
+    retained-and-importable promise.
     """
-    assert len(_AUTH_DEBLESSED_KEEP_IMPORTABLE) == 31
+    assert len(_AUTH_DEBLESSED_KEEP_IMPORTABLE) == 37
     assert len(_AUTH_DEBLESSED_KEEP_IMPORTABLE) == len(set(_AUTH_DEBLESSED_KEEP_IMPORTABLE)), (
         "_AUTH_DEBLESSED_KEEP_IMPORTABLE must not contain duplicates"
     )

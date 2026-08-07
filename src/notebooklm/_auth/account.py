@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -540,6 +541,40 @@ def get_account_email_for_storage(storage_path: Path | None) -> str | None:
     return None
 
 
+def resolve_account_identity(
+    *,
+    has_env_auth: bool,
+    storage_path: Path | None = None,
+    env_auth_storage_state: Any = None,
+) -> dict[str, Any]:
+    """Resolve the persisted ``{email, authuser}`` identity for a profile.
+
+    Consolidates a sanitization recipe that used to be duplicated verbatim at
+    ``cli/auth_runtime.py::get_auth_tokens`` and ``_app/auth_check.py::_account_info``
+    (auth cross-boundary ledger shrink, follow-up to #2103): both callers read the
+    in-band account record then apply the identical authuser/email cleanup — an
+    ``int`` authuser clamped to ``>= 0`` (default 0; ``bool`` excluded since it is
+    an ``int`` subclass), and an email stripped-or-``None``.
+
+    The two callers differ only in WHERE the record comes from, not in what they
+    do with it: env-var auth carries no profile directory, so the caller must pass
+    its own already-parsed ``env_auth_storage_state`` (``_app/`` never reads
+    ``os.environ`` directly, and ``cli/auth_runtime.py`` already has the CLI's
+    consolidated ``read_env_auth_json()`` payload in hand by the time it gets
+    here); file-based auth resolves straight from ``storage_path`` via
+    :func:`read_account_metadata`.
+    """
+    if has_env_auth:
+        meta = read_account_metadata_from_storage_state(env_auth_storage_state)
+    else:
+        meta = read_account_metadata(storage_path)
+    raw_email = meta.get("email")
+    email = raw_email.strip() if isinstance(raw_email, str) else ""
+    raw_authuser = meta.get("authuser")
+    authuser = raw_authuser if type(raw_authuser) is int and raw_authuser >= 0 else 0
+    return {"email": email or None, "authuser": authuser}
+
+
 def format_authuser_value(authuser: int = 0, account_email: str | None = None) -> str:
     """Return the explicit NotebookLM auth routing value.
 
@@ -681,3 +716,101 @@ def _clear_in_band_account(storage_path: Path) -> None:
     from . import storage_writer  # local import: avoid the account<->writer cycle
 
     storage_writer.clear_in_band_account(storage_path)
+
+
+def _select_playwright_account(
+    accounts: list[Account],
+    *,
+    active_email: str | None,
+) -> tuple[Account | None, str | None]:
+    """Select the account Playwright just logged into, or an ambiguity reason."""
+    if active_email:
+        normalized = active_email.casefold()
+        matches = [
+            account
+            for account in accounts
+            if isinstance(account.email, str) and account.email.casefold() == normalized
+        ]
+        if len(matches) == 1:
+            return matches[0], None
+        if matches:
+            return None, f"multiple discovered accounts matched {active_email}"
+        return None, f"current NotebookLM page email {active_email} was not discovered"
+
+    if len(accounts) == 1:
+        return accounts[0], None
+    if accounts:
+        return (
+            None,
+            "multiple Google accounts were discovered but the active page email was unavailable",
+        )
+    return None, "no Google accounts were discovered"
+
+
+@dataclass(frozen=True)
+class PlaywrightAccountRepairResult:
+    """Outcome of :func:`repair_account_metadata_from_playwright_storage`.
+
+    Exactly one of ``ambiguity_reason`` / ``error`` is set when ``written`` is
+    ``False`` — callers use which one is set to pick between the two distinct
+    user-facing warnings (a clean "could not disambiguate" vs. an unexpected
+    failure worth surfacing exception detail for).
+    """
+
+    written: bool
+    email: str | None = None
+    ambiguity_reason: str | None = None
+    error: str | None = None
+
+
+async def repair_account_metadata_from_playwright_storage(
+    storage_path: Path,
+    *,
+    page_html: str | None = None,
+) -> PlaywrightAccountRepairResult:
+    """Populate ``notebooklm.account`` from Playwright storage when unambiguous.
+
+    Consolidates a recipe that used to live in ``cli/services/playwright_login.py``
+    (auth cross-boundary ledger shrink, follow-up to #2103): identify the active
+    page's account from ``page_html`` if given, probe the storage's cookie jar for
+    every Google account it can authenticate as, and select the one Playwright
+    just logged into. Ambiguous multi-account states are left unbound after
+    clearing stale metadata, matching the pre-consolidation behavior exactly —
+    including the best-effort clear (and its own swallowed-failure log) on an
+    unexpected ``OSError`` / ``ValueError`` / ``RuntimeError`` /
+    ``httpx.HTTPError`` from the probe or the write.
+
+    No presentation side effects: the CLI caller (``cli/services/playwright_login.py``)
+    owns the ``LoginIO``-mediated user-facing messages, keyed off which field of
+    the result is set.
+    """
+    from .cookies import build_httpx_cookies_from_storage
+    from .keepalive import _poke_session
+
+    active_email = extract_email_from_html(page_html) if isinstance(page_html, str) else None
+    try:
+        # ``build_httpx_cookies_from_storage`` is synchronous (blocking file I/O
+        # and, on a missing/expired PSIDTS, an inline recovery POST) — this
+        # function is ``async`` now (it wasn't before this consolidation), so
+        # the call must go through a thread like every other async caller of
+        # this function in ``_auth`` (``recovery.py``, ``refresh.py``,
+        # ``master_token.py``) rather than blocking the event loop directly.
+        jar = await asyncio.to_thread(build_httpx_cookies_from_storage, storage_path)
+        # ``poke_session`` matches what the ``notebooklm.auth`` facade's own
+        # ``enumerate_accounts`` wrapper injects — this internal call must not
+        # silently drop the keepalive session-freshness poke.
+        accounts = await enumerate_accounts(jar, poke_session=_poke_session)
+        selected, reason = _select_playwright_account(accounts, active_email=active_email)
+        if selected is None:
+            clear_account_metadata(storage_path)
+            return PlaywrightAccountRepairResult(written=False, ambiguity_reason=reason)
+        write_account_metadata(storage_path, authuser=selected.authuser, email=selected.email)
+        return PlaywrightAccountRepairResult(written=True, email=selected.email)
+    except (OSError, ValueError, RuntimeError, httpx.HTTPError) as exc:
+        try:
+            clear_account_metadata(storage_path)
+        except Exception as clear_exc:  # noqa: BLE001 — best-effort cleanup must not mask exc
+            logger.warning(
+                "Failed to clear stale account metadata for %s: %s", storage_path, clear_exc
+            )
+        return PlaywrightAccountRepairResult(written=False, error=str(exc))

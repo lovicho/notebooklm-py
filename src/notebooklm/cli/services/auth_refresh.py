@@ -1,30 +1,19 @@
-"""Click-free orchestration helpers for ``notebooklm auth refresh``."""
+"""Click-free orchestration helpers for ``notebooklm auth refresh``.
+
+``bootstrap_missing_storage_from_master_token`` is a pure re-export (auth
+cross-boundary ledger shrink, follow-up to #2103 PR-2/PR-3): the
+bootstrap-flock machinery AND the four-state-outcome-to-bool collapse both
+live in :mod:`notebooklm._auth.master_token` now — this module previously
+did the collapse itself, importing both ``BootstrapOutcome`` and the
+enum-returning coarse op across the ``cli/`` boundary to do it. Re-exported
+here (rather than imported directly by ``cli/playwright_login_io.py``) to
+preserve the existing call path
+(``auth_refresh_service.bootstrap_missing_storage_from_master_token``) tests
+already exercise.
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from ...auth import BootstrapOutcome, master_token_bootstrap_storage
-
-
-async def bootstrap_missing_storage_from_master_token(storage_path: Path) -> bool:
-    """Mint initial storage when only the sibling master token exists.
-
-    Thin call into the bootstrap transaction (#2103 PR-2 D7 — the flock /
-    shield / recheck machinery that used to live here now lives in
-    :func:`notebooklm._auth.master_token.bootstrap_storage_from_master_token`,
-    reached only through the public ``notebooklm.auth`` facade since ``cli/``
-    may not import ``notebooklm._*``). Maps the four-state
-    :class:`~notebooklm.auth.BootstrapOutcome` onto the boolean this caller
-    (``cli/playwright_login_io.py``) has always used: ``MINTED`` and
-    ``PRESENT_AFTER_WAIT`` both mean "storage is ready, take the mandatory
-    passive-validation path"; ``PRESENT_ON_ENTRY`` and ``NO_TOKEN`` both mean
-    "nothing was bootstrapped here, enter ordinary recovery" — exactly
-    today's semantics, made explicit rather than collapsed into one bool
-    before it ever reaches this module.
-    """
-    outcome = await master_token_bootstrap_storage(storage_path)
-    return outcome in (BootstrapOutcome.MINTED, BootstrapOutcome.PRESENT_AFTER_WAIT)
-
+from ...auth import bootstrap_missing_storage_from_master_token
 
 __all__ = ["bootstrap_missing_storage_from_master_token"]

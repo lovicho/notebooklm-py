@@ -183,23 +183,16 @@ async def mint_cookies(email: str, master_token: str, android_id: str) -> httpx.
             )
             # Mint __Secure-1PSIDTS now too (the rotating freshness partner of
             # __Secure-1PSID) so the stored jar is complete and valid at rest — no
-            # first-call recovery needed and `auth check` passes immediately. This
-            # is the same RotateCookies POST the keepalive/inline recovery use; it
-            # needs the SID + APISID/SAPISID binding the MergeSession jar already
-            # carries. Best-effort: Google may withhold it, and inline recovery
-            # remains the fallback, so a failure here must not fail the mint.
-            from .keepalive import (  # noqa: PLC0415 (low-level; avoid import cycle)
-                _KEEPALIVE_ROTATE_BODY,
-                _KEEPALIVE_ROTATE_HEADERS,
-                KEEPALIVE_ROTATE_URL,
-            )
+            # first-call recovery needed and `auth check` passes immediately.
+            # ``_rotate_post`` is the same single-wire-contract RotateCookies
+            # POST every other rotation path uses; it needs the SID +
+            # APISID/SAPISID binding the MergeSession jar already carries.
+            # Best-effort: Google may withhold it, and inline recovery remains
+            # the fallback, so a failure here must not fail the mint.
+            from .keepalive import _rotate_post  # noqa: PLC0415 (avoid import cycle)
 
             try:
-                await client.post(
-                    KEEPALIVE_ROTATE_URL,
-                    headers=_KEEPALIVE_ROTATE_HEADERS,
-                    content=_KEEPALIVE_ROTATE_BODY,
-                )
+                await _rotate_post(client)
             except httpx.HTTPError as exc:
                 logger.debug("RotateCookies during mint failed (non-fatal): %s", exc)
             jar = httpx.Cookies()
@@ -609,6 +602,26 @@ async def bootstrap_storage_from_master_token(storage_path: Path) -> BootstrapOu
     outcome = await _resolve_bootstrap_outcome(storage_path)
     logger.debug("bootstrap_storage_from_master_token(%s) -> %s", storage_path, outcome)
     return outcome
+
+
+async def bootstrap_missing_storage_from_master_token(storage_path: Path) -> bool:
+    """Mint initial storage when only the sibling master token exists,
+    collapsed to the boolean ``cli/services/auth_refresh.py`` has always
+    used (auth cross-boundary ledger shrink, follow-up to #2103 PR-2/PR-3):
+    ``MINTED`` and ``PRESENT_AFTER_WAIT`` both mean "storage is ready, take
+    the mandatory passive-validation path"; ``PRESENT_ON_ENTRY`` and
+    ``NO_TOKEN`` both mean "nothing was bootstrapped here, enter ordinary
+    recovery".
+
+    ``BootstrapOutcome`` itself stays internal to this module — its only
+    real first-party importer collapsed it to a bool immediately after the
+    call, so publishing the enum across the CLI boundary bought no caller
+    anything (the DEBUG log two lines up already gives the fine-grained
+    observability the type was introduced for). Callers that need the raw
+    4-state result should call :func:`bootstrap_storage_from_master_token`
+    directly (available inside ``_auth``, not across the boundary)."""
+    outcome = await bootstrap_storage_from_master_token(storage_path)
+    return outcome in (BootstrapOutcome.MINTED, BootstrapOutcome.PRESENT_AFTER_WAIT)
 
 
 async def _resolve_bootstrap_outcome(storage_path: Path) -> BootstrapOutcome:

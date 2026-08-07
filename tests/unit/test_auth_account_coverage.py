@@ -20,6 +20,7 @@ import httpx
 import pytest
 
 from notebooklm._auth import account as _auth_account
+from notebooklm._auth import keepalive as _auth_keepalive
 from notebooklm._auth.account import (
     Account,
     _clear_in_band_account,
@@ -35,6 +36,7 @@ from notebooklm._auth.account import (
     promote_legacy_account,
     read_account_metadata,
     read_account_metadata_from_storage_state,
+    repair_account_metadata_from_playwright_storage,
     write_account_metadata,
 )
 
@@ -91,6 +93,39 @@ class TestEnumerateAccountsPokeHook:
         accounts = await enumerate_accounts(jar, max_authuser=2)
 
         assert accounts == [Account(authuser=0, email="alice@example.com", is_default=True)]
+
+
+class TestRepairAccountMetadataPokeSession:
+    """``repair_account_metadata_from_playwright_storage`` must inject the same
+    keepalive poke hook the ``notebooklm.auth`` facade's ``enumerate_accounts``
+    wrapper injects (issue found reviewing #2103's auth cross-boundary ledger
+    shrink, Phase 5): calling the bare ``_auth.account.enumerate_accounts``
+    entry point without ``poke_session`` silently skips the hook (see
+    ``TestEnumerateAccountsPokeHook`` above) — a coarse internal function that
+    forgets to pass it through would silently drop the keepalive rotation poke
+    for this call site with no test failure to catch it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_poke_session_is_injected(self, tmp_path, monkeypatch):
+        calls: list[dict] = []
+
+        async def fake_enumerate(jar, **kwargs):
+            calls.append(kwargs)
+            return [Account(authuser=0, email="alice@example.com", is_default=True)]
+
+        from notebooklm._auth import cookies as _auth_cookies
+
+        monkeypatch.setattr(_auth_account, "enumerate_accounts", fake_enumerate)
+        monkeypatch.setattr(
+            _auth_cookies, "build_httpx_cookies_from_storage", lambda path: httpx.Cookies()
+        )
+
+        storage_path = tmp_path / "storage_state.json"
+        result = await repair_account_metadata_from_playwright_storage(storage_path)
+
+        assert result.written is True
+        assert calls and calls[0].get("poke_session") is _auth_keepalive._poke_session
 
 
 class TestReadInBandAccount:
