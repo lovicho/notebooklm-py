@@ -76,46 +76,79 @@ _GRANDFATHERED: dict[tuple[str, str], int] = {
 }
 
 
-def _renamed_imports(tree: ast.AST) -> dict[str, str]:
-    """Map local binding -> ratcheted function for ``from … import f as g``.
+def _local_bindings(tree: ast.AST) -> dict[str, str]:
+    """Map local binding -> ratcheted function, for both rebinding idioms.
 
-    Rename-on-import is a live idiom in this package (``_auth/storage_writer.py``
-    imports ``_atomic_write_json_unchecked as atomic_write_json``), so without
-    this the gate would have a real bypass, not a theoretical one: bind the
-    function to any other name and the call node no longer carries a ratcheted
-    one. Resolved back to the canonical name so ``_GRANDFATHERED`` stays keyed
-    on the real function regardless of what a caller called it.
+    Either spelling puts a non-ratcheted name on the call node, so a scan that
+    only matched literal names would have a real bypass rather than a
+    theoretical one — both idioms are live in this package:
+
+    * ``from … import f as g`` — ``_auth/storage_writer.py`` imports
+      ``_atomic_write_json_unchecked as atomic_write_json``.
+    * ``g = mod.f`` — the compat re-export surface in ``auth.py`` rebinds ALL
+      FOUR ratcheted names this way, and ``_auth/refresh.py`` rebinds
+      ``flatten_cookie_map``. Neither module calls its rebind today, but the
+      bindings sit in the module where such a call is most plausible.
+
+    Resolved back to the canonical name so ``_GRANDFATHERED`` stays keyed on the
+    real function regardless of what a caller called it. The re-export
+    statements themselves are ``ast.Assign``, not ``ast.Call``, so recognizing
+    them here does not make them count as call sites.
+
+    **Assignments are honored only at module level, deliberately.** ``ast.walk``
+    flattens every scope into one view, so a function-local ``alias = mod.f``
+    would otherwise resolve an unrelated ``alias(...)`` in a *different*
+    function as a conversion — a binding Python never shared. The accepted cost
+    is a narrow false negative: a function-local rebind is no longer caught.
+    That trade is the right way round for a block-new-debt ratchet. A missed
+    obscure local alias costs one uncaught call; reding on unrelated code costs
+    the gate its credibility and teaches people to route around it. Every real
+    binding in this repo today (``auth.py`` 126-131, ``_auth/refresh.py`` 59) is
+    module level.
+
+    Resolution is also one hop only: ``g = mod.f`` binds, but a chain through
+    it (``h = g``) does not, since ``g`` is not itself a ratcheted name. Both
+    idioms present in this repo are one hop, so that is where the gate stops.
     """
-    return {
-        alias.asname: alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        for alias in node.names
-        if alias.name in _RATCHETED and alias.asname
-    }
+    bindings: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in _RATCHETED and alias.asname:
+                    bindings[alias.asname] = alias.name
+    for node in tree.body if isinstance(tree, ast.Module) else []:
+        if isinstance(node, ast.Assign):
+            source = _callee_name(node.value)
+            if source in _RATCHETED:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        bindings[target.id] = source
+    return bindings
+
+
+def _callee_name(node: ast.expr) -> str | None:
+    """The bare name of ``f`` / ``mod.f``, or ``None`` for any other expression."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
 
 
 def _module_call_sites(rel: str, tree: ast.AST) -> Counter[tuple[str, str]]:
     """Count the ``(module, ratcheted function)`` calls in one module."""
-    renamed = _renamed_imports(tree)
+    bindings = _local_bindings(tree)
     found: Counter[tuple[str, str]] = Counter()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
         # Matches both ``f(...)`` and ``mod.f(...)`` so aliasing a module
         # (the ``_auth_cookies.f(...)`` idiom used throughout _auth) does
         # not slip past the gate.
-        name = (
-            func.id
-            if isinstance(func, ast.Name)
-            else func.attr
-            if isinstance(func, ast.Attribute)
-            else None
-        )
+        name = _callee_name(node.func)
         if name is None:
             continue
-        resolved = renamed.get(name, name)
+        resolved = bindings.get(name, name)
         if resolved in _RATCHETED:
             found[(rel, resolved)] += 1
     return found
@@ -187,6 +220,10 @@ def test_no_new_bespoke_cookie_conversions() -> None:
             "from x import normalize_cookie_map as _n\n_n({})\n",
             id="renamed-on-import",
         ),
+        pytest.param(
+            "import x\n_n = x.normalize_cookie_map\n_n({})\n",
+            id="rebound-by-assignment",
+        ),
     ],
 )
 def test_every_call_spelling_is_caught(source: str) -> None:
@@ -218,6 +255,37 @@ def test_grandfathered_entries_are_all_live() -> None:
             for (module, func), (count, ceiling) in sorted(slack.items())
         )
     )
+
+
+def test_function_local_rebinding_does_not_leak_across_scopes() -> None:
+    """A binding made inside one function must not resolve a call in another.
+
+    ``ast.walk`` flattens scopes, so without the module-level restriction the
+    ``alias`` bound in ``a`` would resolve ``b``'s unrelated ``alias`` parameter
+    as a conversion — a false positive on code that converts nothing. Also pins
+    the accepted cost: ``a``'s own in-scope call is not counted either.
+    """
+    tree = ast.parse(
+        "import x\n"
+        "def a():\n"
+        "    alias = x.normalize_cookie_map\n"
+        "    return alias({})\n"
+        "def b(alias):\n"
+        "    return alias({})\n"
+    )
+    assert _module_call_sites("_auth/probe.py", tree) == Counter()
+
+
+def test_a_reexport_assignment_is_not_a_call_site() -> None:
+    """Rebinding for re-export is not a conversion, and must stay uncounted.
+
+    ``auth.py`` rebinds all four ratcheted names this way for its compat
+    surface. Counting the assignment itself would put four phantom sites on a
+    module that performs no conversion, which would either red the gate or
+    force bogus pins.
+    """
+    tree = ast.parse("import x\nnormalize_cookie_map = x.normalize_cookie_map\n")
+    assert _module_call_sites("auth.py", tree) == Counter()
 
 
 def test_an_extra_call_in_a_grandfathered_module_is_caught() -> None:
