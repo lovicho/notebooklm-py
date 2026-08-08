@@ -111,6 +111,11 @@ from .storage import (
     _LOCK_ACQUIRE_DEADLINE_SECONDS,
     _LOCK_ACQUIRE_INITIAL_DELAY_SECONDS,
 )
+from .storage_transaction import (
+    in_storage_transaction,
+    raise_on_lock_unavailable,
+    skip_on_lock_unavailable,
+)
 
 if TYPE_CHECKING:
     import httpx
@@ -481,15 +486,7 @@ def update_account_metadata(
     if email:
         account_payload["email"] = email
 
-    lock_path = _storage_state_lock_path(storage_path)
-    _ensure_secure_parent_dir(storage_path)
-    with _acquire_storage_lock(
-        lock_path, log_prefix="write_account_metadata", deadline_seconds=deadline_seconds
-    ) as state:
-        if state != "held":
-            raise LockUnavailableError(
-                f"write_account_metadata: storage lock unavailable at {lock_path}"
-            )
+    def _write() -> bool:
         data = _account._load_storage_state_for_write(storage_path)
         namespace = data.get(_account._STORAGE_NAMESPACE_KEY)
         if not isinstance(namespace, dict):
@@ -501,6 +498,19 @@ def update_account_metadata(
         data[_account._STORAGE_NAMESPACE_KEY] = namespace
         atomic_write_json(storage_path, data)
         return True
+
+    # MUST-KNOW via exception: the ``bool`` return already spends ``False`` on
+    # the ``only_if_absent`` no-op above, so it cannot also carry "could not
+    # acquire" without conflating *chose not to* with *could not*.
+    return bool(
+        in_storage_transaction(
+            storage_path,
+            _write,
+            log_prefix="write_account_metadata",
+            on_unavailable=raise_on_lock_unavailable("write_account_metadata"),
+            deadline_seconds=deadline_seconds,
+        )
+    )
 
 
 def clear_in_band_account(storage_path: Path) -> None:
@@ -515,14 +525,8 @@ def clear_in_band_account(storage_path: Path) -> None:
 
     if not storage_path.exists():
         return
-    lock_path = _storage_state_lock_path(storage_path)
-    _ensure_secure_parent_dir(storage_path)
-    with _acquire_storage_lock(lock_path, log_prefix="clear_account_metadata") as state:
-        if state != "held":
-            # Best-effort: the same failure mode the old filelock OSError arm
-            # swallowed. The legacy reader still resolves the account record.
-            logger.debug("in-band account clear skipped: storage lock unavailable at %s", lock_path)
-            return
+
+    def _clear() -> None:
         try:
             data = json.loads(storage_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
@@ -539,6 +543,19 @@ def clear_in_band_account(storage_path: Path) -> None:
         else:
             data[_account._STORAGE_NAMESPACE_KEY] = namespace
         atomic_write_json(storage_path, data)
+
+    # TOLERABLE: the same failure mode the old filelock OSError arm swallowed.
+    # See the caveat on ``skip_on_lock_unavailable`` — the functional argument
+    # (the legacy reader still resolves the record) is narrower than this
+    # operation's privacy motive, and that tension is tracked in ADR-0031.
+    in_storage_transaction(
+        storage_path,
+        _clear,
+        log_prefix="clear_account_metadata",
+        on_unavailable=skip_on_lock_unavailable(
+            "in-band account clear skipped: storage lock unavailable at %s"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -943,17 +960,22 @@ def write_master_token(path: Path, *, email: str, master_token: str, android_id:
     """
     from . import master_token as _master_token  # lazy: avoid import cycle
 
-    _ensure_secure_parent_dir(path)
     payload = {
         "version": _master_token._MASTER_TOKEN_VERSION,
         "email": email,
         "android_id": android_id,
         "master_token": master_token,
     }
-    # Sibling dotted lock for the credential file (distinct from the profile's
-    # storage-state lock — a different file).
-    lock_path = _storage_state_lock_path(path)
-    with _acquire_storage_lock(lock_path, log_prefix="write_master_token") as state:
-        if state != "held":
-            raise LockUnavailableError(f"write_master_token: lock unavailable at {lock_path}")
+
+    def _write() -> None:
         atomic_write_json(path, payload)
+
+    # The transaction template derives the sibling dotted lock for this
+    # credential file (distinct from the profile's storage-state lock — a
+    # different file) and ensures the parent dir is secure before taking it.
+    in_storage_transaction(
+        path,
+        _write,
+        log_prefix="write_master_token",
+        on_unavailable=raise_on_lock_unavailable("write_master_token"),
+    )

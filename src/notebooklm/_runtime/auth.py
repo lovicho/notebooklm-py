@@ -300,6 +300,14 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
     def update_auth_headers(self, *, auth: AuthTokens, kernel: Kernel) -> None:
         """Sync ``auth.cookie_jar`` with the live HTTP client's jar.
 
+        Compat-only (ADR-0032 Phase A): the kernel's jar is already the sole
+        internal live-cookie authority — persistence reads ``kernel.cookies``
+        and no internal code reads ``auth.cookie_jar`` after open. This
+        write-back exists solely so a PUBLIC holder of ``auth`` that reads
+        ``auth.cookies`` / ``auth.cookie_jar`` sees fresh values. When those
+        fields are removed (ADR-0032 Phase B, next major), this method and the
+        write-back go with them.
+
         Synchronous on purpose — no await — so callers can run this without
         any auth lock held. The httpx client's cookie jar is authoritative
         once the session is open; re-injecting startup cookies here would
@@ -313,7 +321,10 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
             RuntimeError: If the kernel's HTTP client is not initialised (the
                 error originates from :meth:`Kernel.get_http_client`).
         """
-        auth.cookie_jar = kernel.get_http_client().cookies
+        # Rebinds the derived ``auth.cookies`` map alongside the jar. Assigning
+        # ``auth.cookie_jar`` directly here left the public ``auth.cookies``
+        # describing the pre-refresh session (ADR-0031 Stage 4).
+        auth.replace_cookie_jar(kernel.get_http_client().cookies)
 
     # ------------------------------------------------------------------
     # Single-flight refresh task.

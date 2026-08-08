@@ -131,6 +131,52 @@ class CookieJar:
             )
         )
 
+    @classmethod
+    def from_httpx(cls, jar: httpx.Cookies) -> CookieJar:
+        """Snapshot a live ``httpx.Cookies`` jar into an immutable jar.
+
+        Preserves ``expires`` / ``secure`` / ``http_only`` straight off the
+        underlying ``http.cookiejar.Cookie`` objects — only ``same_site`` is
+        lost, and unavoidably so.
+
+        Applies the same allowed-auth-domain + non-``None`` value filter as
+        :func:`notebooklm._auth.cookies._cookie_map_from_jar` (the contract
+        that builds ``AuthTokens.cookies``), so this constructor cannot hold a
+        row the rest of the layer would have filtered out — a non-auth-domain
+        cookie named ``SID``/``OSID`` must not let ``.jar`` report a binding the
+        filtered ``cookies`` view correctly excludes.
+
+        .. warning::
+           **``same_site``-lossy — never for persistence or a save baseline.**
+           ``http.cookiejar.Cookie`` cannot carry a SameSite attribute, so every
+           ``Cookie`` produced here has ``same_site=None`` regardless of the
+           cookie's actual SameSite. Round-tripping this jar through
+           :meth:`to_storage_state` would drop ``sameSite`` — the exact #2150
+           downgrade. Use this only to ask read-only questions of the live
+           session (``names`` / ``validate_required`` / ``has_secondary_binding``),
+           which do not depend on SameSite. The delta/baseline machinery keeps
+           SameSite out-of-band (``storage._preserved_same_site``) and must not be
+           fed a ``from_httpx`` jar.
+        """
+        return cls(
+            tuple(
+                Cookie(
+                    name=c.name,
+                    domain=c.domain,
+                    path=c.path or "/",
+                    value=c.value,
+                    expires=c.expires,
+                    secure=bool(c.secure),
+                    http_only=_auth_cookies._cookie_is_http_only(c),
+                )
+                for c in jar.jar
+                if c.name
+                and c.domain
+                and c.value is not None
+                and _auth_cookies._is_allowed_auth_domain(c.domain)
+            )
+        )
+
     # -- converters --------------------------------------------------------
 
     def to_domain_map(self) -> dict[tuple[str, str, str], str]:
