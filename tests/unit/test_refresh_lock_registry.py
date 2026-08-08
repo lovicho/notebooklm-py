@@ -259,7 +259,7 @@ class TestResolvedPathEquivalence:
 
         captured_keys: list[str] = []
 
-        async def spy_coalesced(refresh_key, resolved_storage_path, profile):
+        async def spy_coalesced(refresh_key, resolved_storage_path, profile, *, deps=None):
             captured_keys.append(refresh_key)
             return None
 
@@ -370,7 +370,10 @@ class TestCrossLoopCoalescing:
         def fake_snapshot(jar):
             return None
 
-        monkeypatch.setattr(_auth_refresh, "_run_refresh_cmd", fake_run_refresh_cmd)
+        # The subprocess runner is INJECTED via ``RefreshCmdDeps`` (plan §7 deps
+        # record). Both threads pass the SAME record, which is what the module
+        # attribute used to give them implicitly.
+        deps = _auth_refresh.RefreshCmdDeps(run_refresh_cmd=fake_run_refresh_cmd)
         monkeypatch.setattr(_auth_refresh, "_fetch_tokens_with_jar", fake_fetch_tokens_with_jar)
         monkeypatch.setattr(
             _auth_refresh, "build_httpx_cookies_from_storage", fake_build_httpx_cookies
@@ -383,7 +386,9 @@ class TestCrossLoopCoalescing:
         def run_in_own_loop():
             async def _work():
                 jar = httpx.Cookies()
-                return await auth_mod._fetch_tokens_with_refresh(jar, storage_path=storage)
+                return await auth_mod._fetch_tokens_with_refresh(
+                    jar, storage_path=storage, deps=deps
+                )
 
             try:
                 res = asyncio.run(_work())
@@ -473,24 +478,29 @@ class TestFlockLoserWaitsThenReloads:
             calls["n"] += 1
             yield calls["n"] >= 3
 
-        # The leader body's acquire resolves the flock via the refresh alias; the
-        # wait poll resolves it via keepalive. Install the SAME stateful fake on
-        # both names so one counter spans the acquire AND the poll loop.
-        monkeypatch.setattr(_auth_refresh, "_file_lock_try_exclusive", fake_try)
-        monkeypatch.setattr(_keepalive, "_file_lock_try_exclusive", fake_try)
-        monkeypatch.setattr(_auth_refresh, "_refresh_lock_path", lambda p: tmp_path / ".x.lock")
-
         ran: list[Path] = []
 
         async def fake_run(path, profile):
             ran.append(path)
 
-        monkeypatch.setattr(_auth_refresh, "_run_refresh_cmd", fake_run)
+        # The leader body's acquire + lock-path derivation + subprocess runner
+        # are INJECTED (``RefreshCmdDeps``), not monkeypatched onto the module —
+        # the ``_file_lock_try_exclusive`` / ``_refresh_lock_path`` aliases that
+        # existed purely as a patching protocol are gone. The wait poll still
+        # resolves the flock through ``keepalive`` (it lives there), so install
+        # the SAME stateful fake on that name too: one counter must span the
+        # leader's acquire AND the poll loop.
+        deps = _auth_refresh.RefreshCmdDeps(
+            run_refresh_cmd=fake_run,
+            acquire_refresh_flock=fake_try,
+            derive_refresh_lock_path=lambda p: tmp_path / ".x.lock",
+        )
+        monkeypatch.setattr(_keepalive, "_file_lock_try_exclusive", fake_try)
 
         storage = tmp_path / "storage_state.json"
         key = str(storage)
         before = _single_flight.read_success_epoch(key)
-        await _auth_refresh._refresh_cmd_leader_body(key, storage, None)
+        await _auth_refresh._refresh_cmd_leader_body(key, storage, None, deps=deps)
 
         assert ran == [], "the flock loser must NOT run its own subprocess"
         assert _single_flight.read_success_epoch(key) == before, "loser must not bump the epoch"

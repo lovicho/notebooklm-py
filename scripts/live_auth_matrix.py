@@ -391,7 +391,7 @@ class Matrix:
         script = (
             "import json, sys\n"
             "from pathlib import Path\n"
-            "from notebooklm._auth.storage_writer import replace_from_login\n"
+            "from notebooklm._auth.storage import replace_from_login\n"
             "p=Path(sys.argv[1]); state=json.loads(Path(sys.argv[2]).read_text())\n"
             "[replace_from_login(p, state, include_domains=None) for _ in range(10000)]\n"
         )

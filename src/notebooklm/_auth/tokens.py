@@ -41,9 +41,10 @@ class AuthTokens:
             ``0`` (the default account) is used when no in-band account
             metadata is present in ``storage_state.json``, matching
             pre-multi-account behavior. A pre-v0.5.0 profile's account
-            metadata in the legacy sibling ``context.json`` is promoted
-            in-band by ``promote_legacy_account`` on load — see
-            ``notebooklm._auth.account`` — rather than read from here.
+            metadata in the legacy sibling ``context.json`` is derived into
+            in-band shape on load (and promoted in-band durably by a detached
+            one-shot) — see ``notebooklm._auth.storage`` — rather than read
+            from here.
         account_email: Stable Google account identity for routing. When set,
             NotebookLM requests use it as the ``authuser`` value instead of the
             integer index, because Google account indices can change when other
@@ -314,7 +315,7 @@ class AuthTokens:
         if path is None:
             authuser = 0
             account_email = None
-            account_metadata = _auth_account.read_account_metadata_from_storage_state(
+            account_metadata = _auth_storage.read_account_metadata_from_storage_state(
                 _auth_cookies._load_storage_state(path)
             )
             raw_authuser = account_metadata.get("authuser")
@@ -324,8 +325,8 @@ class AuthTokens:
             if isinstance(raw_email, str) and raw_email.strip():
                 account_email = raw_email.strip()
         else:
-            authuser = _auth_account.get_authuser_for_storage(path)
-            account_email = _auth_account.get_account_email_for_storage(path)
+            authuser = _auth_storage.get_authuser_for_storage(path)
+            account_email = _auth_storage.get_account_email_for_storage(path)
         # Build the cookie jar via the lossless loader so path/secure/httpOnly
         # survive into the live jar. The earlier
         # extract_cookies_with_domains -> build_cookie_jar pipeline only carried
@@ -398,8 +399,8 @@ class AuthTokens:
         cookies = _auth_cookies._cookie_map_from_jar(jar)
 
         if refreshed and path is not None:
-            authuser = _auth_account.get_authuser_for_storage(path)
-            account_email = _auth_account.get_account_email_for_storage(path)
+            authuser = _auth_storage.get_authuser_for_storage(path)
+            account_email = _auth_storage.get_account_email_for_storage(path)
 
         return cls(
             cookies=cookies,
@@ -453,37 +454,29 @@ def load_auth_from_storage(path: Path | None = None) -> dict[str, str]:
         # export NOTEBOOKLM_AUTH_JSON='{"cookies":[...]}'
         cookies = load_auth_from_storage()
     """
-    try:
-        return _load_auth_cookies_pure(path, require_routable=True)
-    except _auth_cookies.RequiredCookieValidationError:
-        # Inline ``__Secure-1PSIDTS`` recovery (issue #865). Playwright login
-        # can land a ``storage_state.json`` that carries SID + secondary
-        # binding but lacks PSIDTS, because Google only mints PSIDTS
-        # deterministically in response to the dedicated ``RotateCookies``
-        # POST — not on the passive ``goto()`` navigations the login flow
-        # uses. The preflight then rejects before the keepalive's RotateCookies
-        # path can heal the state. When the recovery preconditions hold, fire
-        # one POST + persist before re-raising — see
-        # :mod:`notebooklm._auth.psidts_recovery` for the precondition list.
-        # ``_recover_psidts_inline`` resolves the effective storage path
-        # itself (default file when ``path is None`` and env-var unset), so
-        # we pass ``path`` through verbatim — including ``None`` for the
-        # default-profile case.
-        #
-        # The recovery invocation lives HERE, in the public wrapper body — the
-        # network-free :func:`_load_auth_cookies_pure` never triggers it (issue
-        # #2061 / event-loop-blocking fix). Sync callers (CLI) keep this inline
-        # recovery; an async caller must offload the wrapper via
-        # ``asyncio.to_thread``.
-        if not _auth_psidts_recovery._recover_psidts_inline(path):
-            # Recovery declined, so the routing half of the preflight has no
-            # heal to trigger and must not harden into a failure this call
-            # cannot repair. Re-run name-only: it re-raises when a required
-            # cookie is genuinely absent, and otherwise returns exactly what
-            # this function returned before #2061. See
-            # ``_build_httpx_cookies_from_storage_state`` for the rule.
-            return _load_auth_cookies_pure(path, require_routable=False)
-        return _load_auth_cookies_pure(path, require_routable=False)
+    # Inline ``__Secure-1PSIDTS`` recovery (issue #865). Playwright login can
+    # land a ``storage_state.json`` that carries SID + secondary binding but
+    # lacks PSIDTS, because Google only mints PSIDTS deterministically in
+    # response to the dedicated ``RotateCookies`` POST — not on the passive
+    # ``goto()`` navigations the login flow uses. The preflight then rejects
+    # before the keepalive's RotateCookies path can heal the state.
+    #
+    # The sequence (strict load -> heal -> name-only retry) has ONE owner,
+    # :func:`notebooklm._auth.psidts_recovery.load_with_recovery`; this wrapper
+    # supplies the flat-map loader and keeps its own name, signature and patch
+    # seam (ADR-0017). It used to be a second copy of that control flow, and by
+    # #2154 the copy had decayed: both arms of its ``if not recovered:`` returned
+    # the identical name-only call, distinguishable only by their comments.
+    #
+    # The recovery invocation stays in a WRAPPER body — the network-free
+    # :func:`_load_auth_cookies_pure` never triggers it (issue #2061 /
+    # event-loop-blocking fix). Sync callers (CLI) keep this inline recovery; an
+    # async caller must offload the wrapper via ``asyncio.to_thread``.
+    return _auth_psidts_recovery.load_with_recovery(
+        path,
+        _auth_psidts_recovery.HealPolicy.HEAL_THEN_NAME_ONLY,
+        load=_load_auth_cookies_pure,
+    )
 
 
 def _load_auth_cookies_pure(

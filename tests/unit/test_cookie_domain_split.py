@@ -102,7 +102,7 @@ class TestWriteTimeFilterParity:
     ``filter_storage_state_cookies_by_domain_policy`` binding and the pin asserted
     those bindings were identical. Since b-PR3 the write-time filter + the
     post-filter required-cookie revalidation are hoisted into
-    ``storage_writer.replace_from_login``; the three CLI writers
+    ``storage.replace_from_login``; the three CLI writers
     (``cookie_writes._write_extracted_cookies``,
     ``refresh._login_with_browser_cookies``, ``_cookie_import._import_cookie_json``)
     all call that ONE function via the ``notebooklm.auth`` facade. On-disk parity
@@ -114,11 +114,11 @@ class TestWriteTimeFilterParity:
         """Routing identity: every login/import writer calls the SAME
         ``replace_from_login`` (the single auth-facade export)."""
         import notebooklm.auth as auth_module
-        from notebooklm._auth import storage_writer
+        from notebooklm._auth import storage
         from notebooklm.cli import _cookie_import
         from notebooklm.cli.services.login import cookie_writes, refresh
 
-        canonical = storage_writer.replace_from_login
+        canonical = storage.replace_from_login
         assert auth_module.replace_from_login is canonical
         assert cookie_writes.replace_from_login is canonical
         assert _cookie_import.replace_from_login is canonical
@@ -126,17 +126,21 @@ class TestWriteTimeFilterParity:
         assert refresh.default_refresh_deps().replace_from_login is canonical
 
     def test_writer_binds_the_playwright_filter(self):
-        """Identity pin: the filter the writer applies IS the neutral filter the
-        Playwright capture arms use (one filter, bound in one place now)."""
-        from notebooklm._auth import _browser_cookie_filter
+        """Identity pin: the filter the writer applies IS the filter the
+        Playwright capture arms use (one filter, bound in one place now).
+
+        Since ADR-0033 PR 4.2 that one place is ``_auth/storage.py``, beside the
+        writers — it is write-time policy, not browser code. The old
+        ``_browser_cookie_filter`` leaf is a re-export shim (pinned by
+        ``test_consolidation_shims_are_identity_reexports``), so this asserts
+        against the canonical home.
+        """
+        from notebooklm._auth import storage
         from notebooklm.cli.services.playwright_login import (
             filter_storage_state_cookies_by_domain_policy as playwright_filter,
         )
 
-        assert (
-            playwright_filter
-            is _browser_cookie_filter.filter_storage_state_cookies_by_domain_policy
-        )
+        assert playwright_filter is storage.filter_storage_state_cookies_by_domain_policy
 
     @pytest.mark.parametrize("include_domains", [None, {"mail"}, {"all"}])
     def test_writer_persists_same_domain_set_as_playwright_filter(self, tmp_path, include_domains):

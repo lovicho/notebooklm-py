@@ -109,7 +109,13 @@ def _patch_refresh_cmd_machinery(
 ) -> None:
     """Patch the shared cold-start machinery the rung reuses (no subprocess)."""
 
-    async def _fake_coalesced(refresh_key: str, resolved_path: Path, profile: str | None) -> None:
+    async def _fake_coalesced(
+        refresh_key: str,
+        resolved_path: Path,
+        profile: str | None,
+        *,
+        deps: refresh_mod.RefreshCmdDeps | None = None,
+    ) -> None:
         calls.append(refresh_key)
         if heal is not None:
             heal["healed"] = 1
@@ -311,7 +317,13 @@ async def test_rung_threads_work_profile_from_storage_path(
 
     captured: dict[str, str | None] = {}
 
-    async def _fake_coalesced(refresh_key: str, resolved_path: Path, profile: str | None) -> None:
+    async def _fake_coalesced(
+        refresh_key: str,
+        resolved_path: Path,
+        profile: str | None,
+        *,
+        deps: refresh_mod.RefreshCmdDeps | None = None,
+    ) -> None:
         captured["profile"] = profile
 
     import notebooklm._auth.cookies as cookies_mod

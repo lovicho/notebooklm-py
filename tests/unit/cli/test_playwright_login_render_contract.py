@@ -56,6 +56,7 @@ import notebooklm.cli.session_cmd as session_cmd_module
 import notebooklm.paths as paths_module
 from notebooklm._auth import account as _auth_account
 from notebooklm._auth import cookies as _auth_cookies
+from notebooklm._auth import storage as _auth_storage
 from notebooklm._env import PERSONAL_BASE_HOST
 from notebooklm.notebooklm_cli import cli
 from tests._fixtures import patch_session_login_dual
@@ -262,9 +263,9 @@ def _drive_login(
         # The synthetic ``_STORAGE`` path is never created on disk; stub the
         # persist so the success paths don't touch the filesystem. The persist
         # step moved into the neutral browser-capture core and now routes through
-        # ``storage_writer.replace_from_remint`` (b-PR2); stub that, returning an
+        # ``storage.replace_from_remint`` (b-PR2); stub that, returning an
         # OK outcome so the lock-unavailable fail-closed branch is not taken.
-        from notebooklm._auth import storage_writer as _sw
+        from notebooklm._auth import storage as _sw
 
         stack.enter_context(
             patch.object(
@@ -326,8 +327,11 @@ def _drive_refresh(runner, *, enumerate_accounts: Any, args: list[str]):
         # Patched on the owning _auth modules (not the notebooklm.auth facade):
         # the repair recipe now lives entirely in
         # _auth.account.repair_account_metadata_from_playwright_storage and
-        # calls these as bare names / a local import, so a facade-level patch
-        # would not reach it (auth cross-boundary ledger shrink, #2103).
+        # calls these as bare names / through the owning module object, so a
+        # facade-level patch would not reach it (auth cross-boundary ledger
+        # shrink, #2103). ADR-0033 PR 5.2 moved the record WRITERS to
+        # _auth.storage, so those two are patched there — patching them on
+        # _auth.account would now be a silent no-op that let the real writer run.
         stack.enter_context(
             patch.object(_auth_account, "enumerate_accounts", new=enumerate_accounts)
         )
@@ -336,8 +340,8 @@ def _drive_refresh(runner, *, enumerate_accounts: Any, args: list[str]):
                 _auth_cookies, "build_httpx_cookies_from_storage", return_value=MagicMock()
             )
         )
-        stack.enter_context(patch.object(_auth_account, "write_account_metadata"))
-        stack.enter_context(patch.object(_auth_account, "clear_account_metadata"))
+        stack.enter_context(patch.object(_auth_storage, "write_account_metadata"))
+        stack.enter_context(patch.object(_auth_storage, "clear_account_metadata"))
         stack.enter_context(
             patch.object(_auth_account, "extract_email_from_html", return_value=None)
         )
@@ -655,7 +659,7 @@ class TestLoginProgressSuccess:
             patch.object(
                 _auth_cookies, "build_httpx_cookies_from_storage", return_value=MagicMock()
             ),
-            patch.object(_auth_account, "write_account_metadata"),
+            patch.object(_auth_storage, "write_account_metadata"),
             patch.object(_auth_account, "extract_email_from_html", return_value=None),
         ):
             result, _ = _drive_login(

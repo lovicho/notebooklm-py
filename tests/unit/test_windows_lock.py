@@ -5,7 +5,7 @@ Windows used ``msvcrt.locking(LK_LOCK)``, which gives up after msvcrt's internal
 ~10x1s and made the blocking (CAS) path fall to fail-open after only ~10 s of
 contention. The fix drives the **non-blocking** ``LK_NBLCK`` probe in a bounded
 deadline/backoff loop (the same 90 s deadline + jittered exponential backoff the
-non-blocking-driven ``storage_writer._acquire_storage_lock`` uses), retrying
+non-blocking-driven ``storage._acquire_storage_lock`` uses), retrying
 ONLY on the contention errno and falling through to the tristate ``"unavailable"``
 (→ per-intent fail policy + one-shot warning) at the deadline. Never ``while True``
 without a deadline break; a non-contention errno falls through immediately with no

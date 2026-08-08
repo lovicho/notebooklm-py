@@ -128,7 +128,14 @@ introduce its objects and operations in independently shippable stages:
   row list. Moving this seam onto `CookieJar` is deferred to a later stage
   rather than folded in here, so that the "identical behavior" claim this
   stage rests on stays checkable.
-- **Stage 3: the storage-write transaction template** — the writers in
+- **Stage 3: the storage-write transaction template** — COMPLETE, and both
+  modules named below are now re-export shims. *Amended 2026-08-08 (`_auth`
+  consolidation, ADR-0033):* `storage_writer.py` and `storage_transaction.py`
+  were absorbed into `_auth/storage.py`, and the last three writers
+  (`replace_from_remint`, `replace_from_login`, `persist_minted_jar`) were
+  converted, so no writer hand-rolls the preamble and the ratchet's
+  `_UNCONVERTED` list is empty and pinned empty. The original text follows.
+  — the writers in
   `storage_writer.py` each hand-roll the same preamble (secure the parent dir,
   derive the lock path, take the bounded lock, branch on held).
   `storage_transaction.in_storage_transaction` owns it; method names and

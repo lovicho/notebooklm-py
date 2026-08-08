@@ -122,6 +122,15 @@ def _reset_poke_state():
        run), so we clear it eagerly to keep tests independent.
     3. ``_SECONDARY_BINDING_WARNED`` — one-shot flag for the Tier 2 cookie
        warning. Reset so tests can independently observe the warning fire.
+    4. ``storage._PROMOTION_ONCE_PATHS`` / ``_PROMOTION_THREADS`` — the
+       detached one-shot legacy-account promotion (ADR-0033 PR 5.1). A read of
+       a legacy-only profile schedules a background writer, so teardown must
+       JOIN it before clearing: a worker still running when the next test
+       starts would write into a ``tmp_path`` that test believes it owns, and
+       a leftover ``_PROMOTION_ONCE_PATHS`` entry would suppress the very
+       promotion another test is asserting on (``tmp_path`` uniqueness makes
+       real path collisions unlikely, but the drain is what makes the durable
+       half deterministic rather than a race the suite usually wins).
     """
     from notebooklm import auth as _auth
     from notebooklm._auth import cookie_policy as _cookie_policy
@@ -142,11 +151,16 @@ def _reset_poke_state():
     _auth._POKE_LOCKS_BY_LOOP.clear()
     _cookie_policy._SECONDARY_BINDING_WARNED = False
     _auth_storage._FLOCK_UNAVAILABLE_WARNED = False
+    _auth_storage._PROMOTION_ONCE_PATHS.clear()
     yield
     _auth._LAST_POKE_ATTEMPT_MONOTONIC.clear()
     _auth._POKE_LOCKS_BY_LOOP.clear()
     _cookie_policy._SECONDARY_BINDING_WARNED = False
     _auth_storage._FLOCK_UNAVAILABLE_WARNED = False
+    # Join first, then clear — clearing while a worker is mid-write would let
+    # it land in the next test's world.
+    _auth_storage._drain_promotions_for_tests()
+    _auth_storage._PROMOTION_ONCE_PATHS.clear()
 
 
 @pytest.fixture(autouse=True)

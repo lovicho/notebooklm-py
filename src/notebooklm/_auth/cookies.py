@@ -110,7 +110,10 @@ def _validate_routable_entries(
 
     # Keep the cookies -> recovery dependency acyclic.  Recovery owns the
     # actual request-jar projection and the #2057 duplicate/routing predicate.
-    from . import psidts_recovery
+    # Breaks the cookies <-> psidts_recovery cycle: ``psidts_recovery`` imports
+    # THIS module at module scope (it reuses the loaders/converters here), so
+    # the reverse edge has to stay function-local.
+    from . import psidts_recovery  # noqa: PLC0415 (cycle: psidts_recovery -> cookies)
 
     if not psidts_recovery._psidts_routes_to_rotate(entries, to_cookie=to_cookie):
         raise RequiredCookieValidationError(
@@ -572,33 +575,18 @@ def build_httpx_cookies_from_storage(path: Path | None = None) -> httpx.Cookies:
         FileNotFoundError: If storage file doesn't exist.
         ValueError: If required cookies are missing or JSON is malformed.
     """
-    try:
-        return _load_cookies_pure(path, require_routable=True)
-    except RequiredCookieValidationError:
-        # Inline ``__Secure-1PSIDTS`` recovery (issue #865) — same as the
-        # ``load_auth_from_storage`` hook in ``notebooklm.auth``. Without
-        # this, ``AuthTokens.from_storage`` and ``NotebookLMClient.from_storage``
-        # would still hit the closed loop because they use this loader
-        # directly, bypassing ``load_auth_from_storage``.
-        from . import psidts_recovery
+    # The load -> heal -> retry sequence has ONE owner (``psidts_recovery``),
+    # which also owns the heal and the routing predicate; this name, its
+    # signature and its patch seam are unchanged (ADR-0017). Inline
+    # ``__Secure-1PSIDTS`` recovery (issue #865) must hang off this loader and
+    # not only off ``load_auth_from_storage``, because ``AuthTokens.from_storage``
+    # and ``NotebookLMClient.from_storage`` come through here.
+    # Breaks the cookies <-> psidts_recovery cycle (same reason as the routing
+    # preflight above): ``psidts_recovery`` imports this module at module scope,
+    # so this edge must stay function-local.
+    from . import psidts_recovery  # noqa: PLC0415 (cycle: psidts_recovery -> cookies)
 
-        if not psidts_recovery._recover_psidts_inline(path):
-            # Recovery declined — no writable backing store (inline
-            # ``NOTEBOOKLM_AUTH_JSON``), no rotatable secondary binding, a
-            # contended lock, or a throttled slot. The routing condition exists
-            # to trigger a heal, so with no heal to trigger it must not turn a
-            # loadable state into a hard failure: retry name-only, which
-            # re-raises if a required cookie is genuinely absent and otherwise
-            # returns the same jar this loader built before #2061.
-            logger.debug(
-                "PSIDTS is present but does not route to the rotate URL and recovery "
-                "declined; continuing with the unrotatable cookie set"
-            )
-            return _load_cookies_pure(path, require_routable=False)
-        # The recovery handler proved a routed post-mint cookie and persisted
-        # a live required row.  The one retry intentionally uses the existing
-        # name/liveness contract and cannot recursively recover.
-        return _load_cookies_pure(path, require_routable=False)
+    return psidts_recovery.load_session_jar(path, psidts_recovery.HealPolicy.HEAL_THEN_NAME_ONLY)
 
 
 def _build_httpx_cookies_from_storage_state(
@@ -650,11 +638,15 @@ def _build_httpx_cookies_from_storage_strict(path: Path | None) -> httpx.Cookies
     ``fetch_tokens_passive`` uses this loader precisely because it must not fire a
     heal, so it is the wrong place to raise a condition only a heal can clear.
 
-    Thin alias for the network-free :func:`_load_cookies_pure` with the routing
-    preflight disabled; retained as a named import for ``_auth.refresh`` (the
-    passive probe). Like the pure loader it performs no network I/O.
+    The sibling of :func:`build_httpx_cookies_from_storage` over the same
+    composition, differing only in the policy it selects — which is the point of
+    naming the policy: "does this load fire a heal?" is now answered at the call
+    site instead of by which of two near-identical private loaders was reached
+    for. ``NAME_ONLY`` performs no network I/O.
     """
-    return _load_cookies_pure(path, require_routable=False)
+    from . import psidts_recovery  # noqa: PLC0415 (cycle: psidts_recovery -> cookies)
+
+    return psidts_recovery.load_session_jar(path, psidts_recovery.HealPolicy.NAME_ONLY)
 
 
 def build_cookie_jar(

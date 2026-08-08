@@ -1,5 +1,10 @@
 """ADR-0031 Stage 2: the validate/heal split preserves the fused behavior.
 
+The three verbs live in ``_auth/psidts_recovery`` since ADR-0033's PR 2.1 folded
+the ``browser_cookie_recovery`` leaf into it (the leaf existed only to keep the
+recovery module under the old module-size cap, and the pass-through that reached
+it was a cycle-breaking lazy import). The seam names are unchanged.
+
 ``validate_with_recovery`` fused three operations behind one name — check, try
 to fix, check again — with the outcome threaded through an ``initial`` variable
 across nested try/except/else. Stage 2 separates the verbs so a caller can ask
@@ -20,8 +25,8 @@ from typing import Any
 
 import pytest
 
-from notebooklm._auth import browser_cookie_recovery as bcr
 from notebooklm._auth import cookie_policy as _cookie_policy
+from notebooklm._auth import psidts_recovery as recovery
 
 
 def _rows(*names: str) -> list[dict[str, Any]]:
@@ -47,7 +52,7 @@ class TestValidateIsPure:
     """``validate`` answers the question without fixing or mutating anything."""
 
     def test_valid_set_passes(self) -> None:
-        _, result = bcr.validate(_rows(*_COMPLETE))
+        _, result = recovery.validate(_rows(*_COMPLETE))
         assert result.ok is True
         assert result.error is None
         assert result.reason is None
@@ -62,7 +67,7 @@ class TestValidateIsPure:
     )
     def test_invalid_sets_carry_the_policy_error(self, names: tuple[str, ...]) -> None:
         """The result wraps the policy's own error, keeping its closed-enum reason."""
-        _, result = bcr.validate(_rows(*names))
+        _, result = recovery.validate(_rows(*names))
         assert result.ok is False
         assert isinstance(result.error, _cookie_policy.RequiredCookieValidationError)
         assert result.reason is not None
@@ -75,7 +80,7 @@ class TestValidateIsPure:
         """
         rows = _rows(*_NO_PSIDTS)
         before = copy.deepcopy(rows)
-        bcr.validate(rows)
+        recovery.validate(rows)
         assert rows == before
 
     def test_validate_never_fires_a_heal(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,8 +92,8 @@ class TestValidateIsPure:
             called = True
             return False
 
-        monkeypatch.setattr(bcr._recovery, "recover_psidts_in_memory", _boom)
-        bcr.validate(_rows(*_NO_PSIDTS))
+        monkeypatch.setattr(recovery, "recover_psidts_in_memory", _boom)
+        recovery.validate(_rows(*_NO_PSIDTS))
         assert called is False
 
 
@@ -105,9 +110,9 @@ class TestWrapperComposition:
         return _heal
 
     def test_valid_set_short_circuits_before_healing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(bcr._recovery, "recover_psidts_in_memory", self._stub_heal(False))
+        monkeypatch.setattr(recovery, "recover_psidts_in_memory", self._stub_heal(False))
         rows = _rows(*_COMPLETE)
-        _, error = bcr.validate_with_recovery(rows)
+        _, error = recovery.validate_with_recovery(rows)
         assert error is None
 
     def test_successful_heal_clears_the_error_and_mutates_in_place(
@@ -119,12 +124,12 @@ class TestWrapperComposition:
         rows being visible to the caller afterward.
         """
         monkeypatch.setattr(
-            bcr._recovery,
+            recovery,
             "recover_psidts_in_memory",
             self._stub_heal(True, ("__Secure-1PSIDTS",)),
         )
         rows = _rows(*_NO_PSIDTS)
-        state, error = bcr.validate_with_recovery(rows)
+        state, error = recovery.validate_with_recovery(rows)
         assert error is None
         assert "__Secure-1PSIDTS" in {c["name"] for c in rows}
         assert "__Secure-1PSIDTS" in {c["name"] for c in state["cookies"]}
@@ -133,19 +138,17 @@ class TestWrapperComposition:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A heal returning True is not proof the set became usable."""
-        monkeypatch.setattr(
-            bcr._recovery, "recover_psidts_in_memory", self._stub_heal(True, ("NID",))
-        )
-        _, error = bcr.validate_with_recovery(_rows(*_NO_PSIDTS))
+        monkeypatch.setattr(recovery, "recover_psidts_in_memory", self._stub_heal(True, ("NID",)))
+        _, error = recovery.validate_with_recovery(_rows(*_NO_PSIDTS))
         assert isinstance(error, _cookie_policy.RequiredCookieValidationError)
 
     def test_declined_heal_preserves_the_original_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(bcr._recovery, "recover_psidts_in_memory", self._stub_heal(False))
+        monkeypatch.setattr(recovery, "recover_psidts_in_memory", self._stub_heal(False))
         rows = _rows(*_NO_PSIDTS)
         before = copy.deepcopy(rows)
-        _, error = bcr.validate_with_recovery(rows)
+        _, error = recovery.validate_with_recovery(rows)
         assert isinstance(error, _cookie_policy.RequiredCookieValidationError)
         assert rows == before  # a declined heal leaves the rows untouched
 
@@ -177,26 +180,26 @@ class TestWrapperComposition:
                 "expires": None,
             }
         )
-        _, pre = bcr.validate(list(rows))
+        _, pre = recovery.validate(list(rows))
         assert pre.ok is False and pre.reason == "psidts_unroutable", (
             "fixture no longer reaches the routing check; the test would be vacuous"
         )
 
         # The heal supplies a properly-scoped PSIDTS, as a real rotation would.
         monkeypatch.setattr(
-            bcr._recovery,
+            recovery,
             "recover_psidts_in_memory",
             self._stub_heal(True, ("__Secure-1PSIDTS",)),
         )
         calls = {"n": 0}
-        real_check = bcr._check_routable
+        real_check = recovery._check_routable
 
-        def _counting(rows_: list[dict[str, Any]]) -> bcr.ValidationResult:
+        def _counting(rows_: list[dict[str, Any]]) -> recovery.ValidationResult:
             calls["n"] += 1
             return real_check(rows_)
 
-        monkeypatch.setattr(bcr, "_check_routable", _counting)
-        _, error = bcr.validate_with_recovery(rows)
+        monkeypatch.setattr(recovery, "_check_routable", _counting)
+        _, error = recovery.validate_with_recovery(rows)
 
         assert error is None, "the heal supplied a routable PSIDTS; the set is usable"
         assert calls["n"] == 1, (
@@ -216,7 +219,7 @@ class TestHealIsSeparable:
             seen.append(rows)
             return True
 
-        monkeypatch.setattr(bcr._recovery, "recover_psidts_in_memory", _spy)
+        monkeypatch.setattr(recovery, "recover_psidts_in_memory", _spy)
         rows = _rows(*_NO_PSIDTS)
-        assert bcr.heal(rows) is True
+        assert recovery.heal(rows) is True
         assert seen == [rows]

@@ -210,7 +210,7 @@ def test_auth_corrupt_legacy_context_does_not_block_in_band_write(tmp_path):
     import json as _json
 
     import notebooklm.auth as auth
-    from notebooklm._auth.account import promote_legacy_account
+    from notebooklm._auth.storage import promote_legacy_account
 
     storage = tmp_path / "storage.json"
     storage.write_text("{}")

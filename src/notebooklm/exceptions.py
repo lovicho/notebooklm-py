@@ -268,7 +268,7 @@ class LockUnavailableError(NotebookLMError, TimeoutError):
     """The canonical ``storage_state.json`` lock could not be acquired.
 
     Raised by the fail-closed storage writers (account-metadata and master-token
-    persistence in :mod:`notebooklm._auth.storage_writer`) when the unified
+    persistence in :mod:`notebooklm._auth.storage`) when the unified
     storage-sentinel lock stays unavailable for the whole bounded acquire window
     (default 90 s) — either sustained contention or an infrastructure failure
     (read-only directory, NFS without flock support, fd exhaustion). See

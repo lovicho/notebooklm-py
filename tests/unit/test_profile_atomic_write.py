@@ -43,7 +43,8 @@ from typing import Any
 
 import pytest
 
-from notebooklm._auth.account import (
+from notebooklm._auth.storage import (
+    _drain_promotions_for_tests,
     clear_account_metadata,
     get_account_email_for_storage,
     get_authuser_for_storage,
@@ -109,14 +110,20 @@ def test_legacy_two_file_fixture_reads_cleanly(tmp_path: Path) -> None:
     account (a #2103-class hazard), so the fallback was removed rather than
     patched at each call site.
 
-    In its place, ``read_account_metadata`` itself calls the one-shot
-    ``promote_legacy_account`` migration whenever in-band is absent — so THIS
-    call, the very first read of any kind (``get_authuser_for_storage``,
+    In its place, ``read_account_metadata`` DERIVES the record from the legacy
+    sibling read-only, through the same sanitizer promotion embeds with — so
+    THIS call, the very first read of any kind (``get_authuser_for_storage``,
     ``get_account_email_for_storage``, ``read_account_metadata`` directly, or
-    any future caller), embeds the record in-band and returns the correct
-    value immediately. No caller anywhere has to remember an extra promotion
-    step; that is the point of putting it at the chokepoint instead of at each
-    of the read helpers built on it.
+    any future caller), returns the correct value immediately. No caller
+    anywhere has to remember an extra promotion step; that is the point of
+    putting it at the chokepoint instead of at each of the read helpers built
+    on it.
+
+    Since ADR-0033 PR 5.1 the *durable* half is detached: the read schedules a
+    one-shot background promotion and does not wait for it, so this test
+    drains before asserting on disk state. The correct read values above are
+    asserted BEFORE the drain, which is the actual acceptance property — a
+    user's binding survives even if the write never lands.
 
     If this breaks, an existing user loses their account binding
     (authuser/email) on the next CLI run.
@@ -140,13 +147,19 @@ def test_legacy_two_file_fixture_reads_cleanly(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    # The very first read already self-heals — no separate promotion call.
+    # The very first read already self-heals — no separate promotion call, and
+    # no waiting on the durable write either.
     assert get_authuser_for_storage(storage_path) == 3
     assert get_account_email_for_storage(storage_path) == "charlie@example.com"
     assert read_account_metadata(storage_path) == {
         "authuser": 3,
         "email": "charlie@example.com",
     }
+
+    # Now let the detached one-shot finish and assert the durable half.
+    _drain_promotions_for_tests()
+    in_band = json.loads(storage_path.read_text(encoding="utf-8"))["notebooklm"]["account"]
+    assert in_band == {"authuser": 3, "email": "charlie@example.com"}
     # Non-account legacy context state (notebook_id) survives the promotion.
     legacy_after = json.loads(_context_path(storage_path).read_text(encoding="utf-8"))
     assert "account" not in legacy_after

@@ -525,22 +525,48 @@ async def test_headless_retry_that_still_redirects_falls_through_to_l4(
 
 
 @pytest.mark.asyncio
-async def test_both_cold_validations_redirect_before_l5(tmp_path, monkeypatch) -> None:
-    """L5 sees the final typed redirect after both cold layers fail validation."""
+async def test_cold_ladder_runs_refresh_cmd_before_the_remint_rungs(tmp_path, monkeypatch) -> None:
+    """Cold start walks ADR-0030's documented order: L2.5 → L3 → L4.
+
+    Behavior change (ADR-0030, amended 2026-08-07): this pinned L3 → L4 → L2.5
+    before the alignment. Every rung's revalidation redirects except the last, so
+    the whole ladder is walked and the recorded ``order`` is the rung sequence.
+    It also pins that an L2.5 failure falls through instead of ending the ladder.
+    It does NOT cross either former backstop rebind site — verified by mutation:
+    a site-B-only re-entry survives this test. Those are covered separately by
+    :func:`test_exhausted_cold_ladder_runs_the_refresh_cmd_exactly_once` (site A,
+    the ladder raising) and
+    :func:`test_recovered_but_still_redirecting_does_not_rerun_the_refresh_cmd`
+    (site B, a re-mint whose revalidation still redirects).
+    """
     storage = tmp_path / "storage_state.json"
     _write_storage(storage, sid="stale")
     jar = httpx.Cookies()
-    redirects = [
-        _LoginRedirectError(f"Authentication expired or invalid. attempt={index}")
-        for index in range(3)
-    ]
-    fetch = AsyncMock(side_effect=[*redirects, ("csrf", "session")])
-    headless = AsyncMock(return_value=True)
-    master = AsyncMock(return_value=True)
-    run_l5 = AsyncMock(return_value=None)
+    order: list[str] = []
+    fetch_calls = 0
+
+    async def fetch(*_args, **_kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        order.append("fetch")
+        if fetch_calls <= 3:
+            raise _LoginRedirectError(f"Authentication expired or invalid. attempt={fetch_calls}")
+        return "csrf", "session"
+
+    async def refresh_cmd(*_args, **_kwargs):
+        order.append("L2.5")
+
+    async def headless(**_kwargs):
+        order.append("L3")
+        return True
+
+    async def master(**_kwargs):
+        order.append("L4")
+        return True
+
     monkeypatch.setenv(refresh_mod.NOTEBOOKLM_REFRESH_CMD_ENV, "refresh-auth")
     monkeypatch.setattr(refresh_mod, "_fetch_tokens_with_jar", fetch)
-    monkeypatch.setattr(refresh_mod, "_coalesced_run_refresh_cmd", run_l5)
+    monkeypatch.setattr(refresh_mod, "_coalesced_run_refresh_cmd", refresh_cmd)
     monkeypatch.setattr(recovery_mod, "try_headless_reauth", headless)
     monkeypatch.setattr(recovery_mod, "try_master_token_reauth", master)
 
@@ -551,10 +577,122 @@ async def test_both_cold_validations_redirect_before_l5(tmp_path, monkeypatch) -
     )
 
     assert (csrf, session, refreshed) == ("csrf", "session", True)
+    # fetch, L2.5, retry-fetch, L3, validate-fetch, L4, validate-fetch, retry-fetch
+    assert order == ["fetch", "L2.5", "fetch", "L3", "fetch", "L4", "fetch", "fetch"]
+    assert order.count("L2.5") == 1, "the rung must not also re-run as a post-ladder backstop"
+
+
+@pytest.mark.asyncio
+async def test_failing_refresh_cmd_still_reaches_the_remint_rungs(tmp_path, monkeypatch) -> None:
+    """A broken ``NOTEBOOKLM_REFRESH_CMD`` must not MASK L3/L4 now that it runs first.
+
+    The cold arm used to be terminal, which was safe only while it ran LAST. With
+    the rung first, a non-zero exit is logged and yields "rung failed" so the
+    re-mint rungs an operator recovers by today still run.
+    """
+    storage = tmp_path / "storage_state.json"
+    _write_storage(storage, sid="stale")
+    jar = httpx.Cookies()
+    fetch = AsyncMock(
+        side_effect=[
+            _LoginRedirectError("Authentication expired or invalid."),
+            ("csrf", "session"),
+            ("csrf", "session"),
+        ]
+    )
+    broken_refresh_cmd = AsyncMock(side_effect=RuntimeError("NOTEBOOKLM_REFRESH_CMD exited 2"))
+    headless = AsyncMock(return_value=False)
+    master = AsyncMock(return_value=True)
+    monkeypatch.setenv(refresh_mod.NOTEBOOKLM_REFRESH_CMD_ENV, "refresh-auth")
+    monkeypatch.setattr(refresh_mod, "_fetch_tokens_with_jar", fetch)
+    monkeypatch.setattr(refresh_mod, "_coalesced_run_refresh_cmd", broken_refresh_cmd)
+    monkeypatch.setattr(recovery_mod, "try_headless_reauth", headless)
+    monkeypatch.setattr(recovery_mod, "try_master_token_reauth", master)
+
+    csrf, session, refreshed, _snapshot = await refresh_mod._fetch_tokens_with_refresh(
+        jar,
+        storage,
+        allow_headless=True,
+    )
+
+    assert (csrf, session, refreshed) == ("csrf", "session", True)
+    broken_refresh_cmd.assert_awaited_once()
     headless.assert_awaited_once()
     master.assert_awaited_once()
-    run_l5.assert_awaited_once()
-    assert fetch.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_exhausted_cold_ladder_runs_the_refresh_cmd_exactly_once(
+    tmp_path, monkeypatch
+) -> None:
+    """The ladder-exhausted path must not re-enter L2.5 (that would be subprocess #2).
+
+    ``_REFRESH_ATTEMPTED_CONTEXT`` is reset in the rung's ``finally`` and the
+    per-path success epoch does not deduplicate a caller's own re-entry, so a
+    retained post-ladder invocation would spawn a second subprocess here. When
+    nothing recovers, the refresh-cmd failure is what surfaces — unchanged from
+    the pre-alignment order, where the rung ran last and raised.
+    """
+    storage = tmp_path / "storage_state.json"
+    _write_storage(storage, sid="stale")
+    jar = httpx.Cookies()
+    fetch = AsyncMock(side_effect=_LoginRedirectError("Authentication expired or invalid."))
+    broken_refresh_cmd = AsyncMock(side_effect=RuntimeError("refresh-cmd boom"))
+    monkeypatch.setenv(refresh_mod.NOTEBOOKLM_REFRESH_CMD_ENV, "refresh-auth")
+    monkeypatch.setattr(refresh_mod, "_fetch_tokens_with_jar", fetch)
+    monkeypatch.setattr(refresh_mod, "_coalesced_run_refresh_cmd", broken_refresh_cmd)
+    monkeypatch.setattr(recovery_mod, "try_headless_reauth", AsyncMock(return_value=False))
+    monkeypatch.setattr(recovery_mod, "try_master_token_reauth", AsyncMock(return_value=False))
+
+    with pytest.raises(RuntimeError, match="refresh-cmd boom"):
+        await refresh_mod._fetch_tokens_with_refresh(jar, storage, allow_headless=True)
+
+    assert broken_refresh_cmd.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_recovered_but_still_redirecting_does_not_rerun_the_refresh_cmd(
+    tmp_path, monkeypatch
+) -> None:
+    """Site B of the retired backstop: a re-mint whose revalidation still redirects.
+
+    Before the alignment the refresh-cmd was the post-ladder backstop, reachable
+    from TWO rebind sites: (A) the ladder itself raising, and (B) a rung that
+    SUCCEEDS while the post-recovery fetch still redirects, which rebinds ``err``
+    and falls through. Running the rung first consumes that role, and re-entering
+    afterwards would spawn a second subprocess — the context var is reset in the
+    rung's ``finally`` and the per-path success epoch does not deduplicate a
+    caller's own re-entry.
+
+    Site A is covered by the exhausted-ladder test above. Site B was covered by
+    nothing: verified by mutation, a site-B-only post-ladder re-entry left the
+    whole unit+integration suite green. This pins it.
+    """
+    storage = tmp_path / "storage_state.json"
+    _write_storage(storage, sid="stale")
+    jar = httpx.Cookies()
+    fetch = AsyncMock(
+        side_effect=[
+            _LoginRedirectError("Authentication expired or invalid. initial"),
+            _LoginRedirectError("Authentication expired or invalid. l2.5-retry"),
+            ("csrf", "session"),
+            _LoginRedirectError("Authentication expired or invalid. outer-retry"),
+        ]
+    )
+    refresh_cmd = AsyncMock(return_value=None)
+    monkeypatch.setenv(refresh_mod.NOTEBOOKLM_REFRESH_CMD_ENV, "refresh-auth")
+    monkeypatch.setattr(refresh_mod, "_fetch_tokens_with_jar", fetch)
+    monkeypatch.setattr(refresh_mod, "_coalesced_run_refresh_cmd", refresh_cmd)
+    monkeypatch.setattr(recovery_mod, "try_headless_reauth", AsyncMock(return_value=True))
+    monkeypatch.setattr(recovery_mod, "try_master_token_reauth", AsyncMock(return_value=False))
+
+    with pytest.raises(_LoginRedirectError):
+        await refresh_mod._fetch_tokens_with_refresh(jar, storage, allow_headless=True)
+
+    assert refresh_cmd.await_count == 1, (
+        "the retired post-ladder backstop must not re-enter L2.5 when a rung "
+        "recovered but its revalidation still redirects (site B)"
+    )
 
 
 @pytest.mark.asyncio

@@ -475,7 +475,7 @@ def _login_with_browser_cookies(
         io.fail(1)
 
     # replace_from_login already scrubbed the legacy sibling context.json[account]
-    # key as part of its own atomic write (storage_writer.py).
+    # key as part of its own atomic write (_auth/storage.py).
 
     saved_msg = f"\n[green]Authentication saved to:[/green] {storage_path}"
     if email:

@@ -48,10 +48,11 @@ if TYPE_CHECKING:
 #   names are exactly the previously-importable names the annotations no
 #   longer reference.
 from ._artifacts import ArtifactsAPI
-from ._auth.account import _probe_authuser, get_account_email_for_storage, write_account_metadata
+from ._auth.account import _probe_authuser
 from ._auth.account import authuser_query as authuser_query
 from ._auth.extraction import extract_wiz_field as extract_wiz_field
 from ._auth.session import refresh_auth_session
+from ._auth.storage import get_account_email_for_storage, write_account_metadata
 from ._chat import ChatAPI
 from ._client_assembly import _assemble_client
 from ._client_composed import ClientComposed

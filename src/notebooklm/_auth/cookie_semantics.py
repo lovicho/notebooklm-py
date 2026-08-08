@@ -66,12 +66,36 @@ def normalize_cookie_expiry(raw: Any) -> NormalizedExpiry:
     return NormalizedExpiry(value, False)
 
 
-def validate_cookie_shape(entry: Any, *, require_nonempty_value: bool = True) -> dict[str, Any]:
+def validate_cookie_shape(
+    entry: Any, *, check_value: bool = True, require_nonempty_value: bool = True
+) -> dict[str, Any]:
     """Validate identity/value fields and return a shallow normalized copy.
+
+    The canonical "is this row usable?" predicate.  The load- and write-path
+    spellings are adapters over this one, differing only in how they report a
+    defect: :func:`notebooklm._auth.cookies._sanitize_cookie_entry` returns
+    ``None`` and logs a redacted diagnostic, the write-time domain filter
+    (:func:`notebooklm._auth.storage.filter_storage_state_cookies_by_domain_policy`) maps
+    :attr:`CookieRowError.field` to a bounded per-field warning, and callers that
+    want the raise take it straight.  Keeping the *checks* here and the *failure
+    mode* at the boundary is what stops "is this row usable" from being
+    re-derived per call site.
+
+    ``check_value=False`` skips the value field entirely, for the callers that
+    gate on identity alone: the write-time filter keeps rows whose value it never
+    reads, and the recovery observation deliberately records identities for
+    value-less rows so a rotation can replace them.  ``require_nonempty_value``
+    narrows the check when it *is* performed (a present-but-empty value is a
+    usable identity for the CLI import preview, but not for a request jar).
 
     Expiry is intentionally not touched here.  Recovery's persisted-liveness
     predicate needs to recognize a structurally valid row with a malformed
     expiry as present on disk, while routing and conversion must reject it.
+
+    Not yet universal: ``_auth/storage.py``'s snapshot helper still re-derives
+    the same four checks with a third failure mode (silent ``None``). Routing it
+    is a follow-up — ``cookie_semantics`` is a leaf with no first-party imports,
+    so the edge would be cycle-free.
     """
     if not isinstance(entry, dict):
         raise CookieRowError("row", "not a dict")
@@ -81,9 +105,10 @@ def validate_cookie_shape(entry: Any, *, require_nonempty_value: bool = True) ->
         if not isinstance(value, str) or not value:
             raise CookieRowError(field, "missing or non-string")
 
-    value = entry.get("value")
-    if not isinstance(value, str) or (require_nonempty_value and not value):
-        raise CookieRowError("value", "missing or non-string")
+    if check_value:
+        value = entry.get("value")
+        if not isinstance(value, str) or (require_nonempty_value and not value):
+            raise CookieRowError("value", "missing or non-string")
 
     path = entry.get("path")
     if path is not None and not isinstance(path, str):
@@ -94,8 +119,14 @@ def validate_cookie_shape(entry: Any, *, require_nonempty_value: bool = True) ->
     return normalized
 
 
-def sanitize_cookie_entry(entry: Any) -> dict[str, Any]:
-    """Validate a row and replace its expiry with a safe canonical value."""
-    normalized = validate_cookie_shape(entry)
+def sanitize_cookie_entry(entry: Any, *, check_value: bool = True) -> dict[str, Any]:
+    """Validate a row and replace its expiry with a safe canonical value.
+
+    :func:`validate_cookie_shape` plus expiry normalization — the full row
+    contract for anything that will be rebuilt into an ``http.cookiejar.Cookie``
+    or persisted, since every such path goes through ``int(float(expires))``.
+    ``check_value`` is forwarded verbatim.
+    """
+    normalized = validate_cookie_shape(entry, check_value=check_value)
     normalized["expires"] = normalize_cookie_expiry(entry.get("expires")).value
     return normalized

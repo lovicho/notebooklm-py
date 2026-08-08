@@ -232,7 +232,7 @@ class TestLoginWindowsPermissions:
         """On Windows the canonical writer skips all POSIX permission mutation.
 
         Behavior test (not a source grep): since b-PR3 the ``storage_state.json``
-        save path funnels through ``_auth.storage_writer``, whose parent-dir
+        save path funnels through ``_auth.storage``, whose parent-dir
         ``0700`` and backup ``0600`` chmods (and the file-mode ``fchmod``) are
         POSIX-only and guarded on ``sys.platform``. With the platform forced to
         ``win32`` a real ``storage_state.json`` write through the canonical
@@ -245,7 +245,6 @@ class TestLoginWindowsPermissions:
 
         from notebooklm._atomic_io import _atomic_write_json_unchecked
         from notebooklm._auth import storage as storage_mod
-        from notebooklm._auth import storage_writer as sw
 
         chmod_calls: list[tuple] = []
         real_chmod = os.chmod
@@ -273,7 +272,7 @@ class TestLoginWindowsPermissions:
         monkeypatch.setattr(os, "chmod", _spy_chmod)
         if real_fchmod is not None:
             monkeypatch.setattr(os, "fchmod", _spy_fchmod)
-        monkeypatch.setattr(sw.sys, "platform", "win32")
+        monkeypatch.setattr(storage_mod.sys, "platform", "win32")
 
         path = tmp_path / "storage_state.json"
         # Pre-existing target so the writer takes its overwrite path (the
@@ -293,7 +292,7 @@ class TestLoginWindowsPermissions:
         # via its OWN os.chmod (unrelated to the writer's win32-guarded chmod),
         # which would be noise here. The parent-dir 0700 chmod and the file-mode
         # fchmod are the writer/_atomic_io permission bits under test.
-        outcome = sw.replace_from_login(path, state, include_domains=None)
+        outcome = storage_mod.replace_from_login(path, state, include_domains=None)
 
         assert outcome.ok, outcome
         assert path.exists()  # the write still succeeded under the win32 guard

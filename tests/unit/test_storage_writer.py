@@ -1,4 +1,7 @@
-"""Unit tests for the canonical ``storage_writer`` (refactor (b), b-PR1).
+"""Unit tests for the canonical storage writers (refactor (b), b-PR1).
+
+The writers were absorbed into ``_auth/storage.py`` by ADR-0033's persistence
+merge; this suite drives them there (``storage_mod``).
 
 Covers the relocated intent-shaped API's per-intent lock-failure policy and the
 value-free outcome contract. The CAS ``merge_cookie_delta`` body is exercised
@@ -17,7 +20,6 @@ import pytest
 
 from notebooklm._auth import master_token as mt_mod
 from notebooklm._auth import storage as storage_mod
-from notebooklm._auth import storage_writer as sw
 
 
 @contextlib.contextmanager
@@ -36,8 +38,8 @@ def _patch_lock_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_write_outcome_is_value_free() -> None:
     """``WriteOutcome`` carries only an enum status — never any payload."""
-    ok = sw.WriteOutcome(sw.WriteStatus.OK)
-    bad = sw.WriteOutcome(sw.WriteStatus.LOCK_UNAVAILABLE)
+    ok = storage_mod.WriteOutcome(storage_mod.WriteStatus.OK)
+    bad = storage_mod.WriteOutcome(storage_mod.WriteStatus.LOCK_UNAVAILABLE)
     assert ok.ok and not ok.lock_unavailable
     assert bad.lock_unavailable and not bad.ok
     # A sentinel secret must never be able to reach repr/str (there is no field
@@ -53,7 +55,7 @@ def test_write_outcome_is_value_free() -> None:
 def test_update_account_metadata_writes_in_band(tmp_path: Path) -> None:
     path = tmp_path / "storage_state.json"
     path.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
-    sw.update_account_metadata(path, authuser=2, email="a@example.com")
+    storage_mod.update_account_metadata(path, authuser=2, email="a@example.com")
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["notebooklm"] == {
         "version": 1,
@@ -75,10 +77,10 @@ def test_update_account_metadata_only_if_absent_skips_when_already_present(
     path.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
 
     # The concurrent fresh write that "wins" the race.
-    sw.update_account_metadata(path, authuser=0, email="new@example.com")
+    storage_mod.update_account_metadata(path, authuser=0, email="new@example.com")
 
     # The belated stale write a slow promoter attempts — must be rejected.
-    wrote = sw.update_account_metadata(
+    wrote = storage_mod.update_account_metadata(
         path, authuser=2, email="old@example.com", only_if_absent=True
     )
     assert wrote is False
@@ -93,7 +95,9 @@ def test_update_account_metadata_only_if_absent_writes_when_empty(tmp_path: Path
     path = tmp_path / "storage_state.json"
     path.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
 
-    wrote = sw.update_account_metadata(path, authuser=3, email="x@example.com", only_if_absent=True)
+    wrote = storage_mod.update_account_metadata(
+        path, authuser=3, email="x@example.com", only_if_absent=True
+    )
 
     assert wrote is True
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -106,8 +110,8 @@ def test_update_account_metadata_fails_closed_on_lock_unavailable(
     path = tmp_path / "storage_state.json"
     path.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
     _patch_lock_unavailable(monkeypatch)
-    with pytest.raises(sw.LockUnavailableError):
-        sw.update_account_metadata(path, authuser=1, email="a@example.com")
+    with pytest.raises(storage_mod.LockUnavailableError):
+        storage_mod.update_account_metadata(path, authuser=1, email="a@example.com")
     # Fail-closed: the file must be untouched (no partial account write).
     assert "notebooklm" not in json.loads(path.read_text(encoding="utf-8"))
 
@@ -119,10 +123,10 @@ def test_clear_in_band_account_swallows_lock_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "storage_state.json"
-    sw.update_account_metadata(path, authuser=1, email="a@example.com")  # seed a record
+    storage_mod.update_account_metadata(path, authuser=1, email="a@example.com")  # seed a record
     _patch_lock_unavailable(monkeypatch)
     # Best-effort: no raise, and the record is left intact.
-    sw.clear_in_band_account(path)
+    storage_mod.clear_in_band_account(path)
     assert "notebooklm" in json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -155,7 +159,7 @@ def test_replace_from_remint_carry_account_preserves_namespace(tmp_path: Path) -
         ),
         encoding="utf-8",
     )
-    outcome = sw.replace_from_remint(path, _captured_state(), carry_account=True)
+    outcome = storage_mod.replace_from_remint(path, _captured_state(), carry_account=True)
     assert outcome.ok
     data = json.loads(path.read_text(encoding="utf-8"))
     # Cookies replaced (not merged) …
@@ -179,7 +183,7 @@ def test_replace_from_remint_no_carry_drops_stale_binding(tmp_path: Path) -> Non
         ),
         encoding="utf-8",
     )
-    outcome = sw.replace_from_remint(path, _captured_state(), carry_account=False)
+    outcome = storage_mod.replace_from_remint(path, _captured_state(), carry_account=False)
     assert outcome.ok
     data = json.loads(path.read_text(encoding="utf-8"))
     assert {c["name"] for c in data["cookies"]} == {"SID", "SAPISID"}
@@ -194,7 +198,7 @@ def test_replace_from_remint_takes_storage_lock(
     racing a concurrent keepalive with a lockless write."""
     path = tmp_path / "storage_state.json"
     _patch_lock_unavailable(monkeypatch)
-    outcome = sw.replace_from_remint(path, _captured_state(), carry_account=True)
+    outcome = storage_mod.replace_from_remint(path, _captured_state(), carry_account=True)
     assert outcome.lock_unavailable
     assert not path.exists()  # nothing written without the lock
 
@@ -217,7 +221,7 @@ def test_replace_from_remint_filters_domains_but_keeps_trusted_subdomains(
         ],
         "origins": [],
     }
-    outcome = sw.replace_from_remint(path, captured, carry_account=False)
+    outcome = storage_mod.replace_from_remint(path, captured, carry_account=False)
     assert outcome.ok
     names = {c["name"] for c in json.loads(path.read_text(encoding="utf-8"))["cookies"]}
     assert "YT" not in names  # unallowlisted domain filtered out at the chokepoint
@@ -250,7 +254,7 @@ def test_login_write_outcome_is_value_free(tmp_path: Path) -> None:
         ],
         "origins": [],
     }
-    outcome = sw.replace_from_login(path, state, include_domains=None)
+    outcome = storage_mod.replace_from_login(path, state, include_domains=None)
     assert outcome.required_cookies_dropped
     assert "SENTINEL-SECRET" not in repr(outcome)
     assert not path.exists()
@@ -266,11 +270,11 @@ def test_replace_from_login_filters_and_records_include_domains(tmp_path: Path) 
             {"name": "MEDIA", "value": "m", "domain": "lh3.googleusercontent.com", "path": "/"},
         ]
     )
-    outcome = sw.replace_from_login(
+    outcome = storage_mod.replace_from_login(
         path,
         state,
         include_domains={"youtube"},
-        account=sw.AccountRecord(authuser=2, email="a@example.com"),
+        account=storage_mod.AccountRecord(authuser=2, email="a@example.com"),
     )
     assert outcome.ok
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -295,7 +299,9 @@ def test_replace_from_login_default_drops_youtube_keeps_trusted_roots(tmp_path: 
             {"name": "MEDIA", "value": "m", "domain": "lh3.googleusercontent.com", "path": "/"},
         ]
     )
-    outcome = sw.replace_from_login(path, state, include_domains=None, account=sw.CLEAR_ACCOUNT)
+    outcome = storage_mod.replace_from_login(
+        path, state, include_domains=None, account=storage_mod.CLEAR_ACCOUNT
+    )
     assert outcome.ok
     data = json.loads(path.read_text(encoding="utf-8"))
     names = {c["name"] for c in data["cookies"]}
@@ -316,7 +322,7 @@ def test_replace_from_login_required_dropped_writes_nothing(tmp_path: Path) -> N
         ],
         "origins": [],
     }
-    outcome = sw.replace_from_login(path, state, include_domains=None)
+    outcome = storage_mod.replace_from_login(path, state, include_domains=None)
     assert outcome.required_cookies_dropped
     assert outcome.missing_required == ("SID",)
     assert "__Secure-1PSIDTS" in outcome.present_names
@@ -327,7 +333,9 @@ def test_replace_from_login_keep_account_carries_input_namespace(tmp_path: Path)
     """KEEP_ACCOUNT (the import default) carries whatever the input state holds —
     import states carry none, so the result carries none."""
     path = tmp_path / "storage_state.json"
-    outcome = sw.replace_from_login(path, _login_state(), include_domains=None)  # default KEEP
+    outcome = storage_mod.replace_from_login(
+        path, _login_state(), include_domains=None
+    )  # default KEEP
     assert outcome.ok
     data = json.loads(path.read_text(encoding="utf-8"))
     assert "notebooklm" not in data  # KEEP + no opt-ins + input had no namespace
@@ -360,7 +368,9 @@ def test_replace_from_login_keep_account_promotes_legacy_instead_of_destroying_i
         encoding="utf-8",
     )
 
-    outcome = sw.replace_from_login(path, _login_state(), include_domains=None)  # default KEEP
+    outcome = storage_mod.replace_from_login(
+        path, _login_state(), include_domains=None
+    )  # default KEEP
 
     assert outcome.ok
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -384,8 +394,8 @@ def test_replace_from_login_clear_account_does_not_resurrect_legacy_binding(
         encoding="utf-8",
     )
 
-    outcome = sw.replace_from_login(
-        path, _login_state(), include_domains=None, account=sw.CLEAR_ACCOUNT
+    outcome = storage_mod.replace_from_login(
+        path, _login_state(), include_domains=None, account=storage_mod.CLEAR_ACCOUNT
     )
 
     assert outcome.ok
@@ -400,7 +410,7 @@ def test_replace_from_login_import_backup_inside_lock(tmp_path: Path) -> None:
 
     path = tmp_path / "storage_state.json"
     path.write_text(json.dumps({"cookies": [{"name": "OLD"}], "origins": []}), encoding="utf-8")
-    outcome = sw.replace_from_login(
+    outcome = storage_mod.replace_from_login(
         path, _login_state(), include_domains=None, include_optional=True, backup=True
     )
     assert outcome.ok
@@ -418,7 +428,7 @@ def test_replace_from_login_fails_closed_on_lock_unavailable(
 ) -> None:
     path = tmp_path / "storage_state.json"
     _patch_lock_unavailable(monkeypatch)
-    outcome = sw.replace_from_login(path, _login_state(), include_domains=None)
+    outcome = storage_mod.replace_from_login(path, _login_state(), include_domains=None)
     assert outcome.lock_unavailable
     assert not path.exists()  # nothing written without the lock
 
@@ -450,7 +460,7 @@ def test_persist_minted_jar_replaces_cookies_and_rebinds_account(tmp_path: Path)
         ),
         encoding="utf-8",
     )
-    sw.persist_minted_jar(path, _minted_jar(), email="minted@example.com")
+    storage_mod.persist_minted_jar(path, _minted_jar(), email="minted@example.com")
     data = json.loads(path.read_text(encoding="utf-8"))
     names = {c["name"] for c in data["cookies"]}
     assert names == {"SID", "APISID", "SAPISID"}  # replaced, not merged
@@ -481,7 +491,7 @@ def test_persist_minted_jar_filters_unallowlisted_but_keeps_rebind(tmp_path: Pat
     # An unallowlisted sibling-product cookie that must NOT reach disk.
     jar.set("YT", "y", domain=".youtube.com", path="/")
 
-    sw.persist_minted_jar(path, jar, email="minted@example.com")
+    storage_mod.persist_minted_jar(path, jar, email="minted@example.com")
     data = json.loads(path.read_text(encoding="utf-8"))
     names = {c["name"] for c in data["cookies"]}
     assert "YT" not in names  # L4: unallowlisted cookie filtered out at persist
@@ -506,7 +516,7 @@ def test_persist_minted_jar_refuses_a_different_recorded_owner(tmp_path: Path) -
         encoding="utf-8",
     )
     with pytest.raises(mt_mod.MasterTokenError, match="owner@example.com"):
-        sw.persist_minted_jar(path, _minted_jar(), email="attacker@example.com")
+        storage_mod.persist_minted_jar(path, _minted_jar(), email="attacker@example.com")
     # Refused BEFORE any write: the original owner's cookies are untouched.
     data = json.loads(path.read_text(encoding="utf-8"))
     assert "cookies" not in data or data.get("cookies") == []
@@ -519,7 +529,7 @@ def test_persist_minted_jar_refuses_an_unrecorded_owner(tmp_path: Path) -> None:
     path = tmp_path / "storage_state.json"
     path.write_text(json.dumps({"cookies": [{"name": "OLD", "value": "x"}]}), encoding="utf-8")
     with pytest.raises(mt_mod.MasterTokenError, match="no recorded account owner"):
-        sw.persist_minted_jar(path, _minted_jar(), email="minted@example.com")
+        storage_mod.persist_minted_jar(path, _minted_jar(), email="minted@example.com")
 
 
 def test_persist_minted_jar_force_overrides_a_different_owner(tmp_path: Path) -> None:
@@ -530,7 +540,7 @@ def test_persist_minted_jar_force_overrides_a_different_owner(tmp_path: Path) ->
         ),
         encoding="utf-8",
     )
-    sw.persist_minted_jar(path, _minted_jar(), email="new@example.com", force=True)
+    storage_mod.persist_minted_jar(path, _minted_jar(), email="new@example.com", force=True)
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["notebooklm"]["account"] == {"authuser": 0, "email": "new@example.com"}
 
@@ -540,7 +550,7 @@ def test_persist_minted_jar_proceeds_when_no_existing_storage(tmp_path: Path) ->
     the first-ever mint into a fresh profile must not require force."""
     path = tmp_path / "storage_state.json"
     assert not path.exists()
-    sw.persist_minted_jar(path, _minted_jar(), email="minted@example.com")
+    storage_mod.persist_minted_jar(path, _minted_jar(), email="minted@example.com")
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["notebooklm"]["account"] == {"authuser": 0, "email": "minted@example.com"}
 
@@ -559,7 +569,7 @@ def test_persist_minted_jar_refuse_unknown_owner_false_allows_unrecorded_owner(
     metadata at all)."""
     path = tmp_path / "storage_state.json"
     path.write_text(json.dumps({"cookies": [{"name": "OLD", "value": "x"}]}), encoding="utf-8")
-    sw.persist_minted_jar(
+    storage_mod.persist_minted_jar(
         path, _minted_jar(), email="minted@example.com", refuse_unknown_owner=False
     )
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -581,7 +591,7 @@ def test_persist_minted_jar_refuse_unknown_owner_false_still_refuses_different_o
         encoding="utf-8",
     )
     with pytest.raises(mt_mod.MasterTokenError, match="owner@example.com"):
-        sw.persist_minted_jar(
+        storage_mod.persist_minted_jar(
             path, _minted_jar(), email="attacker@example.com", refuse_unknown_owner=False
         )
 
@@ -591,8 +601,8 @@ def test_persist_minted_jar_fails_closed_on_lock_unavailable(
 ) -> None:
     path = tmp_path / "storage_state.json"
     _patch_lock_unavailable(monkeypatch)
-    with pytest.raises(sw.LockUnavailableError):
-        sw.persist_minted_jar(path, _minted_jar(), email="minted@example.com")
+    with pytest.raises(storage_mod.LockUnavailableError):
+        storage_mod.persist_minted_jar(path, _minted_jar(), email="minted@example.com")
 
 
 # --- write_master_token: now locked + atomic, fails CLOSED -----------------
@@ -602,7 +612,7 @@ def test_write_master_token_roundtrip_and_mode(tmp_path: Path) -> None:
     import sys
 
     path = tmp_path / "master_token.json"
-    sw.write_master_token(path, email="e@x.com", master_token="aas_et/M", android_id="abc")
+    storage_mod.write_master_token(path, email="e@x.com", master_token="aas_et/M", android_id="abc")
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data == {
         "version": 1,
@@ -619,8 +629,10 @@ def test_write_master_token_fails_closed_on_lock_unavailable(
 ) -> None:
     path = tmp_path / "master_token.json"
     _patch_lock_unavailable(monkeypatch)
-    with pytest.raises(sw.LockUnavailableError):
-        sw.write_master_token(path, email="e@x.com", master_token="aas_et/M", android_id="abc")
+    with pytest.raises(storage_mod.LockUnavailableError):
+        storage_mod.write_master_token(
+            path, email="e@x.com", master_token="aas_et/M", android_id="abc"
+        )
 
 
 # --- bounded acquire tristate ----------------------------------------------
@@ -628,10 +640,10 @@ def test_write_master_token_fails_closed_on_lock_unavailable(
 
 def test_acquire_storage_lock_held_then_released(tmp_path: Path) -> None:
     lock_path = tmp_path / ".storage_state.json.lock"
-    with sw._acquire_storage_lock(lock_path, log_prefix="test") as state:
+    with storage_mod._acquire_storage_lock(lock_path, log_prefix="test") as state:
         assert state == "held"
     # After release the same-process acquire succeeds again (in-process lock freed).
-    with sw._acquire_storage_lock(lock_path, log_prefix="test") as state:
+    with storage_mod._acquire_storage_lock(lock_path, log_prefix="test") as state:
         assert state == "held"
 
 
@@ -647,7 +659,9 @@ def test_acquire_storage_lock_times_out_bounded(
         yield "contended"
 
     monkeypatch.setattr(storage_mod, "_file_lock", always_contended)
-    with sw._acquire_storage_lock(lock_path, log_prefix="test", deadline_seconds=0.05) as state:
+    with storage_mod._acquire_storage_lock(
+        lock_path, log_prefix="test", deadline_seconds=0.05
+    ) as state:
         assert state == "unavailable"
 
 
@@ -661,7 +675,7 @@ def test_ensure_secure_parent_dir_creates_at_0700(tmp_path: Path) -> None:
     if sys.platform == "win32":
         pytest.skip("POSIX permission semantics")
     path = tmp_path / "sub" / "storage_state.json"
-    sw._ensure_secure_parent_dir(path)
+    storage_mod._ensure_secure_parent_dir(path)
     assert path.parent.is_dir()
     assert (path.parent.stat().st_mode & 0o777) == 0o700
 
@@ -682,7 +696,7 @@ def test_ensure_secure_parent_dir_retightens_existing_loose_dir(tmp_path: Path) 
     os.chmod(parent, 0o755)
     assert (parent.stat().st_mode & 0o777) == 0o755
 
-    sw._ensure_secure_parent_dir(parent / "storage_state.json")
+    storage_mod._ensure_secure_parent_dir(parent / "storage_state.json")
 
     # Unconditional chmod re-tightened the already-existing directory.
     assert (parent.stat().st_mode & 0o777) == 0o700
@@ -700,8 +714,58 @@ def test_writer_intent_retightens_loose_parent_dir(tmp_path: Path) -> None:
     parent.mkdir(mode=0o700)
     os.chmod(parent, 0o755)
 
-    sw.write_master_token(
+    storage_mod.write_master_token(
         parent / "master_token.json", email="e@x.com", master_token="aas_et/M", android_id="abc"
     )
 
     assert (parent.stat().st_mode & 0o777) == 0o700
+
+
+def test_replace_from_login_failed_write_leaves_legacy_account_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that did nothing must not reach the legacy-account scrub.
+
+    Before the transaction conversion this was STRUCTURAL: both non-OK returns
+    sat inside the ``with``, so the post-lock legacy step was unreachable on a
+    failed write. Routed through ``in_storage_transaction`` they became the
+    transaction's return value, and reachability now rests entirely on the
+    explicit post-transaction ``status is not OK`` guard — the only new control
+    flow the conversion introduced, and (until this test) the only part of it
+    nothing covered: deleting the guard left the whole relevant suite green.
+
+    Without it, a ``CLEAR_ACCOUNT`` login whose required cookies were dropped,
+    or that never got the lock, scrubs the legacy ``context.json`` account key
+    after writing nothing — ``_drop_legacy_account_key`` removes the file once
+    it is empty. That is the #2103 data-loss class re-opened from the other
+    side, so the guard is load-bearing rather than tidy.
+    """
+    dropped_state = {
+        "cookies": [
+            {"name": "SID", "value": "s", "domain": ".youtube.com", "path": "/"},
+            {"name": "__Secure-1PSIDTS", "value": "p", "domain": ".google.com", "path": "/"},
+        ],
+        "origins": [],
+    }
+    legacy = {"account": {"authuser": 3, "email": "legacy@example.com"}}
+
+    for label in ("required_dropped", "lock_unavailable"):
+        path = tmp_path / label / "storage_state.json"
+        path.parent.mkdir(parents=True)
+        context_path = path.with_name("context.json")
+        context_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        with monkeypatch.context() as patch:
+            if label == "lock_unavailable":
+                _patch_lock_unavailable(patch)
+                state = _login_state()
+            else:
+                state = dropped_state
+            outcome = storage_mod.replace_from_login(
+                path, state, include_domains=None, account=storage_mod.CLEAR_ACCOUNT
+            )
+
+        assert outcome.status is not storage_mod.LoginWriteStatus.OK, label
+        # The legacy record — and the file itself — must survive a no-op write.
+        assert context_path.exists(), f"{label}: context.json was deleted by a failed write"
+        assert json.loads(context_path.read_text(encoding="utf-8")) == legacy, label

@@ -8,6 +8,15 @@ writers onto `replace_from_login`, lands the runtime `atomic_write_json`
 storage-state rejection + module-private bypass, and shrinks the storage-state
 exemption to `{migration.py}`).
 
+**Amended by [ADR-0033](0033-auth-consolidation-policy.md) (persistence merge):**
+the single sanctioned home is now `_auth/storage.py`, which absorbed this
+module; `storage_writer.py` remains only as a re-export shim. The boundary this
+ADR establishes is unchanged in substance but is now enforced at **function**
+granularity — an equality-asserted allowlist of the intent-writer function names
+permitted to reach the `_atomic_io` bypass — because a module-granular assertion
+over the merged persistence module would no longer constrain much. The Decision
+below is left as written: it records what was decided then.
+
 Scope of b-PR1 (per plan §b.6): **relocations + additive enforcement + the
 [storage-F3] save-ordering guard**. The relocations are behaviour-preserving for
 the happy path; the additive parts that DO change observable behaviour are, by
@@ -177,6 +186,52 @@ back-compat (de-blessed, not removed). `replace_from_login` / `LoginWriteOutcome
 `notebooklm.auth` re-exports so the CLI reaches them without importing private
 `_auth` modules.
 
+*Amended again (auth-deepening PR 5.1, ADR-0033):* the anti-wrong-account
+contract above is unchanged, but it is no longer implemented by writing on a
+read. `read_account_metadata` sits on the **per-RPC** token-route path
+(`refresh._resolve_token_route_kwargs` → `get_authuser_for_storage`), and the
+paragraph above had it taking the storage **write** lock — a 90 s bounded
+acquire — on every read of a not-yet-migrated profile. The two compensations
+that existed only for that (a promotion-specific 2 s lock deadline, and a
+warn-once-per-path throttle so a persistently failing promotion would not log
+twice per request forever) are both deleted with it.
+
+What replaces it keeps the property that mattered: when in-band is absent the
+reader **derives** the record read-only from the legacy sibling, through the
+same `_sanitize_legacy_account_record` the promotion embeds with, so the result
+is still genuinely in-band-*shaped* and never a raw legacy pass-through.
+Durable promotion becomes a fire-and-forget one-shot per canonical storage
+path, scheduled from the read and joined by nobody
+(`account._schedule_legacy_promotion`). Consequences:
+
+- The read takes **no** lock on either fast path, and takes only a brief
+  scheduling lock — never the storage lock — on the legacy branch. The write
+  never runs on a caller's thread.
+- The one-shot is single-flight per path (N concurrent readers ⇒ one
+  promotion) and does **not** retry in-process. A failed promotion costs
+  nothing: the reader already answers correctly without it, so retrying would
+  only put a failing write back near a per-RPC path.
+- It hangs off the **read path**, not startup, deliberately. `migration.py`
+  fires only for pre-v0.5.0 two-file HOME layouts and is not a general
+  durable-promotion backstop, and the `NOTEBOOKLM_AUTH_JSON` env-auth path
+  (#2083) may never pass through it at all — env-auth carries its record
+  in-band by construction and has no sibling to promote.
+- `replace_from_login`'s own `promote_legacy_account` call (the
+  `KEEP_ACCOUNT`-with-no-in-band-record arm, which stops `auth import-cookies`
+  from destroying a legacy profile's only binding) is untouched: it is a
+  data-loss guard, not a migration backstop, and keeps its semantics.
+- Observable delta for operators: on a legacy profile the sibling
+  `context.json[account]` is scrubbed a moment *after* the first read rather
+  than during it, and a profile whose promotion keeps failing is now warned
+  about by a plain, default-visible WARNING rather than one gated behind a
+  per-path throttle. The frequency is unchanged in the worst case and lower in
+  practice: the one-shot is single-flight per canonical path and never retries
+  in-process, so the read path can emit this at most once per path per process
+  (plus at most one each from startup migration and `replace_from_login`). No
+  returned value changes — `tests/unit/test_auth_account_promotion.py` pins
+  derived-vs-promoted equality field-by-field across a matrix of malformed
+  legacy shapes.
+
 ## Consequences
 
 - All `storage_state.json` mutations funnel through one auditable module.
@@ -216,5 +271,7 @@ back-compat (de-blessed, not removed). `replace_from_login` / `LoginWriteOutcome
 ## Related references
 
 - [Architecture](../architecture.md) — layered design and the `_auth/` file index.
+- [ADR-0033](0033-auth-consolidation-policy.md) — the persistence merge that relocated this
+  writer into `_auth/storage.py` and moved the boundary to function granularity.
 - ADR-0017 — public facade / private implementation (the delegate-seam pattern).
 - #1215 — `atomic_update_json` storage-state rejection (the enforced-invariant precedent).

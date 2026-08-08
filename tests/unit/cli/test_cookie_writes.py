@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 
-from notebooklm._auth.storage_writer import LoginWriteOutcome, LoginWriteStatus
+from notebooklm._auth.storage import LoginWriteOutcome, LoginWriteStatus
 from notebooklm.cli.services.login import cookie_writes
 from notebooklm.cli.services.login.outcomes import CookieValidationFailure
 from tests._fixtures.login_io import RecordingLoginIO, make_recording_io

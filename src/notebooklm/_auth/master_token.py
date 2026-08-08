@@ -37,6 +37,17 @@ from typing import Any
 import httpx
 from filelock import FileLock, Timeout
 
+# The bootstrap lock's PATH is derived by the one shared credential-lock
+# derivation in ``paths.py`` (ADR-0033 PR 1.3) — this module used to hand-roll
+# its own ``expanduser().resolve()`` + f-string sibling, the fourth and last
+# spelling of a computation whose filenames must never drift apart. Its
+# MECHANISM stays ``filelock.FileLock`` here, unchanged and deliberately not
+# unified with ``storage._file_lock`` (plan §1/§5: a cross-version and
+# cross-platform interop event this effort does not take). ``paths`` imports
+# nothing from this package, so this is a plain module-level import, not one of
+# the deferred cycle-breaks below.
+from .paths import _bootstrap_lock_path
+
 # perform_oauth for the OAuthLogin token rides the Chromecast app + signature
 # (the spike confirmed the labs-tailwind app's sig downscopes; chromecast yields
 # a uberauth-capable token; the labs-tailwind app's sig downscopes to email).
@@ -225,7 +236,7 @@ def storage_state_from_jar(jar: httpx.Cookies, *, email: str | None = None) -> d
         "origins": [],
     }
     if email is not None:
-        # Mirrors _auth/account.write_account_metadata's namespace shape.
+        # Mirrors _auth/storage.write_account_metadata's namespace shape.
         state["notebooklm"] = {"version": 1, "account": {"authuser": 0, "email": email}}
     return state
 
@@ -245,7 +256,7 @@ def persist_minted_jar(
     a re-mint is a brand-new session.
 
     Delegates the storage-state write to the canonical
-    :func:`notebooklm._auth.storage_writer.persist_minted_jar`, which routes the
+    :func:`notebooklm._auth.storage.persist_minted_jar`, which routes the
     write through ``_atomic_io`` (fsync durability + temp cleanup, closing
     [storage-F5]) under the unified bounded storage lock. This function stays as
     the ``notebooklm.auth``-exported facade symbol.
@@ -258,11 +269,11 @@ def persist_minted_jar(
     entirely) and closes the TOCTOU window a check-before-mint pre-check alone
     cannot. ``refuse_unknown_owner`` (default ``True``) additionally refuses
     existing storage with NO recorded owner at all; see
-    :func:`notebooklm._auth.storage_writer.persist_minted_jar` for why
+    :func:`notebooklm._auth.storage.persist_minted_jar` for why
     ``remint_from_stored_token`` passes ``False`` here."""
-    from . import storage_writer  # noqa: PLC0415 (avoid import cycle)
+    from . import storage  # noqa: PLC0415 (deferred; no cycle either way (verified))
 
-    storage_writer.persist_minted_jar(
+    storage.persist_minted_jar(
         path, jar, email=email, force=force, refuse_unknown_owner=refuse_unknown_owner
     )
 
@@ -290,16 +301,14 @@ def read_master_token(path: Path) -> dict[str, Any] | None:
 def write_master_token(path: Path, *, email: str, master_token: str, android_id: str) -> None:
     """Persist a master-token record at mode 0600 (full-account credential).
 
-    Delegates to :func:`notebooklm._auth.storage_writer.write_master_token`,
+    Delegates to :func:`notebooklm._auth.storage.write_master_token`,
     which routes the write through ``_atomic_io`` (atomic + fsync-durable + temp
     cleanup) under a bounded sibling lock — closing the lockless-write half of
     [storage-F5]. This function stays as the ``notebooklm.auth``-exported facade
     symbol."""
-    from . import storage_writer  # noqa: PLC0415 (avoid import cycle)
+    from . import storage  # noqa: PLC0415 (deferred; no cycle either way (verified))
 
-    storage_writer.write_master_token(
-        path, email=email, master_token=master_token, android_id=android_id
-    )
+    storage.write_master_token(path, email=email, master_token=master_token, android_id=android_id)
 
 
 # --- the transaction (relocated from cli/services/login/master_token.py,
@@ -308,8 +317,38 @@ def write_master_token(path: Path, *, email: str, master_token: str, android_id:
 
 
 async def _verify_by_listing_notebooks(storage_path: Path) -> int:
-    """Smoke-test a minted session: list notebooks. Returns the count."""
-    from ..client import NotebookLMClient  # noqa: PLC0415 (avoid import cycle)
+    """Smoke-test a minted session: list notebooks. Returns the count.
+
+    This is the ONLY place ``_auth`` reaches up to the top-level client, and
+    ADR-0033's PR 0.2 set out to delete the edge by injecting the verifier from
+    the call site. Investigation says it is irreducible at this layer, so it is
+    documented rather than faked:
+
+    * The sole caller is :func:`bootstrap_from_oauth_token`, which is itself the
+      outermost entry point — it is public surface, re-exported as
+      ``notebooklm.auth.master_token_bootstrap`` and called by library users
+      directly, not only by ``cli/master_token_login.py``.
+    * ``verify=True`` is that function's DEFAULT, and the behaviour that default
+      names is precisely "open a ``NotebookLMClient`` and list notebooks". So a
+      caller-supplied verifier can only remove this import if supplying one
+      becomes mandatory — a breaking signature change for every existing
+      ``master_token_bootstrap(verify=True)`` call — or if the default body
+      moves up into the ``notebooklm.auth`` facade, which would turn an
+      identity re-export into a wrapper and change the facade surface (plan §1
+      non-goal). Neither is available to a behaviour-frozen mechanical PR.
+    * The deferral is load-bearing, and the original ``(avoid import cycle)``
+      note is accurate here — unlike the two ``browser_capture`` sites this PR
+      corrected. Verified by hoisting it: ``client`` does
+      ``from .auth import AuthTokens`` at module scope (``client.py``) and
+      ``notebooklm.auth`` imports THIS module, so a top-level import closes
+      ``_auth.master_token -> client -> notebooklm.auth -> _auth.master_token``
+      and fails at import time with a partially-initialized ``notebooklm.auth``.
+
+    Removing the edge for real belongs with the ADR-0032 facade work that is
+    already licensed to reshape ``notebooklm.auth``; it is recorded here so the
+    next attempt does not re-derive the same dead end.
+    """
+    from ..client import NotebookLMClient  # noqa: PLC0415 (cycle via notebooklm.auth)
 
     async with NotebookLMClient.from_storage(path=str(storage_path)) as client:
         return len(await client.notebooks.list())
@@ -334,7 +373,7 @@ def assert_account_writable(*, email: str, storage_path: Path, force: bool = Fal
     instead of after a full sign-in. It cannot itself close the TOCTOU window
     between this check and the mint completing (the mint hasn't started yet).
     The AUTHORITATIVE, race-free enforcement lives under the storage-write
-    lock in :func:`notebooklm._auth.storage_writer.persist_minted_jar`
+    lock in :func:`notebooklm._auth.storage.persist_minted_jar`
     (#2103 PR-2 D6) — this function is a courtesy, not the guard."""
     if force:
         return
@@ -344,7 +383,10 @@ def assert_account_writable(*, email: str, storage_path: Path, force: bool = Fal
         # a raw AttributeError from `email.casefold()` below (#2103 PR-2 review).
         raise MasterTokenError("assert_account_writable requires a non-empty email.")
     from ..paths import master_token_path_for  # noqa: PLC0415 (avoid import cycle)
-    from .account import get_account_email_for_storage  # noqa: PLC0415 (avoid import cycle)
+
+    # Reader relocated from ``.account`` to ``.storage`` by ADR-0033 PR 5.2;
+    # kept deferred to match this module's two other ``storage`` imports.
+    from .storage import get_account_email_for_storage  # noqa: PLC0415 (no cycle either way)
 
     master_token_path = master_token_path_for(storage_path)
     try:
@@ -409,7 +451,7 @@ async def bootstrap_from_oauth_token(
     account (``--account`` mismatch) unless ``force`` — minting writes a full
     session + durable token into the profile, so a wrong profile silently
     clobbers it. See :func:`assert_account_writable` for the fail-fast
-    pre-check and :func:`notebooklm._auth.storage_writer.persist_minted_jar`
+    pre-check and :func:`notebooklm._auth.storage.persist_minted_jar`
     for the authoritative, lock-guarded enforcement.
 
     ``android_id`` defaults to ``None``, resolved explicit -> stored -> fresh
@@ -529,25 +571,6 @@ class BootstrapOutcome(enum.Enum):
     was attempted."""
     NO_TOKEN = "no_token"
     """No sibling master token exists, so there is nothing to bootstrap from."""
-
-
-def _bootstrap_lock_path(storage_path: Path) -> Path:
-    """Return the canonical lock that serializes first-time session minting.
-
-    Degrades to a best-effort (non-canonicalized) path on a circular symlink
-    rather than raising, matching :func:`notebooklm.paths.master_token_path_for`
-    (#2103 PR-1): ``Path.resolve()`` raises ``RuntimeError`` (not ``OSError``)
-    on a symlink loop on Python 3.10-3.12 (fixed upstream in 3.13). Found by
-    CodeRabbit during the combined PR review — this call site does its own
-    separate ``expanduser().resolve()`` rather than going through the shared
-    chokepoint (it derives a *lock* path, not the master-token sibling), so it
-    hadn't inherited PR-1's fix."""
-    expanded = storage_path.expanduser()
-    try:
-        canonical_path = expanded.resolve()
-    except (OSError, RuntimeError):
-        canonical_path = expanded
-    return canonical_path.with_name(f".{canonical_path.name}.lock.bootstrap")
 
 
 async def _acquire_bootstrap_lock(lock: FileLock) -> None:

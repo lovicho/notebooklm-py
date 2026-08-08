@@ -25,7 +25,7 @@ import httpx
 import pytest
 
 import notebooklm.cli.playwright_login_io as playwright_login_io_module
-from notebooklm._auth.storage_writer import LoginWriteOutcome, LoginWriteStatus
+from notebooklm._auth.storage import LoginWriteOutcome, LoginWriteStatus
 from notebooklm.cli.services.login import refresh
 from notebooklm.cli.services.login.outcomes import BrowserCookieOutcome
 

@@ -37,7 +37,6 @@ from ._auth import account as _auth_account
 from ._auth import cookie_policy as _cookie_policy
 from ._auth import cookies as _auth_cookies
 from ._auth import extraction as _auth_extraction
-from ._auth import headers as _auth_headers
 from ._auth import keepalive as _auth_keepalive
 from ._auth import paths as _auth_paths
 from ._auth import psidts_recovery as _auth_psidts_recovery
@@ -87,7 +86,7 @@ from ._auth.master_token import remint_from_stored_token as master_token_remint 
 # the three CLI writers reach ``replace_from_login`` (and its ``account`` sentinel
 # / value-free outcome) ONLY through this facade, exactly like
 # ``save_cookies_to_storage`` / ``write_account_metadata`` / ``persist_minted_jar``.
-from ._auth.storage_writer import (  # noqa: F401
+from ._auth.storage import (  # noqa: F401
     CLEAR_ACCOUNT,
     KEEP_ACCOUNT,
     AccountRecord,
@@ -233,25 +232,36 @@ extract_csrf_from_html = _auth_extraction.extract_csrf_from_html
 extract_session_id_from_html = _auth_extraction.extract_session_id_from_html
 extract_wiz_field = _auth_extraction.extract_wiz_field
 
-# Token-route resolver lives in ``notebooklm._auth.headers``; re-exported so
-# internal callers (``fetch_tokens``, ``fetch_tokens_with_domains`` — now in
-# ``_auth.refresh``) and white-box tests keep resolving the helper against
-# ``notebooklm.auth``.
-_resolve_token_route_kwargs = _auth_headers._resolve_token_route_kwargs
+# Token-route resolver. It used to live in ``notebooklm._auth.headers``; that
+# module was folded into ``_auth.refresh`` (ADR-0033 sanctioned merge) because
+# its sole function's only call sites are the token-fetch entry points there.
+# Still re-exported here so internal callers (``fetch_tokens``,
+# ``fetch_tokens_with_domains``) and white-box tests keep resolving the helper
+# against ``notebooklm.auth``.
+_resolve_token_route_kwargs = _auth_refresh._resolve_token_route_kwargs
 
 
+# ADR-0033 PR 5.2 split ``_auth.account`` along its real seam: the NETWORK
+# identity half (probing ``?authuser=N``, parsing the page email, formatting the
+# wire routing value) stayed in ``_auth.account``; the account RECORD half
+# (reading/writing/promoting/scrubbing the persisted ``{authuser, email}``
+# binding) moved next to the other ``storage_state.json`` readers and writers in
+# ``_auth.storage``. Every facade NAME below is unchanged and every one still
+# resolves to the very same function object — only the module the alias reads it
+# from moved, which is exactly what ``test_public_surface_manifest`` asserts
+# identity on.
 Account = _auth_account.Account
 MAX_AUTHUSER_PROBE = _auth_account.MAX_AUTHUSER_PROBE
-_ACCOUNT_CONTEXT_KEY = _auth_account._ACCOUNT_CONTEXT_KEY
+_ACCOUNT_CONTEXT_KEY = _auth_storage._ACCOUNT_CONTEXT_KEY
 # ``_account_context_path`` is no longer aliased here: it survives in
-# ``_auth.account`` solely as the private site of the legacy-key scrub and the
+# ``_auth.storage`` solely as the private site of the legacy-key scrub and the
 # one-shot promotion (whitebox tests patch the canonical home directly).
 extract_email_from_html = _auth_account.extract_email_from_html
 repair_account_metadata_from_playwright_storage = (
     _auth_account.repair_account_metadata_from_playwright_storage
 )
 _probe_authuser = _auth_account._probe_authuser
-read_account_metadata = _auth_account.read_account_metadata
+read_account_metadata = _auth_storage.read_account_metadata
 # ``read_account_metadata_from_storage_state``'s only facade importers
 # (cli/auth_runtime.py, _app/auth_check.py) now call ``resolve_account_identity``
 # instead (auth cross-boundary ledger shrink, follow-up to #2103), so it drops
@@ -260,19 +270,19 @@ read_account_metadata = _auth_account.read_account_metadata
 # ``scripts/api-compat-allowlist.json`` explicitly records this one as
 # retained/importable, a promise dropping the alias would silently break
 # (caught in review — PR #2139).
-read_account_metadata_from_storage_state = _auth_account.read_account_metadata_from_storage_state
-get_authuser_for_storage = _auth_account.get_authuser_for_storage
-get_account_email_for_storage = _auth_account.get_account_email_for_storage
+read_account_metadata_from_storage_state = _auth_storage.read_account_metadata_from_storage_state
+get_authuser_for_storage = _auth_storage.get_authuser_for_storage
+get_account_email_for_storage = _auth_storage.get_account_email_for_storage
 # Both kept importable here for the frozen first-party compatibility manifest
 # (tests/_guardrails/test_public_surface_manifest.py::_AUTH_FIRST_PARTY_COMPATIBILITY_NAMES)
 # even though no cli/_app caller reaches them through the facade anymore — see
 # ``resolve_account_identity`` below and ``_AUTH_DEBLESSED_KEEP_IMPORTABLE`` in
 # test_public_surface.py.
-resolve_account_identity = _auth_account.resolve_account_identity
+resolve_account_identity = _auth_storage.resolve_account_identity
 format_authuser_value = _auth_account.format_authuser_value
 authuser_query = _auth_account.authuser_query
-write_account_metadata = _auth_account.write_account_metadata
-clear_account_metadata = _auth_account.clear_account_metadata
+write_account_metadata = _auth_storage.write_account_metadata
+clear_account_metadata = _auth_storage.clear_account_metadata
 # ``write_account_metadata`` / ``clear_account_metadata`` / ``extract_email_from_html``
 # above: their last cli/_app facade importer
 # (``cli/services/playwright_login.py::repair_playwright_account_metadata``)
@@ -281,14 +291,16 @@ clear_account_metadata = _auth_account.clear_account_metadata
 # here for the frozen first-party compatibility manifest
 # (``_AUTH_FIRST_PARTY_COMPATIBILITY_NAMES``) and existing test callers.
 # The legacy sibling ``context.json[account]`` READ path was removed (the reader
-# is in-band-only); ``promote_legacy_account`` in ``_auth.account`` owns the
-# one-shot in-band migration, invoked from the standard cookie-load path and the
-# startup layout migration. The legacy-key scrub survives INSIDE
-# ``write_account_metadata`` / ``clear_account_metadata`` (privacy: a stale key
-# must not leave the account email at rest), so the CLI login writers no longer
-# call a facade helper after their writes — ``drop_legacy_account_key`` remains
-# importable here for back-compat only (de-blessed; no first-party importer).
-drop_legacy_account_key = _auth_account._drop_legacy_account_key
+# derives an in-band-shaped record instead of passing the sibling through);
+# ``promote_legacy_account`` in ``_auth.storage`` owns the durable one-shot
+# in-band migration, run off the read path by a detached worker (ADR-0033
+# PR 5.1) and also by the startup layout migration. The legacy-key scrub
+# survives INSIDE ``write_account_metadata`` / ``clear_account_metadata``
+# (privacy: a stale key must not leave the account email at rest), so the CLI
+# login writers no longer call a facade helper after their writes —
+# ``drop_legacy_account_key`` remains importable here for back-compat only
+# (de-blessed; no first-party importer).
+drop_legacy_account_key = _auth_storage._drop_legacy_account_key
 
 
 async def enumerate_accounts(

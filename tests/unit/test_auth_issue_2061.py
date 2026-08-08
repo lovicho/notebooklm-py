@@ -15,7 +15,7 @@ from pytest_httpx import HTTPXMock
 from notebooklm import auth
 from notebooklm._app.auth_check import AuthCheckPlan, run_auth_check
 from notebooklm._auth import (
-    browser_state_validation,
+    browser_capture,
     cookie_semantics,
     cookies,
     psidts_recovery,
@@ -164,7 +164,7 @@ def test_captured_state_validation_preserves_same_site_attributes() -> None:
     state["cookies"][-1]["sameSite"] = "Lax"
     state["cookies"][0]["sameSite"] = "Strict"
 
-    validated, error = browser_state_validation.heal_captured_state(state)
+    validated, error = browser_capture.heal_captured_state(state)
     assert error is None
 
     same_site = {row["name"]: row["sameSite"] for row in validated["cookies"]}

@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Reading a profile's account binding no longer writes to disk.** On a
+  pre-v0.5.0 two-file profile (account metadata in a sibling `context.json`),
+  every read of the account binding — including the one that runs on **every
+  RPC** to pick the `authuser` a request routes to — used to perform the
+  one-shot migration inline, taking the storage write lock. It now derives the
+  same record read-only and returns immediately; the durable migration runs
+  once per profile in the background. The values callers see are unchanged
+  (`notebooklm profile list`, `auth check`, `client.get_account_email` and the
+  request routing all report exactly what they did before, and exactly what the
+  migrated file will contain). Two things are observable: the legacy
+  `context.json[account]` key is scrubbed a moment *after* the first read
+  rather than during it, and a profile whose migration keeps failing (read-only
+  profile directory, full disk) now logs a plain, default-visible warning
+  instead of one gated behind a per-path throttle. That throttle existed only
+  because promotion used to run on the per-RPC read path and would otherwise
+  warn on every request; the one-shot is single-flight per profile and does not
+  retry in-process, so the warning fires at most once per profile per run and
+  cannot flood the log. No configuration changes.
+- **Cold-start recovery now runs `NOTEBOOKLM_REFRESH_CMD` before the re-mint
+  rungs.** On a dead-cookie cold start, the external refresh command (rung
+  "L2.5") previously ran only *after* headless re-auth (L3) and master-token
+  re-mint (L4) had both failed. It now runs first, matching the order
+  mid-session recovery has always used and the order
+  [ADR-0030](docs/adr/0030-one-recovery-ladder.md) documents; cold start had
+  never matched its own ADR. Operators with a configured command will see it
+  invoked earlier. A **failing** command no longer ends the ladder — L3 and L4
+  still run after it, so a broken or timing-out refresh command cannot mask the
+  re-mint rungs — and the command is invoked at most once per recovery. When the
+  whole ladder is exhausted the error is unchanged: the command's actionable
+  exit-code message is preserved rather than being replaced by a generic
+  "Authentication expired". Where no command is configured, nothing changes.
+
 ### Added
 
 - **Mid-session `NOTEBOOKLM_REFRESH_CMD` (opt-in for one release).** The external
@@ -97,19 +131,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`notebooklm.io.atomic_write_json` now rejects `storage_state.json` paths.**
   As the final step of routing every `storage_state.json` mutation through the
-  single canonical `_auth.storage_writer` (ADR-0029), the public
+  single canonical `_auth.storage` (ADR-0029), the public
   `atomic_write_json` helper now raises `ValueError` when handed a
   `storage_state.json` path — the same guard `atomic_update_json` has enforced
   since #1215. A bare atomic write skips the canonical dotted
   `.storage_state.json.lock` sentinel and would re-open the lost-update race, so
   it is refused; cookie/account writers must go through the dedicated
-  `notebooklm._auth.storage_writer` intents. Callers writing other JSON files
+  `notebooklm._auth.storage` intents. Callers writing other JSON files
   (`context.json`, `config.json`, OAuth tokens, …) are unaffected. The canonical
   writer uses a module-private bypass internally. This is a documented
   public-surface change (precedent #1215).
 - The CLI `login --browser-cookies`, `auth refresh --browser-cookies`, and
   `auth import-cookies` writers now persist through the canonical
-  `storage_writer.replace_from_login` (write-time domain filter, post-filter
+  `storage.replace_from_login` (write-time domain filter, post-filter
   required-cookie revalidation, in-band account metadata, and — for import — the
   `.bak` backup all happen under one storage lock). Additive `notebooklm.auth`
   re-exports (`replace_from_login`, `LoginWriteOutcome`, `AccountRecord`,

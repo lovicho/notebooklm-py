@@ -29,6 +29,7 @@ import pytest
 
 from notebooklm._auth import account as _auth_account
 from notebooklm._auth import cookies as _auth_cookies
+from notebooklm._auth import storage as _auth_storage
 from notebooklm._auth.account import _select_playwright_account
 from notebooklm._env import get_base_host
 from notebooklm.cli.playwright_login_io import make_login_io
@@ -155,7 +156,7 @@ def test_repair_metadata_clear_failure_is_logged(tmp_path, caplog) -> None:
 
     with (
         patch.object(_auth_cookies, "build_httpx_cookies_from_storage", side_effect=_boom_build),
-        patch.object(_auth_account, "clear_account_metadata", side_effect=_boom_clear),
+        patch.object(_auth_storage, "clear_account_metadata", side_effect=_boom_clear),
         patch.object(_auth_account, "extract_email_from_html", return_value=None),
         caplog.at_level(logging.WARNING, logger="notebooklm.auth"),
     ):

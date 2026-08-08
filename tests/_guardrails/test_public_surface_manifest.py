@@ -877,26 +877,70 @@ def test_auth_extract_email_from_html_still_routed_via_account_module() -> None:
     assert not hasattr(extraction, "extract_email_from_html")
 
 
-def test_auth_headers_facade_delegates_to_private_module() -> None:
-    """``_resolve_token_route_kwargs`` lives in ``_auth.headers`` but stays
-    reachable through ``notebooklm.auth`` for internal callers and tests."""
+def test_auth_token_route_resolver_facade_delegates_to_private_module() -> None:
+    """``_resolve_token_route_kwargs`` stays reachable through ``notebooklm.auth``.
+
+    Rewritten by ADR-0033's ``headers.py`` fold. The helper used to live in
+    ``_auth/headers.py`` — a 68-line module holding exactly this one function,
+    whose only three call sites are the token-fetch entry points in
+    ``_auth/refresh.py``. That module is gone and ``refresh.py`` now *defines*
+    the function, so this clause asserts identity against its new owner.
+
+    The two assertions this replaced (``from notebooklm._auth import headers``
+    plus ``hasattr(_auth, "headers")``) are deliberately NOT re-pointed at
+    ``refresh``: module existence is already covered by the seam-module clause
+    below, and re-adding it here would assert the same thing twice. What is
+    load-bearing and kept is the **identity** — ``notebooklm.auth`` must expose
+    the very same function object, because white-box tests and the internal
+    callers resolve it through the facade.
+    """
     import notebooklm.auth as auth
-    from notebooklm._auth import headers
+    from notebooklm._auth import refresh
 
-    assert auth._resolve_token_route_kwargs is headers._resolve_token_route_kwargs
+    assert auth._resolve_token_route_kwargs is refresh._resolve_token_route_kwargs
+    # ...and it is genuinely defined here now, not re-aliased from elsewhere.
+    assert refresh._resolve_token_route_kwargs.__module__ == "notebooklm._auth.refresh"
 
 
-def test_auth_subpackage_init_wires_new_seam_modules() -> None:
-    """The ``_auth`` package re-exports the new seam modules so that
-    ``from notebooklm._auth import extraction`` style imports keep working."""
+def test_auth_seam_modules_are_importable_from_the_subpackage() -> None:
+    """``from notebooklm._auth import <seam>`` keeps working for every seam
+    module, so the facade and the white-box suites can reach their bodies.
+
+    Rewritten in ADR-0033's PR 0.2, which deleted the eager submodule
+    re-exports from ``_auth/__init__.py``. This test previously spelled the
+    contract as ``hasattr(_auth, "paths")`` and justified it as what makes
+    ``from notebooklm._auth import extraction`` work. Both halves were wrong:
+
+    * The import system resolves ``from <package> import <submodule>`` by
+      importing the submodule, with or without a re-export — so the re-export
+      was never what kept these imports working.
+    * ``hasattr`` on the package is satisfied *transitively*: importing any
+      module that itself imports ``notebooklm._auth.paths`` binds ``paths`` as
+      an attribute of the package. Under the full suite the assertions
+      therefore passed no matter what ``__init__`` contained, which is the
+      "guardrail that asserts nothing" failure mode.
+
+    The contract that actually matters — each seam module exists at its
+    canonical dotted path and is reachable by name — is asserted directly via
+    :func:`importlib.import_module`, which is immune to import-order pollution
+    and still fails loudly if a seam module is deleted or renamed without its
+    consumers being migrated.
+    """
+    import importlib
+
     from notebooklm import _auth
 
-    assert hasattr(_auth, "paths")
-    assert hasattr(_auth, "extraction")
-    assert hasattr(_auth, "headers")
-    # Tier-10 PR-B-high additions:
-    assert hasattr(_auth, "keepalive")
-    assert hasattr(_auth, "refresh")
+    # ``headers`` left this set when ADR-0033's fold deleted the module (its one
+    # function now lives in ``refresh``). Shrink-only, per the plan's guardrail
+    # bookkeeping rule — a seam module may leave the set when it is deleted, but
+    # the set never grows.
+    seam_modules = ("extraction", "keepalive", "paths", "refresh", "tokens")
+    for name in seam_modules:
+        module = importlib.import_module(f"notebooklm._auth.{name}")
+        assert module.__name__ == f"notebooklm._auth.{name}"
+        # The ``from notebooklm._auth import <name>`` form must resolve to the
+        # very same module object the dotted path does.
+        assert getattr(_auth, name) is module
 
 
 def test_auth_validation_is_identity_re_export() -> None:
@@ -1331,3 +1375,79 @@ def test_public_shim_all_contract(shim_name: str, internal_name: str) -> None:
     assert len(all_list) == len(declared), (
         f"{shim_name}.__all__ contains duplicates: {sorted(all_list)}"
     )
+
+
+def test_consolidation_shims_are_identity_reexports() -> None:
+    """Every ADR-0033 merge shim must keep re-exporting the real objects.
+
+    The consolidation merges turn the absorbed modules into re-export shims for
+    one release. Nothing in ``src/``, ``tests/`` or ``scripts/`` imports them any
+    more, so their ``from .<canonical> import (...)`` blocks have **zero**
+    coverage: a later consolidation PR that renames one of these names would break
+    the shim with an ``ImportError`` raised only at import time, and no test would
+    notice. A further such PR is scheduled (the account-record relocation), so
+    this pins each shim to the canonical objects until they are removed at the
+    next major.
+
+    Add a ``(shim, canonical)`` pair here in the same PR as each new merge shim.
+    """
+    import notebooklm._auth._browser_cookie_filter as cookie_filter_shim
+    import notebooklm._auth.browser_cookie_recovery as browser_cookie_recovery_shim
+    import notebooklm._auth.psidts_recovery as psidts_recovery
+    import notebooklm._auth.storage as storage
+    import notebooklm._auth.storage_transaction as transaction_shim
+    import notebooklm._auth.storage_writer as writer_shim
+
+    pairs = [
+        # the persistence merge
+        (writer_shim, storage),
+        (transaction_shim, storage),
+        # the load-composition merge
+        (browser_cookie_recovery_shim, psidts_recovery),
+        # the write-side cookie-filter relocation (PR 4.2)
+        (cookie_filter_shim, storage),
+    ]
+
+    for shim, canonical in pairs:
+        exported = getattr(shim, "__all__", None)
+        assert exported, f"{shim.__name__} must declare __all__ so this gate can bite"
+        for name in exported:
+            assert hasattr(shim, name), f"{shim.__name__} re-exports missing name {name!r}"
+            assert hasattr(canonical, name), (
+                f"{shim.__name__} re-exports {name!r}, which no longer exists on "
+                f"{canonical.__name__} — the shim is broken"
+            )
+            assert getattr(shim, name) is getattr(canonical, name), (
+                f"{shim.__name__}.{name} is not the canonical {canonical.__name__}.{name} object"
+            )
+
+
+def test_browser_cluster_shims_are_identity_reexports() -> None:
+    """``browser_state_validation`` / ``login_wait_trace`` must re-export the real objects.
+
+    Same reasoning as :func:`test_consolidation_shims_are_identity_reexports`,
+    for the browser-cluster merge (ADR-0033 PR 4.1). Both modules existed only to
+    keep ``browser_capture`` under the ADR-0008 line cap, and both are now
+    one-line re-export shims. Nothing in ``src/``, ``tests/`` or ``scripts/``
+    imports them any more, so their ``from .browser_capture import (...)`` blocks
+    have **zero** coverage: renaming ``trace_url`` or ``heal_captured_state`` in a
+    later PR would break the shim with an ``ImportError`` raised only at import
+    time, and no test would notice. This pins the shims until they are removed at
+    the next major.
+    """
+    import notebooklm._auth.browser_capture as canonical
+    import notebooklm._auth.browser_state_validation as validation_shim
+    import notebooklm._auth.login_wait_trace as trace_shim
+
+    for shim in (validation_shim, trace_shim):
+        exported = getattr(shim, "__all__", None)
+        assert exported, f"{shim.__name__} must declare __all__ so this gate can bite"
+        for name in exported:
+            assert hasattr(shim, name), f"{shim.__name__} re-exports missing name {name!r}"
+            assert hasattr(canonical, name), (
+                f"{shim.__name__} re-exports {name!r}, which no longer exists on "
+                f"{canonical.__name__} — the shim is broken"
+            )
+            assert getattr(shim, name) is getattr(canonical, name), (
+                f"{shim.__name__}.{name} is not the canonical {canonical.__name__}.{name} object"
+            )

@@ -165,6 +165,16 @@ _POKE_LOCKS_BY_LOOP: weakref.WeakKeyDictionary[Any, dict[Path | None, asyncio.Lo
 # and across direct ``_rotate_cookies`` callers. Failure-stampede protection
 # comes for free: even a POST that times out has already claimed the slot,
 # so 10 fanned-out callers don't each wait 15 s on a hung server.
+#
+# Deliberately NOT ``_auth.single_flight``: this is a RATE LIMIT, not a flight.
+# A caller that loses the claim is told "no" and returns having done nothing —
+# it does not join the winner, does not wait, and never receives the winner's
+# outcome, because there is no shared result to hand out (a poke returns
+# ``None`` and its effect lands in the caller's own jar). ``_get_poke_lock``'s
+# per-(loop, profile) ``asyncio.Lock`` is mutual exclusion for the same reason:
+# the loser re-checks the throttle after acquiring and skips, rather than
+# coalescing onto a leader's return value. Both shapes are "at most one POST per
+# window", which a flight registry does not express.
 _LAST_POKE_ATTEMPT_MONOTONIC: dict[Path | None, float] = {}
 
 # Rotation sentinel path lives in ``notebooklm._auth.paths``; aliased here for

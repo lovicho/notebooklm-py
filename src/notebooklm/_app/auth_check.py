@@ -191,13 +191,14 @@ def _psidts_status(storage_state: dict[str, Any]) -> dict[str, Any]:
 def _account_info(plan: AuthCheckPlan, storage_state: dict[str, Any]) -> dict[str, Any]:
     """Resolve the persisted account ``{email, authuser}`` for this profile.
 
-    Thin call into :func:`notebooklm._auth.account.resolve_account_identity`
+    Thin call into :func:`notebooklm._auth.storage.resolve_account_identity`
     (auth cross-boundary ledger shrink, follow-up to #2103): for env-var auth
     the in-band record lives in the already-parsed ``storage_state``; for a
-    file profile it self-heals a pre-v0.5.0 legacy ``context.json[account]``
-    record in-band on first read — a write side effect, not a "consult" —
-    rather than returning a raw pass-through of it (see
-    ``_auth.account.promote_legacy_account``, #2103 PR-0).
+    file profile a pre-v0.5.0 legacy ``context.json[account]`` record is
+    derived into in-band shape rather than returned as a raw pass-through (see
+    ``_auth.storage.read_account_metadata``, #2103 PR-0). The derivation is
+    read-only — the durable migration is a detached one-shot (ADR-0033 PR 5.1),
+    so this is a plain consult with no write side effect.
     """
     from ..auth import resolve_account_identity
 

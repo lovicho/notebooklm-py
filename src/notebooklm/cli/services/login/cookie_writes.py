@@ -270,7 +270,7 @@ def _write_extracted_cookies(
         )
 
     # replace_from_login already scrubbed the legacy sibling context.json[account]
-    # key as part of its own atomic write (storage_writer.py).
+    # key as part of its own atomic write (_auth/storage.py).
 
     # Success-path confirmation print is the caller's job. We log a
     # debug breadcrumb so operators can correlate the write without

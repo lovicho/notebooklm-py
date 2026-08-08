@@ -34,6 +34,31 @@ those two supported modes; any other combination is rejected by
 ``playwright`` is imported lazily (function-local) so importing this module
 without the ``browser`` extra never fails — mirroring the deferral the CLI flow
 has always used.
+
+**Absorbed satellites (ADR-0033 PR 4.1).** Two modules that existed only to keep
+this file under the ADR-0008 line cap now live here as labelled sections, each
+with a single consumer that was always inside this file:
+
+* the **login-wait DEBUG tracing** (from ``login_wait_trace.py``) —
+  :func:`trace_url`, :func:`safe_page_url`, :func:`log_observed_navigations`;
+* the **captured-state heal bridge** (from ``browser_state_validation.py``) —
+  :func:`heal_captured_state`.
+
+``browser_launch_errors.py`` stays a separate leaf — but NOT for the reason the
+consolidation plan gave. The plan claimed a second independent consumer, on the
+strength of ``cli/services/login/master_token.py`` using
+``classify_launch_failure``. That import comes through THIS module's re-export,
+not from the leaf: the CLI-boundary guardrail sanctions exactly one ``_auth``
+path (``_auth/browser_capture``), so a CLI module cannot import the leaf
+directly even in principle. It therefore has a single consumer and would pass
+the deletion test the same way its two absorbed siblings did.
+
+It is kept because it is genuinely cohesive and self-contained — a channel
+registry plus a pure string-in/string-out classifier, with no Playwright import,
+no I/O and no CLI dependency — so folding it buys nothing beyond a smaller file
+count, and its independence is what lets the launch-failure triage be tested
+without a browser. A future fold is defensible; an inherited false justification
+is not.
 """
 
 from __future__ import annotations
@@ -59,10 +84,19 @@ from .._env import PERSONAL_APP_HOSTS
 from ..config import get_base_host, get_base_url
 from ..exceptions import HeadlessLoginRequiredError
 
-# The storage-state filter is a pure leaf shared by the headed and headless
-# capture arms; the historical names remain re-exported from this module.
-from ._browser_cookie_filter import _safe_cookie_shape as _safe_cookie_shape
-from ._browser_cookie_filter import filter_storage_state_cookies_by_domain_policy
+# Collaborators of :func:`heal_captured_state` (absorbed from
+# ``browser_state_validation.py``, ADR-0033 PR 4.1): the sanitiser that shapes
+# captured rows for the rookiepy contract, and the shared PSIDTS recovery that
+# contract runs. These were already on this module's import path transitively,
+# via the leaf that used to hold the bridge.
+from . import cookies as _auth_cookies
+from . import psidts_recovery as _psidts_recovery
+
+# The canonical writer both capture arms persist through. Deferred until
+# ADR-0033 PR 4.2 put the write-time cookie filter in ``storage`` too, making
+# the module-level edge unavoidable (still no cycle: ``storage`` imports nothing
+# from here). Bound as the MODULE, so the writers stay late-bound (patch seam).
+from . import storage
 
 # ``CHANNEL_BROWSERS`` and the launch-failure triage live in the
 # ``browser_launch_errors`` leaf (ADR-0008). ``CHANNEL_BROWSERS`` is re-exported
@@ -70,27 +104,19 @@ from ._browser_cookie_filter import filter_storage_state_cookies_by_domain_polic
 # (``cli/services/playwright_login.py``) and the launch banner.
 from .browser_launch_errors import CHANNEL_BROWSERS, classify_launch_failure
 
-# The captured-state validation bridge is a leaf (ADR-0008) so this module does
-# not grow a second copy of the rookiepy-shaped recovery contract.
-from .browser_state_validation import heal_captured_state as _heal_captured_state
-
 # ``app_host_scope_note`` owns the both-personal-hosts cookie-scope caveat that
 # every "open the app in your browser" instruction needs (it is appended to the
 # binding-related hints in ``cookie_policy.missing_cookies_hint``). It is
-# re-exported here for the same reason as ``log_observed_navigations`` below:
-# ``browser_capture`` is the only ``_auth`` module the CLI-boundary guardrail
-# sanctions as an import site, and the CLI's own cookie-refresh advice
-# (``cli/services/login/cookie_jar.py``) must not grow a second, drifting copy
-# of that caveat.
+# re-exported here because ``browser_capture`` is the only ``_auth`` module the
+# CLI-boundary guardrail sanctions as an import site, and the CLI's own
+# cookie-refresh advice (``cli/services/login/cookie_jar.py``) must not grow a
+# second, drifting copy of that caveat.
 from .cookie_policy import app_host_scope_note
 
-# DEBUG tracing for the login wait lives in its own leaf (ADR-0008) and is
-# re-exported here because ``browser_capture`` is the only ``_auth`` module the
-# CLI-boundary guardrail sanctions as an import site. Both helpers are
-# credential-safe: every URL they log is reduced to scheme + host, dropping the
-# path, query, fragment, and userinfo — any of which can carry auth material
-# mid-SSO, including on a third-party identity provider.
-from .login_wait_trace import log_observed_navigations, safe_page_url
+# The storage-state cookie filter is WRITE-time policy and lives beside the
+# writers applying it (ADR-0033 PR 4.2); re-exported here, the CLI's import site.
+from .storage import _safe_cookie_shape as _safe_cookie_shape
+from .storage import filter_storage_state_cookies_by_domain_policy
 
 if TYPE_CHECKING:
     from playwright.sync_api import BrowserContext, Page
@@ -291,6 +317,237 @@ def connection_error_help() -> str:
         "  3. Wait a few minutes before retrying\n"
         f"  4. Check if {base_host} is accessible in your browser"
     )
+
+
+# ---------------------------------------------------------------------------
+# Login-wait DEBUG tracing (absorbed from ``login_wait_trace.py``, ADR-0033)
+#
+# ``notebooklm -vv login`` used to print nothing at all for the whole five-minute
+# ``page.wait_for_url`` block below, so a login that never landed (e.g. Google's
+# ``notebook.google.com`` rebrand) was indistinguishable from a user who simply
+# walked away from the browser. Issues #2017 / #2022 / #2023 / #2025 / #2028 /
+# #2030 / #2032 each needed manual triage that a single "navigated to X" line
+# would have answered. See #2046.
+#
+# This section owns the Playwright-event side of that tracing. It holds no state
+# and has no CLI / Click / Rich coupling (ADR-0021); it was a separate module
+# only to keep this file under the ADR-0008 module-size budget, and its sole
+# consumer has always been :func:`run_browser_capture` below.
+# ---------------------------------------------------------------------------
+
+# Stand-in when the page's URL cannot be read at all. Distinct from
+# ``trace_url("")`` (which returns ``""``) so an operator reading the log can
+# tell "the page was gone" apart from "the URL was empty".
+_UNREADABLE_URL = "<unavailable>"
+
+# Rendering for a URL that carries no host at all (``about:blank``, ``data:``,
+# ``chrome-error://``). The scheme is the useful signal; whatever follows it can
+# be arbitrary opaque data, so it is never reproduced.
+_HOSTLESS_URL = "{scheme}:<no host>"
+
+
+def trace_url(url: str) -> str:
+    """Render ``url`` as ``scheme://host[:port]/`` — host only, nothing else.
+
+    **This is deliberately a SECOND URL redactor, not a duplicate of
+    ``_auth.extraction._safe_url``. Do not unify them.** ``_safe_url`` is built
+    for *error messages about Google endpoints*: it keeps the path for any host
+    outside a small Google-OAuth allowlist, on the reasoning that the path tells
+    an operator which endpoint failed.
+
+    That trade is wrong here. This formatter renders **arbitrary main-frame
+    navigations observed during a live SSO flow**, and a Workspace tenant can
+    federate to any identity provider — ``https://idp.example/sso/<assertion>``
+    puts a one-time credential straight in the path of a host no allowlist can
+    anticipate. `-vv` output is exactly what our issue template asks users to
+    paste into public bug reports, so the safe default is to keep nothing but
+    the host.
+
+    Nothing is lost: the entire diagnostic this tracing exists to provide is
+    *which host the browser is on* — "waiting for notebook.google.com, landed
+    on notebooklm.google.com". The path never contributed to that answer.
+
+    Userinfo (``https://TOKEN@host/``) is dropped by rebuilding from
+    ``hostname``; query and fragment are dropped by never reading them.
+    """
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return _HOSTLESS_URL.format(scheme=parsed.scheme or "<unknown>")
+    # ``hostname`` strips the brackets off an IPv6 literal, so they have to go
+    # back on before a port can be appended — otherwise
+    # ``https://[2001:db8::1]:8443/`` renders as ``https://2001:db8::1:8443/``,
+    # where the port is indistinguishable from the address's last group.
+    rendered_host = f"[{host}]" if ":" in host else host
+    netloc = f"{rendered_host}:{parsed.port}" if parsed.port is not None else rendered_host
+    return f"{parsed.scheme}://{netloc}/"
+
+
+def _log_suppressed(what: str, exc: BaseException) -> None:
+    """Record that a tracing step failed, naming the exception TYPE only.
+
+    Deliberately **not** ``exc_info=True``. Playwright exception messages
+    routinely embed the offending URL (``net::ERR_ABORTED at https://…?f.sid=…``),
+    and a rendered traceback bypasses :func:`trace_url` — the precise,
+    structural redaction this section promises — leaving only the package's
+    heuristic ``scrub_secrets`` backstop, which has no marker to match on an
+    opaque OAuth grant carried in a URL *path*. The exception class is the
+    entire diagnostic signal here (``TargetClosedError`` vs ``TypeError``);
+    the message adds leak surface and nothing else.
+    """
+    logger.debug("Login wait: %s (%s)", what, type(exc).__name__)
+
+
+def safe_page_url(page: Any) -> str:
+    """Return ``page.url`` credential-stripped, or a placeholder if unreadable.
+
+    Reading ``url`` off a Playwright page can raise once the page or browser is
+    gone. A DEBUG diagnostic must never be the thing that turns a
+    browser-closed login into an unhandled traceback, so every failure degrades
+    to :data:`_UNREADABLE_URL` instead of propagating.
+    """
+    try:
+        return trace_url(page.url)
+    except Exception as exc:
+        _log_suppressed("could not read the page URL", exc)
+        return _UNREADABLE_URL
+
+
+def _is_main_frame(frame: Any, main_frame: Any) -> bool:
+    """True when ``frame`` is the page's top-level frame.
+
+    Identity against ``page.main_frame`` is the fast path, but it is not the
+    only test: if Playwright ever hands the listener a different wrapper object
+    for the same underlying frame, an identity-only filter would silently drop
+    *every* navigation — turning this diagnostic back into the silence it
+    exists to fix. So fall back to the structural definition: only the top
+    frame has no parent.
+    """
+    if main_frame is not None and frame is main_frame:
+        return True
+    return getattr(frame, "parent_frame", None) is None
+
+
+@contextmanager
+def log_observed_navigations(page: Any) -> Iterator[None]:
+    """Log every main-frame navigation observed inside the block, at DEBUG.
+
+    Guarantees that let this sit inside the five-minute login wait:
+
+    * **Inert when DEBUG is off** — the listener is never attached, so no
+      Playwright event plumbing runs and the wait is byte-for-byte unchanged.
+    * **Never breaks the wait** — the callback swallows every exception, and a
+      Playwright build without ``page.on`` degrades to a no-op block.
+    * **Never leaks credentials** — URLs go through :func:`trace_url`, which
+      keeps the host and drops everything else (path, query, fragment,
+      userinfo), any of which can carry auth material mid-SSO — including on a
+      third-party identity provider no allowlist could anticipate.
+
+    Args:
+        page: The Playwright ``Page`` being waited on. Typed ``Any`` because
+            ``playwright`` is an optional (``browser`` extra) dependency this
+            module must not import at module scope.
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        yield
+        return
+
+    # ``getattr`` only absorbs a MISSING attribute — a ``main_frame`` property
+    # that *raises* (dead page) would propagate straight past the ``yield`` and
+    # pre-empt the wait entirely, so the read itself is guarded.
+    try:
+        main_frame = getattr(page, "main_frame", None)
+    except Exception as exc:
+        _log_suppressed("could not read the page's main frame", exc)
+        main_frame = None
+
+    def _on_navigated(frame: Any) -> None:
+        try:
+            # Sub-frame navigations (SSO iframes, ad frames) are noise; the
+            # login predicate only ever looks at the main frame's URL.
+            if not _is_main_frame(frame, main_frame):
+                return
+            logger.debug("Login wait: navigated to %s", trace_url(getattr(frame, "url", "") or ""))
+        except Exception as exc:
+            _log_suppressed("could not read a navigation URL", exc)
+
+    try:
+        page.on("framenavigated", _on_navigated)
+    except Exception as exc:
+        _log_suppressed("navigation logging unavailable", exc)
+
+    try:
+        yield
+    finally:
+        # Detach unconditionally rather than gating on "did ``on`` return
+        # cleanly". A registration that raised *after* recording the handler
+        # would otherwise leak a listener onto a page the caller keeps using,
+        # and an unnecessary detach is free: removing a handler that was never
+        # registered fails locally and is swallowed right here.
+        try:
+            page.remove_listener("framenavigated", _on_navigated)
+        except Exception as exc:
+            _log_suppressed("could not detach the navigation listener", exc)
+
+
+# ---------------------------------------------------------------------------
+# Captured-state heal (absorbed from ``browser_state_validation.py``, ADR-0033)
+#
+# Best-effort in-memory PSIDTS heal for Playwright-captured state, run by both
+# capture arms below just before persistence. It was a separate module only to
+# keep this file under the ADR-0008 module-size budget; both of its callers have
+# always been in this file.
+# ---------------------------------------------------------------------------
+
+
+def heal_captured_state(state: dict[str, Any]) -> tuple[dict[str, Any], ValueError | None]:
+    """Try one in-memory PSIDTS heal on captured rows; never discard the capture.
+
+    Google does not always answer the login flow's passive ``goto()``
+    navigations with ``Set-Cookie: __Secure-1PSIDTS`` (issue #865), so a
+    completed browser sign-in can land a state that carries ``SID`` and the
+    secondary binding but no usable PSIDTS. Running the shared rookiepy recovery
+    contract here means the first command after ``login`` works instead of
+    paying for a cold-start heal. The bridge adapts only the ``httpOnly``
+    spelling; the converter preserves an existing Playwright ``sameSite`` and
+    newly minted recovery cookies take its safe default.
+
+    **The heal is best-effort and this function must not raise.** Returning the
+    error instead lets the caller persist what the browser gave us: those
+    cookies are the product of an SSO round-trip the user just completed, and
+    the disk-based ``_recover_psidts_inline`` retries the heal on the next
+    command. Raising would throw that session away on a withheld rotation or a
+    transient network blip — strictly worse than the pre-#2061 behaviour of
+    writing the imperfect state, and the same mistake as hardening a loader that
+    has no heal behind it (#2082 review).
+
+    Note the shape change on the success path: rows are rebuilt from
+    ``_sanitized_auth_entries``, which requires a non-empty string ``value``, so
+    an empty-valued row that cleared the domain filter is dropped rather than
+    persisted verbatim. Auth cookies always carry a value, and a valueless row
+    cannot enter a request jar anyway.
+
+    Returns:
+        ``(state, error)``. ``error`` is ``None`` when the captured rows already
+        validated or the in-memory heal supplied what was missing; otherwise it
+        is the final validation error and ``state`` is the caller's input,
+        unchanged and still worth persisting.
+    """
+    rookiepy_rows: list[dict[str, Any]] = []
+    for entry in _auth_cookies._sanitized_auth_entries(state):
+        rookiepy_entry = dict(entry)
+        rookiepy_entry["http_only"] = bool(entry.get("httpOnly", False))
+        rookiepy_rows.append(rookiepy_entry)
+
+    validated_state, error = _psidts_recovery.validate_with_recovery(rookiepy_rows)
+    if error is not None:
+        return state, error
+    return {
+        "cookies": validated_state["cookies"],
+        "origins": list(state.get("origins", [])),
+    }, None
 
 
 # ---------------------------------------------------------------------------
@@ -652,33 +909,37 @@ def run_browser_capture(
             # myaccount, docs, youtube) the user is signed into in the same
             # browser session don't leak into ``storage_state.json`` (opt-in via
             # ``--include-domains=...``).
+            # NOT the writer's pass repeated — do not delete it as redundant
+            # (ADR-0033 D3). It runs BEFORE ``heal_captured_state``, so the heal's
+            # routing preflight and recovery-jar build see domain-filtered rows,
+            # not sibling-product cookies + domain-variant name collisions (#2054).
             playwright_state = context.storage_state()
             filtered_state: dict[str, Any] = filter_storage_state_cookies_by_domain_policy(
                 dict(playwright_state), include_domains=include_domains
             )
-            filtered_state, heal_error = _heal_captured_state(filtered_state)
+            filtered_state, heal_error = heal_captured_state(filtered_state)
             # Persist through the canonical writer under the storage lock (fixes
             # [capture-2], the lockless re-mint write). The unattended
             # headless-launch arm re-mints against OUR OWN profile, so it carries
             # the existing account namespace forward (carry_account=True — fixes
             # [capture-1]); the interactive arm may have signed into a different
             # account, so it drops the stale binding (carry_account=False) and
-            # the CLI adapter's repair re-establishes it. The writer re-applies
-            # the same domain filter internally (idempotent with the call above).
+            # the CLI adapter's repair re-establishes it. The writer filters
+            # again under the lock: ADR-0029's entry-path-independent guarantee,
+            # a DIFFERENT obligation from the pre-heal pass above (it holds for
+            # callers that never filtered). Neither pass may be dropped.
             # Persist unconditionally. A failed heal must never discard the
             # sign-in the user just completed — the cookies are still the best
             # material available, and the disk-based cold-start recovery retries
             # from them on the next command.
-            from . import storage_writer  # noqa: PLC0415 (avoid import cycle)
-
-            outcome = storage_writer.replace_from_remint(
+            outcome = storage.replace_from_remint(
                 storage_path,
                 filtered_state,
                 carry_account=headless,
                 include_domains=include_domains,
             )
             if outcome.lock_unavailable:
-                raise storage_writer.LockUnavailableError(
+                raise storage.LockUnavailableError(
                     f"browser capture: storage lock unavailable at {storage_path}"
                 )
             if heal_error is not None:
@@ -880,11 +1141,15 @@ def run_cdp_capture(
             # capture path, so the on-disk state is equivalent regardless of the
             # credential source. Capture from the operator's CONTEXT (its cookie
             # jar), not from our temporary page.
+            # As in the launch arm, this pass feeds ``heal_captured_state``
+            # filtered rows (ADR-0033 D3) — and matters most here: CDP attaches
+            # to the operator's DAILY Chrome, the richest source of sibling-
+            # product cookies and domain-variant name collisions (#2054).
             playwright_state = context.storage_state()
             filtered_state: dict[str, Any] = filter_storage_state_cookies_by_domain_policy(
                 dict(playwright_state), include_domains=include_domains
             )
-            filtered_state, heal_error = _heal_captured_state(filtered_state)
+            filtered_state, heal_error = heal_captured_state(filtered_state)
             # Persist through the canonical writer under the storage lock (fixes
             # [capture-2]). CDP attaches to the operator's DAILY Chrome, whose
             # account set may not match our stored binding — carrying it blindly
@@ -901,17 +1166,17 @@ def run_cdp_capture(
             # Persist unconditionally. A failed heal must never discard the
             # sign-in the user just completed — the cookies are still the best
             # material available, and the disk-based cold-start recovery retries
-            # from them on the next command.
-            from . import storage_writer  # noqa: PLC0415 (avoid import cycle)
-
-            outcome = storage_writer.replace_from_remint(
+            # from them on the next command. And as in the launch arm, the
+            # writer's own pass under the lock is ADR-0029's entry-path-
+            # independent guarantee, not a repeat of the pre-heal pass above.
+            outcome = storage.replace_from_remint(
                 storage_path,
                 filtered_state,
                 carry_account=False,
                 include_domains=include_domains,
             )
             if outcome.lock_unavailable:
-                raise storage_writer.LockUnavailableError(
+                raise storage.LockUnavailableError(
                     f"CDP capture: storage lock unavailable at {storage_path}"
                 )
             if heal_error is not None:
@@ -947,6 +1212,14 @@ def run_cdp_capture(
     return CaptureResult(page_html=captured_page_html)
 
 
+# What is NOT here, and why. This list was hand-simulating a package interface:
+# several entries existed only so a CLI caller had one sanctioned import site for
+# a name defined in some other ``_auth`` leaf. ADR-0033 PR 4.1 absorbed two of
+# those leaves, so ``log_observed_navigations`` / ``safe_page_url`` / ``trace_url``
+# (login-wait tracing) and ``heal_captured_state`` are now ordinary definitions of
+# this module with no consumer outside it — nothing re-exports them, so they are
+# not advertised here. The entries that remain are either owned here or are the
+# deliberate one-import-site re-exports annotated below.
 __all__ = [
     "BROWSER_CLOSED_HELP",
     "CHANNEL_BROWSERS",
@@ -969,11 +1242,9 @@ __all__ = [
     "ensure_playwright_available",
     "filter_storage_state_cookies_by_domain_policy",
     "is_navigation_interrupted_error",
-    "log_observed_navigations",
     "recover_page",
     "run_browser_capture",
     "run_cdp_capture",
-    "safe_page_url",
     "sync_playwright_context",
     "url_matches_base_host",
     "windows_playwright_event_loop",

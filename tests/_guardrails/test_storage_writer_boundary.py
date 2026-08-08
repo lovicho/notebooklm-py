@@ -2,14 +2,16 @@
 
 Part of refactor (b) — the canonical storage writer. The single sanctioned home
 for mutating ``storage_state.json`` is
-``src/notebooklm/_auth/storage_writer.py``. This AST guardrail enforces the
+``src/notebooklm/_auth/storage.py`` (``storage_writer.py`` until ADR-0033's
+persistence merge folded it in; that module is now a re-export shim). This AST
+guardrail enforces the
 boundary by construction (import/name-based, following ``_ast_reach_in.py`` and
 the other ``tests/_guardrails/`` lints) so a new writer is loud in CI rather than
 silently re-opening the lost-update / policy-bypass classes the refactor closes.
 
-Five decidable clauses (plan §b.2 enforcement, layer 1 — AST guardrail):
+Six decidable clauses (plan §b.2 enforcement, layer 1 — AST guardrail):
 
-(i)  Outside ``storage_writer.py`` (and ``migration.py``), no ``_auth/`` module
+(i)  Outside ``storage.py`` (and ``migration.py``), no ``_auth/`` module
      may import an ``_atomic_io`` **write primitive** (``atomic_write_json`` /
      ``replace_file_atomically``) except the modules on the frozen
      ``_AUTH_WRITE_PRIMITIVE_IMPORTERS`` allowlist. Each allowlisted module is
@@ -24,7 +26,7 @@ Five decidable clauses (plan §b.2 enforcement, layer 1 — AST guardrail):
 (iii) A write-primitive **call** (``open`` / ``os.open`` in write mode /
      ``Path.write_text`` / ``Path.write_bytes`` / ``os.replace``) whose target is
      a ``storage_state.json``-named **string literal** is forbidden anywhere
-     outside ``storage_writer.py`` / ``migration.py``.
+     outside ``storage.py`` / ``migration.py``.
 
 (iv) An **equality-asserted** frozenset of EVERY module repo-wide that imports
      ``atomic_write_json`` (clause (iii) cannot see the CLI writers, which call it
@@ -42,6 +44,20 @@ Five decidable clauses (plan §b.2 enforcement, layer 1 — AST guardrail):
      ``storage_state.json`` rejection — a real hole. An equality-asserted
      allowlist of module-importers (:data:`_ATOMIC_IO_MODULE_IMPORTERS`) freezes
      who may import the module at all.
+
+(vi) **Function-granular** bypass callers (ADR-0033 decision 2). Clauses (i)/(iv)
+     are MODULE-granular, and that was load-bearing only while the sanctioned
+     importer was a small single-purpose module. Since the persistence merge it
+     is ``storage.py`` — which also holds every read path — so a module-granular
+     assertion there asserts almost nothing. This clause pins an
+     equality-asserted allowlist of the intent-writer FUNCTION names inside
+     ``storage.py`` permitted to reach ``_atomic_write_json_unchecked``, resolves
+     the bypass's local binding from the ``ImportFrom`` ``asname`` (asserting
+     exactly one such import), attributes uses to the enclosing top-level
+     function so calls in ``in_storage_transaction`` body-closures land on the
+     writer, and flags bare ``Name`` references (escapes) and module-level uses,
+     not just ``Call`` nodes. The runtime rejection in ``atomic_write_json``
+     still backstops every module OUTSIDE ``storage.py``.
 
 The allowlists are module-level frozensets asserted by **equality** (not
 subset), and every entry is existence-checked, so a stale entry (a module that no
@@ -82,16 +98,19 @@ _ATOMIC_WRITE_JSON_IMPORTERS: frozenset[str] = frozenset(
     {
         # Legitimate NON-storage-state writers (permanent).
         "io.py",  # public re-export of the _atomic_io helpers
-        "_auth/account.py",  # writes the legacy sibling context.json (not storage_state)
         "cli/context.py",  # CLI context.json / config.json
         "mcp/_oauth.py",  # writes the MCP OAuth token file
-        # NOTE: the canonical writer ``_auth/storage_writer.py`` no longer imports
-        # the PUBLIC ``atomic_write_json`` — since b-PR3 the public helper rejects
-        # ``storage_state.json`` paths at runtime, and the writer uses the
-        # module-private bypass ``_atomic_write_json_unchecked`` instead (tracked
-        # by _ATOMIC_WRITE_JSON_BYPASS_IMPORTERS below).
+        # ``_auth/storage.py`` imports the PUBLIC helper too, alongside the
+        # module-private bypass it uses for ``storage_state.json`` (tracked by
+        # _ATOMIC_WRITE_JSON_BYPASS_IMPORTERS below). ADR-0033 PR 5.2 relocated
+        # ``_drop_legacy_account_key`` in from ``_auth/account.py`` — the one
+        # writer there that targets the SIBLING ``context.json``, never
+        # ``storage_state.json``, so it must go through the guarded public
+        # primitive exactly as it did in its donor. ``_auth/account.py`` dropped
+        # off this list in the same commit (it no longer writes anything).
+        "_auth/storage.py",
         # The three CLI login/import writers migrated in b-PR3 (they now route
-        # through storage_writer.replace_from_login via the auth facade) and
+        # through storage.replace_from_login via the auth facade) and
         # ``_auth/browser_capture.py`` migrated in b-PR2 — all dropped off here.
     }
 )
@@ -108,7 +127,55 @@ _ATOMIC_WRITE_JSON_IMPORTERS: frozenset[str] = frozenset(
 _ATOMIC_WRITE_JSON_BYPASS = "_atomic_write_json_unchecked"
 _ATOMIC_WRITE_JSON_BYPASS_IMPORTERS: frozenset[str] = frozenset(
     {
-        "_auth/storage_writer.py",  # canonical storage-state writer (refactor (b))
+        # Canonical storage-state writer (refactor (b)). ADR-0033's persistence
+        # merge folded ``storage_writer.py`` into ``storage.py``, so the sole
+        # sanctioned importer moved with it (the old module is a re-export shim
+        # and imports no primitive). Because ``storage.py`` is now a ~2,100-line
+        # module that also holds every read path, this MODULE-granular set is no
+        # longer sufficient on its own — clause (vi) below pins the FUNCTIONS
+        # inside it that may reach the bypass.
+        "_auth/storage.py",
+    }
+)
+
+# --- Clause (vi): which FUNCTIONS inside the canonical writer may bypass -------
+#
+# ADR-0033 decision 2. Before the persistence merge, "only the canonical writers
+# write storage_state.json" was enforced by the module-granular set above: the
+# sanctioned importer was a small, single-purpose module. After the merge that
+# importer is ``storage.py``, which also holds the CAS/merge math, the snapshot
+# types, the lock primitives and the transaction template — at which point a
+# module-granular assertion says almost nothing. This clause restores the
+# by-construction guarantee at FUNCTION granularity.
+#
+# Three details a naive scan gets wrong (all called out by ADR-0033):
+#
+#  * the bypass is imported under an ALIAS. It used to collide with the public
+#    primitive's name (``_atomic_write_json_unchecked as atomic_write_json``);
+#    the merge renamed it to ``_write_state_unchecked``. Either way the clause
+#    must resolve the local binding from the ``ImportFrom`` ``asname``, never
+#    from a hard-coded literal — and assert there is exactly ONE such import so
+#    a second, differently-aliased import cannot open a side door.
+#  * a bypass reference is flagged as a bare ``Name``, not only as a ``Call``:
+#    a reference handed to a helper escapes a call-only scan.
+#  * uses are attributed by ``ast.walk`` from each enclosing ``FunctionDef``, so
+#    a call inside a nested ``_write`` / ``_clear`` closure — the closures the
+#    writers pass POSITIONALLY as ``in_storage_transaction``'s ``body`` argument
+#    — attributes to the enclosing writer rather than to no function at all.
+#
+# Equality-asserted, like every other allowlist here: adding an intent writer
+# means adding its name, and a stale entry (a writer that no longer writes) is
+# just as red as a new one.
+_STORAGE_MODULE = "_auth/storage.py"
+_STORAGE_BYPASS_WRITERS: frozenset[str] = frozenset(
+    {
+        "merge_cookie_delta",  # CAS delta merge (behind save_cookies_to_storage)
+        "update_account_metadata",  # in-band account RMW (fails closed)
+        "clear_in_band_account",  # in-band account clear (best-effort)
+        "replace_from_remint",  # browser-capture re-mint full replace
+        "replace_from_login",  # CLI login/import full replace
+        "persist_minted_jar",  # master-token L4 re-mint full replace
+        "write_master_token",  # master_token.json credential write
     }
 )
 
@@ -132,20 +199,25 @@ _REPLACE_FILE_ATOMICALLY_IMPORTERS: frozenset[str] = frozenset(
 # --- Clause (i): ``_auth/`` modules allowed to import a write primitive ---------
 #
 # Outside these, an ``_auth/`` module importing a write primitive is a violation.
-# ``storage_writer.py`` is the canonical home; the rest are annotated exemptions.
+# ``storage.py`` is the canonical home; the rest are annotated exemptions.
 _AUTH_WRITE_PRIMITIVE_IMPORTERS: frozenset[str] = frozenset(
     {
         # canonical writer — imports the module-private bypass
         # ``_atomic_write_json_unchecked`` (counted as a write primitive here);
         # the public ``atomic_write_json`` now rejects storage_state.json paths.
-        "_auth/storage_writer.py",
-        "_auth/account.py",  # context.json cleanup only (not storage_state)
+        # Was ``_auth/storage_writer.py`` until ADR-0033's persistence merge
+        # folded that module into ``storage.py`` (1:1 relocation, not a widening).
+        "_auth/storage.py",
+        # ``_auth/account.py`` dropped off in ADR-0033 PR 5.2: its context.json
+        # cleanup (``_drop_legacy_account_key``) relocated into ``storage.py``
+        # with the rest of the account-record persistence, so ``account.py``
+        # imports no write primitive at all any more.
         # ``_auth/browser_capture.py`` migrated in b-PR2 — it no longer imports a
-        # write primitive (re-mint now routes through storage_writer).
+        # write primitive (re-mint now routes through _auth/storage).
     }
 )
 
-# --- Clause (i, sub): storage-state write exemptions OUTSIDE storage_writer -----
+# --- Clause (i, sub): storage-state write exemptions OUTSIDE the canonical writer -
 #
 # Modules that still perform a ``storage_state.json`` write via a primitive,
 # beyond the canonical writer. ``migration.py`` is the permanent sole exemption
@@ -157,7 +229,7 @@ _STORAGE_STATE_WRITE_EXEMPTIONS: frozenset[str] = frozenset(
         # b-PR3 acceptance criterion: this set is now exactly {migration.py}.
         # ``_auth/browser_capture.py`` migrated in b-PR2; the three CLI
         # login/import writers migrated in b-PR3 (all route through the canonical
-        # storage_writer, and the runtime rejection now backstops the boundary).
+        # _auth/storage, and the runtime rejection now backstops the boundary).
     }
 )
 
@@ -177,7 +249,7 @@ _WRITE_PRIMITIVE_SEAM_BINDINGS: frozenset[str] = frozenset()
 # ``from .. import _atomic_io`` / ``from notebooklm import _atomic_io``), as
 # distinct from ``from .._atomic_io import <primitive>`` (a NAME import — clauses
 # (i)/(iv)). VERIFIED by grep (2026-08): the set is currently **empty** — every
-# legitimate user (io.py, storage_writer.py, account.py, migration.py,
+# legitimate user (io.py, _auth/storage.py, cli/context.py, migration.py,
 # mcp/_oauth.py) imports the primitive NAMES, never the module object. Frozen
 # empty so the FIRST module to pull in the ``_atomic_io`` module (which could then
 # reach ``_atomic_write_json_unchecked`` via attribute access, skipping the public
@@ -321,6 +393,101 @@ def _atomic_io_module_write_calls(tree: ast.AST) -> list[int]:
     return hits
 
 
+# --- Clause (vi): function-granular bypass-reference attribution --------------
+
+
+class BypassScanError(AssertionError):
+    """The bypass could not be located in the module the clause governs."""
+
+
+def _bypass_local_binding(tree: ast.AST) -> str:
+    """The local name the ``_atomic_write_json_unchecked`` bypass is bound to.
+
+    Resolved from the ``ImportFrom`` **``asname``** (falling back to the imported
+    name when there is no alias), following ``test_cookie_conversion_ratchet``'s
+    ``_local_bindings``. Scanning for the original name would miss every real
+    call site once the module aliases it; scanning for a literal alias would go
+    stale the moment someone renames it — and the historical alias
+    (``atomic_write_json``) collided with the public primitive's own name, so a
+    literal scan there matched the wrong thing entirely.
+
+    Raises if there is not **exactly one** such import: zero means the clause is
+    silently governing nothing, and more than one means a second binding a
+    single-name scan would not follow.
+    """
+    bindings = [
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and _is_atomic_io_module(node.module or "")
+        for alias in node.names
+        if alias.name == _ATOMIC_WRITE_JSON_BYPASS
+    ]
+    if len(bindings) != 1:
+        raise BypassScanError(
+            f"expected exactly one `from .._atomic_io import {_ATOMIC_WRITE_JSON_BYPASS} "
+            f"[as X]` in the canonical writer; found {len(bindings)}: {bindings}. "
+            "A second binding is a side door this clause would not follow."
+        )
+    return bindings[0]
+
+
+def _enclosing_function_defs(tree: ast.Module) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Top-level (module-body) function defs — the attribution units.
+
+    Nested defs are deliberately NOT units of their own: a call inside a
+    ``_write`` closure that a writer passes positionally as
+    ``in_storage_transaction``'s ``body`` must attribute to the **enclosing
+    writer**, which is what the allowlist names. ``ast.walk`` from each unit
+    reaches those closures.
+    """
+    return [node for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)]
+
+
+def _bypass_references(tree: ast.Module) -> tuple[dict[str, list[int]], list[int], list[int]]:
+    """Attribute every reference to the bypass binding.
+
+    Returns ``(calls_by_function, escapes, module_level)``:
+
+    * ``calls_by_function`` — function name -> line numbers of ``binding(...)``
+      calls attributed to it (including calls inside its nested closures).
+    * ``escapes`` — line numbers where the binding is referenced as something
+      OTHER than the callee of a call: returned, stored, passed as an argument,
+      rebound. A reference that escapes its writer is a violation in its own
+      right, not a call attributed to the enclosing function — otherwise the
+      attribution rule above would itself be a laundering route.
+    * ``module_level`` — line numbers of references outside every top-level
+      function (module scope, class bodies), excluding the import statement.
+    """
+    binding = _bypass_local_binding(tree)
+    functions = _enclosing_function_defs(tree)
+
+    # Every ``binding(...)`` call node, and the Name nodes that are its callee.
+    callee_nodes: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == binding:
+                callee_nodes.add(id(node.func))
+
+    def _refs(scope: ast.AST) -> list[ast.Name]:
+        return [
+            node for node in ast.walk(scope) if isinstance(node, ast.Name) and node.id == binding
+        ]
+
+    calls_by_function: dict[str, list[int]] = {}
+    escapes: list[int] = []
+    seen: set[int] = set()
+    for func in functions:
+        for ref in _refs(func):
+            seen.add(id(ref))
+            if id(ref) in callee_nodes:
+                calls_by_function.setdefault(func.name, []).append(ref.lineno)
+            else:
+                escapes.append(ref.lineno)
+
+    module_level = [ref.lineno for ref in _refs(tree) if id(ref) not in seen]
+    return calls_by_function, sorted(escapes), sorted(module_level)
+
+
 def _has_write_primitive_seam_binding(tree: ast.AST) -> bool:
     """Detect a ``foo(atomic_write_json=<name>)`` / ``x.atomic_write_json = <name>``
     dependency-seam binding of a write primitive."""
@@ -412,7 +579,7 @@ def test_atomic_write_json_importers_frozen_allowlist() -> None:
         "atomic_write_json importer set drifted from the frozen allowlist. "
         f"Unexpected new importers: {sorted(actual - _ATOMIC_WRITE_JSON_IMPORTERS)}; "
         f"stale allowlist entries: {sorted(_ATOMIC_WRITE_JSON_IMPORTERS - actual)}. "
-        "Any new storage_state.json writer must go through storage_writer.py; a new "
+        "Any new storage_state.json writer must go through _auth/storage.py; a new "
         "non-storage writer must be triaged onto _ATOMIC_WRITE_JSON_IMPORTERS."
     )
 
@@ -423,7 +590,7 @@ def test_atomic_write_json_bypass_importers_frozen_allowlist() -> None:
 
     Equality-asserted. The bypass skips the public ``atomic_write_json``'s
     ``storage_state.json`` rejection (b-PR3), so any importer beyond
-    ``storage_writer.py`` would be able to write storage_state.json unlocked —
+    ``storage.py`` would be able to write storage_state.json unlocked —
     exactly the class the boundary exists to prevent.
     """
     actual = {
@@ -435,8 +602,171 @@ def test_atomic_write_json_bypass_importers_frozen_allowlist() -> None:
         "storage-state write-bypass importer set drifted from the frozen allowlist. "
         f"Unexpected new importers: {sorted(actual - _ATOMIC_WRITE_JSON_BYPASS_IMPORTERS)}; "
         f"stale allowlist entries: {sorted(_ATOMIC_WRITE_JSON_BYPASS_IMPORTERS - actual)}. "
-        "Only storage_writer.py may import _atomic_write_json_unchecked."
+        "Only _auth/storage.py may import _atomic_write_json_unchecked."
     )
+
+
+def _storage_tree() -> ast.Module:
+    return ast.parse((SRC_ROOT / _STORAGE_MODULE).read_text("utf-8"))
+
+
+def test_storage_bypass_has_exactly_one_aliased_import() -> None:
+    """Clause (vi), precondition: the bypass has ONE local binding, via ``asname``.
+
+    The whole clause is keyed on that binding. Zero bindings would make it
+    silently govern nothing; two would give a caller a spelling the single-name
+    scan never follows. The alias is also asserted NOT to be the public
+    primitive's name — sharing it is what made the pre-merge code read as if the
+    guarded wrapper were in use (ADR-0033 decision 2).
+    """
+    binding = _bypass_local_binding(_storage_tree())
+    assert binding not in _WRITE_PRIMITIVES, (
+        f"the storage-state bypass is bound as {binding!r}, colliding with the PUBLIC "
+        "write primitive of the same name. Rename the local alias (e.g. "
+        "`_write_state_unchecked`) so the gate and human readers can tell the "
+        "guarded wrapper from the bypass."
+    )
+    assert binding.startswith("_"), (
+        f"the bypass alias {binding!r} should be private-by-convention so it cannot be "
+        "re-exported off this module by accident."
+    )
+
+
+def test_storage_bypass_callers_frozen_at_function_granularity() -> None:
+    """Clause (vi): only the allowlisted intent writers reach the write bypass.
+
+    Equality-asserted (ADR-0033 decision 2). After the persistence merge the
+    module-granular allowlist above is satisfied by a ~2,100-line module that
+    also holds every read path, so THIS is the assertion carrying ADR-0029's
+    "only the canonical writers write storage_state.json" guarantee. A new
+    function reaching the bypass is red until it is triaged onto the list; a
+    stale entry (a writer that stopped writing) is red too.
+    """
+    calls, _escapes, _module_level = _bypass_references(_storage_tree())
+    actual = set(calls)
+    assert actual == set(_STORAGE_BYPASS_WRITERS), (
+        "the set of functions reaching the storage-state write bypass drifted from "
+        f"the frozen allowlist in {_STORAGE_MODULE}. "
+        f"Unexpected: {sorted(actual - _STORAGE_BYPASS_WRITERS)}; "
+        f"stale: {sorted(_STORAGE_BYPASS_WRITERS - actual)}. "
+        "Only the canonical intent writers may write storage_state.json (ADR-0029); "
+        "every other path must go through one of them."
+    )
+
+
+def test_storage_bypass_reference_never_escapes_its_writer() -> None:
+    """Clause (vi): the bypass is only ever CALLED, never handed around.
+
+    A bare reference — returned, stored on an object, passed to a helper,
+    rebound — would let a non-allowlisted callee do the write while the
+    attribution scan happily credits the enclosing writer. Today every use is a
+    direct call, so this costs nothing; it exists so the "attribute to the
+    enclosing function" rule cannot be turned into a laundering route.
+    Module-level references are flagged for the same reason: they are outside
+    every writer.
+    """
+    _calls, escapes, module_level = _bypass_references(_storage_tree())
+    assert escapes == [], (
+        f"the storage-state write bypass is referenced without being called at "
+        f"{_STORAGE_MODULE}:{escapes}. Call it directly inside an allowlisted "
+        "intent writer; passing or storing the reference moves the write out of "
+        "the function this gate can name."
+    )
+    assert module_level == [], (
+        f"the storage-state write bypass is referenced at module scope in "
+        f"{_STORAGE_MODULE}:{module_level} — outside every intent writer."
+    )
+
+
+_BYPASS_SELF_CHECK_PREAMBLE = (
+    "from .._atomic_io import _atomic_write_json_unchecked as _write_state_unchecked\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_calls", "expected_escapes", "expected_module_level"),
+    [
+        # Direct call inside a top-level function.
+        ("def w(p, d):\n    _write_state_unchecked(p, d)\n", {"w": 1}, 0, 0),
+        # Call inside a nested closure passed POSITIONALLY as the template body:
+        # attributes to the ENCLOSING writer, not to the closure and not to
+        # "no function at all".
+        (
+            "def w(p, d):\n"
+            "    def _write():\n"
+            "        _write_state_unchecked(p, d)\n"
+            "    return in_storage_transaction(p, _write, log_prefix='x')\n",
+            {"w": 1},
+            0,
+            0,
+        ),
+        # Bare reference handed to a helper — a call-only scan would miss it.
+        ("def w(p, d):\n    helper(_write_state_unchecked)\n", {}, 1, 0),
+        # Returned reference: escapes the writer entirely.
+        ("def w():\n    return _write_state_unchecked\n", {}, 1, 0),
+        # Module-level rebind: not inside any writer.
+        ("_alias = _write_state_unchecked\n", {}, 0, 1),
+        # Module-level call.
+        ("_write_state_unchecked(p, d)\n", {}, 0, 1),
+        # Async writer: AsyncFunctionDef is not a FunctionDef subclass, so a gate
+        # that matched only the latter would leave `async def` free to bypass.
+        ("async def w(p, d):\n    _write_state_unchecked(p, d)\n", {"w": 1}, 0, 0),
+        # An unrelated call is not a bypass use.
+        ("def w(p, d):\n    atomic_write_json(p, d)\n", {}, 0, 0),
+    ],
+)
+def test_storage_bypass_detector_self_check(
+    body: str, expected_calls: dict[str, int], expected_escapes: int, expected_module_level: int
+) -> None:
+    """Self-test of the clause (vi) detector across every shape it must see."""
+    calls, escapes, module_level = _bypass_references(ast.parse(_BYPASS_SELF_CHECK_PREAMBLE + body))
+    assert {name: len(lines) for name, lines in calls.items()} == expected_calls
+    assert len(escapes) == expected_escapes
+    assert len(module_level) == expected_module_level
+
+
+@pytest.mark.parametrize(
+    "preamble",
+    [
+        # No bypass import at all — the clause would silently govern nothing.
+        "",
+        # Two bindings: a single-name scan follows only one of them.
+        "from .._atomic_io import _atomic_write_json_unchecked as _a\n"
+        "from .._atomic_io import _atomic_write_json_unchecked as _b\n",
+    ],
+)
+def test_storage_bypass_binding_resolution_is_not_vacuous(preamble: str) -> None:
+    """Zero or multiple bypass bindings must fail loudly, not scan nothing."""
+    with pytest.raises(BypassScanError):
+        _bypass_local_binding(ast.parse(preamble + "def w():\n    pass\n"))
+
+
+def test_storage_bypass_clause_bites_on_an_injected_violation() -> None:
+    """Injection proof: the clause goes RED on a bypass call in a new function.
+
+    Runs the real detector over the REAL ``storage.py`` source with one extra
+    function appended, so this cannot pass by asserting on a toy snippet whose
+    shape happens to differ from production.
+    """
+    source = (SRC_ROOT / _STORAGE_MODULE).read_text("utf-8")
+    binding = _bypass_local_binding(ast.parse(source))
+    injected = source + (
+        f"\n\ndef _sneaky_write(path, data):\n"
+        f'    """A new writer nobody triaged."""\n'
+        f"    {binding}(path, data)\n"
+    )
+    calls, _escapes, _module_level = _bypass_references(ast.parse(injected))
+    assert "_sneaky_write" in calls
+    # Containment, not equality: this test is about the DETECTOR, and the
+    # equality gate above is what reports any *other* drift. Asserting equality
+    # here would make an unrelated real violation fail two tests with the same
+    # cause and obscure which one is the gate.
+    assert "_sneaky_write" in set(calls) - set(_STORAGE_BYPASS_WRITERS)
+
+    # And the escape arm bites on a reference that leaves its writer.
+    laundered = source + (f"\n\ndef _launder():\n    return {binding}\n")
+    _calls, escapes, _module = _bypass_references(ast.parse(laundered))
+    assert escapes, "a returned bypass reference must be reported as an escape"
 
 
 def test_replace_file_atomically_importers_frozen_allowlist() -> None:
@@ -452,7 +782,7 @@ def test_replace_file_atomically_importers_frozen_allowlist() -> None:
         "replace_file_atomically importer set drifted from the frozen allowlist. "
         f"Unexpected new importers: {sorted(actual - _REPLACE_FILE_ATOMICALLY_IMPORTERS)}; "
         f"stale allowlist entries: {sorted(_REPLACE_FILE_ATOMICALLY_IMPORTERS - actual)}. "
-        "A new storage_state.json writer must go through storage_writer.py."
+        "A new storage_state.json writer must go through _auth/storage.py."
     )
 
 
@@ -491,7 +821,7 @@ def test_auth_write_primitive_importers_frozen() -> None:
         "_auth write-primitive importer set drifted from the frozen allowlist. "
         f"Unexpected: {sorted(actual - _AUTH_WRITE_PRIMITIVE_IMPORTERS)}; "
         f"stale: {sorted(_AUTH_WRITE_PRIMITIVE_IMPORTERS - actual)}. "
-        "storage_state.json writes belong in storage_writer.py."
+        "storage_state.json writes belong in _auth/storage.py."
     )
 
 
@@ -552,7 +882,7 @@ def test_no_atomic_io_module_write_primitive_attribute_calls() -> None:
     assert violations == {}, (
         "write-primitive attribute call(s) via an _atomic_io module alias outside "
         f"the clause-(v) allowlist: {violations}. Route storage_state writes through "
-        "notebooklm._auth.storage_writer instead."
+        "notebooklm._auth.storage instead."
     )
 
 
@@ -629,7 +959,14 @@ def test_write_primitive_literal_detector_self_check(snippet: str, should_flag: 
 def test_no_storage_state_literal_write_primitive_calls() -> None:
     """Clause (iii): no write-primitive call on a ``storage_state.json`` literal
     outside the canonical writer / migration."""
-    allowed = {"_auth/storage_writer.py", "migration.py"}
+    # ``_auth/storage.py`` is deliberately NOT exempt. Before the persistence
+    # merge the exemption covered a 981-line single-purpose writer module; it
+    # would now cover the whole 2,100-line persistence seam, including every read
+    # path — exactly the by-construction erosion ADR-0033 warns about. Clause (vi)
+    # does not backstop this one (it tracks only the ``_write_state_unchecked``
+    # binding, not raw primitives), and dropping the exemption is free: neither
+    # this module nor its pre-merge sources ever used the shape it permitted.
+    allowed = {"migration.py"}
     violations: dict[str, list[int]] = {}
     for path in _iter_src_files():
         rel = _rel(path)
@@ -640,7 +977,7 @@ def test_no_storage_state_literal_write_primitive_calls() -> None:
             violations[rel] = hits
     assert violations == {}, (
         "write-primitive call(s) targeting a storage_state.json literal outside "
-        f"storage_writer.py / migration.py: {violations}"
+        f"migration.py: {violations}"
     )
 
 
@@ -653,3 +990,144 @@ def test_storage_state_write_exemptions_are_atomic_write_json_importers() -> Non
             f"{rel} is a storage-state exemption but not an atomic_write_json importer; "
             "the two tracking lists have drifted."
         )
+
+
+_STORAGE_FILELOCK_USERS: frozenset[str] = frozenset(
+    {
+        # Writes the SIBLING ``context.json``, not ``storage_state.json`` — the
+        # one place in this module that legitimately holds a different sentinel
+        # with a different mechanism. Its docstring (plan section 5) records why
+        # the two lock stacks are deliberately NOT unified.
+        "_drop_legacy_account_key",
+    }
+)
+
+
+def _filelock_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """``(bare_names, module_names)`` for every ``filelock`` binding in a module.
+
+    All spellings, because a gate that scans for one of them is a gate someone
+    silently walks around: ``from filelock import FileLock``, the same with an
+    ``asname``, and ``import filelock [as f]`` (matched as an attribute access
+    on the module binding).
+    """
+    names: set[str] = set()
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "filelock":
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "filelock":
+                    modules.add(alias.asname or alias.name.split(".")[0])
+    return names, modules
+
+
+def _filelock_references(tree: ast.Module) -> tuple[dict[str, list[int]], list[int]]:
+    """``(users_by_function, module_level)`` for every ``filelock`` reference.
+
+    Attribution mirrors the bypass scan: a reference inside a nested closure
+    credits the enclosing top-level function, and ``async def`` counts —
+    ``AsyncFunctionDef`` is not a ``FunctionDef`` subclass, so matching only the
+    latter would leave an open door. Import lines themselves are not uses.
+    """
+    bare, dotted = _filelock_bindings(tree)
+    if not bare and not dotted:
+        return {}, []
+    import_lines = {
+        node.lineno for node in ast.walk(tree) if isinstance(node, ast.Import | ast.ImportFrom)
+    }
+
+    def _refs(scope: ast.AST) -> list[int]:
+        hits: list[int] = []
+        for node in ast.walk(scope):
+            if (isinstance(node, ast.Name) and node.id in bare) or (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in dotted
+            ):
+                hits.append(node.lineno)
+        return [line for line in hits if line not in import_lines]
+
+    users: dict[str, list[int]] = {}
+    seen: set[int] = set()
+    for func in _enclosing_function_defs(tree):
+        lines = _refs(func)
+        if lines:
+            users[func.name] = sorted(lines)
+        seen.update(lines)
+    return users, sorted(line for line in _refs(tree) if line not in seen)
+
+
+def test_filelock_use_in_the_canonical_writer_is_frozen() -> None:
+    """``filelock`` may not spread inside the single sanctioned writer module.
+
+    ADR-0033 PR 5.2 moved the account-record writers into ``_auth/storage.py``
+    and, with them, ``filelock`` — which now lives in the module its own
+    docstring calls the single sanctioned home for ``storage_state.json``
+    mutations, co-resident with ``_file_lock``. The two stacks are deliberately
+    not unified (they interoperate on POSIX only by both bottoming out in
+    ``fcntl.flock``, which does not hold on Windows), and until now that
+    non-unification was documented but unenforced: nothing stopped an existing
+    allowlisted writer from quietly switching mechanism, which would take a
+    DIFFERENT sentinel and silently stop serializing against every other writer.
+    """
+    users, module_level = _filelock_references(_storage_tree())
+    assert set(users) == set(_STORAGE_FILELOCK_USERS), (
+        f"``filelock`` use in {_STORAGE_MODULE} drifted from the frozen allowlist. "
+        f"Unexpected: {sorted(set(users) - _STORAGE_FILELOCK_USERS)}; "
+        f"stale: {sorted(_STORAGE_FILELOCK_USERS - set(users))}. "
+        "Every ``storage_state.json`` mutator must take the sentinel through "
+        "``_file_lock`` / ``_acquire_storage_lock`` (ADR-0029); ``filelock`` is "
+        "reserved for the sibling ``context.json``."
+    )
+    assert module_level == [], (
+        f"``filelock`` is referenced at module scope in {_STORAGE_MODULE}:{module_level} "
+        "— outside every allowlisted function."
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("from filelock import FileLock\ndef w(p):\n    FileLock(p)\n", {"w"}),
+        # asname: a literal "FileLock" scan would miss this entirely.
+        ("from filelock import FileLock as FL\ndef w(p):\n    FL(p)\n", {"w"}),
+        # module import + attribute access, plain and aliased.
+        ("import filelock\ndef w(p):\n    filelock.FileLock(p)\n", {"w"}),
+        ("import filelock as fl\ndef w(p):\n    fl.FileLock(p)\n", {"w"}),
+        # async def is not a FunctionDef subclass.
+        ("from filelock import FileLock\nasync def w(p):\n    FileLock(p)\n", {"w"}),
+        # nested closure credits the ENCLOSING top-level writer.
+        (
+            "from filelock import FileLock\n"
+            "def w(p):\n"
+            "    def _inner():\n"
+            "        FileLock(p)\n"
+            "    return _inner\n",
+            {"w"},
+        ),
+        # a bare reference handed around is still use.
+        ("from filelock import FileLock\ndef w():\n    return FileLock\n", {"w"}),
+        # an unrelated lock primitive of similar shape is not a hit.
+        ("from filelock import FileLock\ndef w(p):\n    _file_lock(p)\n", set()),
+        # no filelock import at all -> nothing governed, nothing reported.
+        ("def w(p):\n    FileLock(p)\n", set()),
+    ],
+)
+def test_filelock_detector_self_check(body: str, expected: set[str]) -> None:
+    """Self-test of the ``filelock`` detector across every spelling it must see."""
+    users, _module_level = _filelock_references(ast.parse(body))
+    assert set(users) == expected
+
+
+def test_filelock_detector_bites_on_an_injected_second_user() -> None:
+    """Injection-prove it: a NEW writer taking a filelock must be reported."""
+    injected = (SRC_ROOT / _STORAGE_MODULE).read_text("utf-8") + (
+        "\n\ndef _sneaky_lock(path):\n    with FileLock(str(path) + '.lock'):\n        pass\n"
+    )
+    users, _module_level = _filelock_references(ast.parse(injected))
+    assert "_sneaky_lock" in users, (
+        "a new filelock user in the canonical writer must be reported; the detector is not biting."
+    )
