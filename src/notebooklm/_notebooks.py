@@ -319,13 +319,32 @@ class NotebooksAPI:
                 )
                 return source_ids
 
-            sources = (
-                safe_index(
-                    notebook_info, 1, method_id=method_id, source="NotebooksAPI.get_source_ids"
+            if len(notebook_info) <= 1:
+                # The sources slot is *absent*, which is not the same thing as
+                # present-and-null below: a healthy envelope carries the slot
+                # (the #2131 report shows ``len=11`` on an empty notebook), so a
+                # response too short to hold one is a truncated shape worth
+                # surfacing.
+                logger.warning(
+                    "get_source_ids: notebook_info has no sources slot for %s "
+                    "(schema drift?). len=%d",
+                    notebook_id,
+                    len(notebook_info),
                 )
-                if len(notebook_info) > 1
-                else None
+                return source_ids
+
+            sources = safe_index(
+                notebook_info, 1, method_id=method_id, source="NotebooksAPI.get_source_ids"
             )
+            if sources is None:
+                # Slot present, explicitly null: a genuinely empty notebook
+                # elides its sources as ``None`` rather than ``[]``. A valid
+                # empty state, not a malformed response, so it must not reach
+                # the drift warning below (#2131). This is the same split the
+                # sibling walk over this slot already makes — reject the short
+                # envelope first, then accept a present ``None``
+                # (``_source/listing.py``, issue #1159).
+                return source_ids
             if not isinstance(sources, list):
                 logger.warning(
                     "get_source_ids: notebook_info[1] not list for %s (schema drift?). len=%d",

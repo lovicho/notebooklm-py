@@ -229,6 +229,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An empty notebook no longer logs `schema drift?` on every
+  `get_source_ids` call.** A genuinely empty notebook returns a healthy
+  envelope whose sources slot is present but explicitly null — the backend
+  sends `None` there, not `[]` — and the guard tested only
+  `isinstance(sources, list)`, so a valid empty state landed in the branch
+  reserved for a malformed response. Obfuscated method ids and positional
+  payload shapes changing underneath us is this project's #1 breakage class
+  and `schema drift?` is how an operator finds out, so a warning that fires on
+  every empty notebook erodes the one signal that has to stay trustworthy. The
+  walk now separates the three shapes the single `isinstance` test conflated:
+  an envelope too short to carry a sources slot still warns (a truncated shape,
+  as before), a present-and-null slot returns quietly, and a present-but-wrong
+  type still warns. That is the same split the sibling walk over this slot
+  already makes in `_source/listing.py`
+  ([#2131](https://github.com/teng-lin/notebooklm-py/issues/2131)).
 - **Chat turn numbers now come from server history instead of the client-local
   cache.** Stateless remote MCP requests create a fresh client for each call, so
   a real continuation could previously report the contradictory pair
