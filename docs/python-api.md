@@ -298,7 +298,17 @@ decode faults rather than swallowing them. (The one documented carve-out is
 `artifacts`, which inherits `client.artifacts.list(...)`'s deliberate
 partial-availability behavior: a transport failure of the mind-map sub-fetch is
 logged and the studio artifacts that loaded are still returned — see ADR-0019
-Rule 3.) The workflows that
+Rule 3.)
+
+For `notebooks` specifically, gRPC status `5` reaches `None` under **both** its
+meanings: the notebook is genuinely absent, or it exists under a different
+signed-in Google account (the account-routing case behind issues #114 / #294).
+The backend sends the same status either way, so `get_or_none()` cannot
+distinguish them and the routing guidance is unobservable there. Use
+`client.notebooks.get(...)` when that matters — it raises
+`NotebookNotFoundError` carrying the guidance in its message, the originating
+`rpc_code`, and the original rejection as `__cause__`. `PERMISSION_DENIED`
+(status `7`) is never folded into `None` and always propagates. The workflows that
 *already* raise `SourceNotFoundError` are `client.sources.get_fulltext(...)` and
 `client.sources.wait_until_ready(...)`. Artifact-download workflows raise
 `ArtifactNotFoundError` when a requested artifact ID is not in the listing.

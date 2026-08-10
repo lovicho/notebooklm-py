@@ -115,6 +115,15 @@ from .rpc.types import (
 from .rpc.types import (
     ArtifactTypeCode as _ArtifactTypeCode,
 )
+from .rpc.types import (
+    GrpcStatusCode as _GrpcStatusCode,
+)
+from .rpc.types import (
+    normalize_grpc_status as _normalize_grpc_status,
+)
+from .rpc.types import (
+    normalize_rpc_code as _normalize_rpc_code,
+)
 
 # Keep private facade names that first-party tests and external callers have
 # historically imported while the implementation moves into _types modules.
@@ -134,6 +143,15 @@ _warned_source_types = _source_types._warned_source_types
 # Imported for the historical ``notebooklm.types.ArtifactTypeCode`` attribute,
 # but intentionally absent from ``__all__``.
 ArtifactTypeCode = _ArtifactTypeCode
+
+# The canonical gRPC status table and its two coercion helpers, routed through
+# this facade for the ``_app`` layer: the boundary lint
+# (``tests/_guardrails/test_app_boundary.py``) forbids ``_app`` from importing
+# ``notebooklm.rpc.*`` directly, and the neutral error classifier needs both.
+# Internal plumbing, so intentionally absent from ``__all__``.
+GrpcStatusCode = _GrpcStatusCode
+normalize_grpc_status = _normalize_grpc_status
+normalize_rpc_code = _normalize_rpc_code
 
 # Guards the ``ResearchSourceInput`` import from being removed as unused:
 # ``typing.get_type_hints(CitedSourceSelection)`` needs it in this facade's

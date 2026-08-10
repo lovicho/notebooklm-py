@@ -132,8 +132,9 @@ ALLOWLISTED_CEILINGS: dict[str, int] = {
     # ``CollectionNotFoundError`` (the Collections domain; #2006), then
     # 1577 -> 1599 for ``LockUnavailableError`` (the canonical-storage-writer
     # fail-closed lock exception; ADR-0029 — replaces ``filelock.Timeout`` and
-    # must be public so callers catch it) — all irreducible additions to this home.
-    "exceptions.py": 1599,
+    # must be public so callers catch it), then 1599 -> 1575 after the private
+    # response-preview helper moved to its credential-redaction home (#2132).
+    "exceptions.py": 1575,
     # sanctioned merge (ADR-0033) — the `_auth` persistence merge: the seam that
     # was spelled as three cap-split files becomes one deep module.
     # ``_auth/storage_writer.py`` (981) and ``_auth/storage_transaction.py``

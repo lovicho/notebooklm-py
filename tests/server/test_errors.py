@@ -89,6 +89,77 @@ def test_status_7_is_not_routed_to_404() -> None:
     assert resp.json()["error"]["category"] == "rpc"
 
 
+def _client_with_real_notebooks(error: BaseException) -> TestClient:
+    """REST app whose ``notebooks`` namespace is the **real** ``NotebooksAPI``.
+
+    The tests above inject a bare ``ClientError`` in place of the whole
+    namespace, so they project ``classify`` faithfully but never execute
+    ``NotebooksAPI.get()``. Only the ``rpc_call`` seam raises here, so the GET
+    route runs the real translation from a status-5 rejection to
+    ``NotebookNotFoundError`` — the path an actual missing notebook takes.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from notebooklm._notebooks import NotebooksAPI
+    from tests._fixtures.fake_core import make_fake_core
+
+    fake = FakeClient()
+    core = make_fake_core(rpc_call=AsyncMock(side_effect=error))
+    fake.notebooks = NotebooksAPI(core.rpc_executor, sources_api=MagicMock())  # type: ignore[assignment]
+
+    @asynccontextmanager
+    async def factory() -> AsyncIterator[FakeClient]:
+        yield fake
+
+    app = create_app(client_factory=factory)
+    headers = {"Authorization": f"Bearer {TEST_TOKEN}", "Host": "127.0.0.1"}
+    client = TestClient(
+        app, headers=headers, client=("127.0.0.1", 5555), raise_server_exceptions=False
+    )
+    client.__enter__()
+    return client
+
+
+def test_get_route_status_5_keeps_the_routing_hint_through_the_translation() -> None:
+    """GET /v1/notebooks/{id} preserves the hint *after* the typed translation.
+
+    ``server/_errors.py`` documents that the status-5 account-routing hint is
+    preserved verbatim in the 404 body. Once ``NotebooksAPI.get()`` converts
+    that rejection into ``NotebookNotFoundError``, keeping the promise depends
+    on the translation carrying the diagnostic onto the typed error — the
+    renderers print ``str(exc)``, never ``__cause__``.
+    """
+    hint = "commonly an account-routing mismatch"
+    client = _client_with_real_notebooks(
+        exc.ClientError(f"The server rejected this request (not found). {hint}", rpc_code=5)
+    )
+    try:
+        resp = client.get("/v1/notebooks/nb-missing")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert resp.status_code == 404
+    body = resp.json()["error"]
+    assert body["category"] == "not_found"
+    assert hint in body["message"], f"routing hint dropped from the 404 body: {body['message']!r}"
+
+
+def test_get_route_status_7_is_not_reported_as_a_missing_notebook() -> None:
+    """A notebook the caller may not read must not project as 404 through GET.
+
+    The decoder routes PERMISSION_DENIED through the same ``ClientError``
+    branch as NOT_FOUND, so this pins that the translation did not widen.
+    """
+    client = _client_with_real_notebooks(exc.ClientError("denied", rpc_code=7))
+    try:
+        resp = client.get("/v1/notebooks/nb-forbidden")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert resp.status_code == 502
+    assert resp.json()["error"]["category"] == "rpc"
+
+
 def _error_body(exc_obj: BaseException) -> dict[str, object]:
     import json
 

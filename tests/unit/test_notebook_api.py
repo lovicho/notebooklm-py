@@ -7,6 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from notebooklm._notebook_payloads import (
+    build_create_notebook_params as canonical_build_create_notebook_params,
+)
+from notebooklm._notebook_payloads import (
+    build_get_notebook_params as canonical_build_get_notebook_params,
+)
 from notebooklm._notebooks import (
     NotebooksAPI,
     build_create_notebook_params,
@@ -98,6 +104,11 @@ def test_build_get_notebook_params_matches_live_payload() -> None:
         None,
         0,
     ]
+
+
+def test_notebook_payload_builders_keep_their_compatibility_import_path() -> None:
+    assert build_create_notebook_params is canonical_build_create_notebook_params
+    assert build_get_notebook_params is canonical_build_get_notebook_params
 
 
 def test_direct_notebooks_api_construction_remains_supported() -> None:

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **RPC bundle monitoring no longer reports authentication/access failures as
+  protocol drift.** The live registry capture now classifies login,
+  CookieMismatch, region/anti-abuse, HTTP, and CDN failures as exit code 2 and
+  explicitly states that no drift conclusion was possible. The nightly workflow
+  opens its RPC/studio-drift issue only for the script's explicit `drift`
+  outcome; exit 2 and unclassified runner failures are routed into the existing
+  authentication/infrastructure report instead. The maintainer live-auth matrix
+  now runs the real RPC canary; always exercises fallback-disabled storage-only
+  mid-session recovery (#2161); tests a sibling-process re-mint under four
+  simultaneous RPCs and actual mid-session master-token fallback; drives both
+  REST (live recovery plus stale-start lazy rebind) and MCP (tool call
+  before/after live-jar invalidation) through their adapter lifespans; and
+  regression-tests the access-gate routing that caused
+  [#2174](https://github.com/teng-lin/notebooklm-py/issues/2174) alongside
+  [#2175](https://github.com/teng-lin/notebooklm-py/issues/2175).
 - **Long-lived MCP and REST servers now keep cookie sessions alive and recover
   from sibling profile refreshes.** Both server adapters enable the client's
   600-second background `RotateCookies` loop for their process-lifetime client.
@@ -699,6 +714,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   / [#2018](https://github.com/teng-lin/notebooklm-py/issues/2018), which fixed
   the script's *auth* path and left its *request* path untouched
   ([#2054](https://github.com/teng-lin/notebooklm-py/issues/2054)).
+
+- **`notebooks.get_or_none()` returns `None` again for a notebook that does
+  not exist.** ADR-0019 makes it *the* sanctioned `None`-on-miss lookup, but it
+  raised `ClientError` on exactly that input, so every caller of the safe
+  lookup was holding an unsafe one — visible only against the live backend,
+  not in the docstring or the type signature. The cause sits one layer up:
+  `get()` documents that it raises `NotebookNotFoundError` on a miss, and its
+  post-validation rests on the premise that the backend answers an unknown id
+  with a degenerate payload rather than a proper RPC error. It now answers with
+  gRPC status 5, which the decoder surfaces as `ClientError` — a *sibling* of
+  `NotebookNotFoundError` under `RPCError`, not an ancestor, so
+  `except NotebookNotFoundError` never saw it. `get()` now translates a
+  status-5 rejection into `NotebookNotFoundError` and keeps the
+  degenerate-payload post-validation as the belt-and-braces path. The match is
+  deliberately narrow to status 5: the decoder routes status 7
+  (`PERMISSION_DENIED`) through the same `ClientError` branch, and a notebook
+  the caller may not read is not a notebook that does not exist. Callers
+  wanting the untranslated failure still have `get_raw()`
+  ([#2132](https://github.com/teng-lin/notebooklm-py/issues/2132)).
+
+  The **whole diagnostic survives the translation**, not just the chained
+  cause: status 5 also covers "the notebook belongs to a different signed-in
+  Google account", and `server/_errors.py` documents that the 404 body
+  preserves that account-routing guidance verbatim. Since every adapter renders
+  `str(exc)` and never `__cause__`, `NotebookNotFoundError` gained optional
+  `detail` / `rpc_code` / `found_ids` arguments (all keyword-only with
+  defaults, so existing construction is unaffected) and the translation passes
+  the decoder's message through. A plain absence with no diagnostic still reads
+  exactly `Notebook not found: <id>`. `get_or_none()` folds both meanings of
+  status 5 into `None` by construction — its docstring now says so, and points
+  at `get()` for callers who need to tell them apart.
+
+- **Canonical gRPC status codes replace scattered magic numbers.** The wire
+  statuses at index 5 of a `wrb.fr` entry were spelled as bare literals at
+  three layers — the decoder's `(5, 7)` routing, the neutral error classifier's
+  `== 5`, and the new notebook not-found translation — with nothing naming the
+  namespace, while `RPCErrorCode.NOT_FOUND` is `404` in a *different*
+  (HTTP-style) namespace that shares member names. `GrpcStatusCode` in
+  `rpc/types.py` is now the single source of truth for those numbers, paired
+  with two coercion helpers for the `str | int | None` shape `rpc_code` takes:
+  `normalize_rpc_code` (to `int`, keeping HTTP 5xx intact for the transient
+  check) and `normalize_grpc_status` (to the enum, for semantic comparisons).
+  Both reject `bool` explicitly, since `True` would otherwise coerce to
+  `CANCELLED`. `RPCErrorCode` is unchanged.
 
 - **`scripts/diagnose_get_notebook.py` can authenticate again, and honours
   `NOTEBOOKLM_BASE_URL`.** Two independent defects in the same ~40 lines: it

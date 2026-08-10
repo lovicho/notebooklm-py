@@ -72,6 +72,11 @@ from ..exceptions import (
     ValidationError,
     WaitTimeoutError,
 )
+
+# Via the public ``notebooklm.types`` facade, not ``notebooklm.rpc.*`` — the
+# _app boundary lint (tests/_guardrails/test_app_boundary.py) requires RPC
+# enums to be consumed through their public re-export.
+from ..types import GrpcStatusCode, normalize_grpc_status, normalize_rpc_code
 from .source_mutations import SourceMutationError
 
 
@@ -232,19 +237,20 @@ def is_retriable(category: ErrorCategory) -> bool:
 
 
 def _normalized_rpc_code(exc: RPCError) -> int | None:
-    """Return ``exc.rpc_code`` normalized to an ``int``, or ``None`` if absent/non-numeric.
+    """Return ``exc.rpc_code`` coerced to an ``int``, or ``None``.
 
-    ``rpc_code`` is typed ``str | int | None``; a string ``"5"`` must compare
-    equal to the integer status, so this coerces before comparison and tolerates
-    a non-numeric value (returns ``None`` rather than raising).
+    Thin adapter over the canonical
+    :func:`~notebooklm.types.normalize_rpc_code` so this module keeps taking an
+    exception rather than a raw code. The coercion rules live in that one
+    helper, shared with the decoder and the notebook not-found translation.
+
+    Stays an ``int`` rather than a :class:`GrpcStatusCode` because
+    :func:`_is_transient_rpc_code` range-checks HTTP statuses (``500 <= code <
+    600``) through the same value; narrowing here would silently drop every
+    5xx to ``None``. Semantic gRPC comparisons use
+    :func:`~notebooklm.types.normalize_grpc_status` instead.
     """
-    code = getattr(exc, "rpc_code", None)
-    if code is None:
-        return None
-    try:
-        return int(code)
-    except (TypeError, ValueError):
-        return None
+    return normalize_rpc_code(getattr(exc, "rpc_code", None))
 
 
 #: rpc_codes that mean a *transient / server-side* failure (not specific to the one
@@ -253,7 +259,14 @@ def _normalized_rpc_code(exc: RPCError) -> int | None:
 #: whose bare-RPCError cause carries one of these FATAL in a batch add — the per-source
 #: rejection codes (e.g. 3 INVALID_ARGUMENT / 9 FAILED_PRECONDITION) fall through to
 #: the non-fatal SOURCE_ADD instead.
-_TRANSIENT_GRPC_CODES = frozenset({4, 8, 13, 14})
+_TRANSIENT_GRPC_CODES = frozenset(
+    {
+        GrpcStatusCode.DEADLINE_EXCEEDED,
+        GrpcStatusCode.RESOURCE_EXHAUSTED,
+        GrpcStatusCode.INTERNAL,
+        GrpcStatusCode.UNAVAILABLE,
+    }
+)
 
 
 def _is_transient_rpc_code(code: int | None) -> bool:
@@ -325,7 +338,9 @@ def _category_for(exc: BaseException) -> ErrorCategory:
     # ``"5"`` is not missed. Purely additive (no exception-type change), so the
     # ``RPC`` exemplar (a bare ``RPCError`` with no ``rpc_code``) is unaffected
     # and the consistency gate stays green.
-    if isinstance(exc, ClientError) and _normalized_rpc_code(exc) == 5:
+    if isinstance(exc, ClientError) and (
+        normalize_grpc_status(getattr(exc, "rpc_code", None)) is GrpcStatusCode.NOT_FOUND
+    ):
         return ErrorCategory.NOT_FOUND
 
     # --- Remaining RPC failures (decoding, unknown-method, client 4xx, ...) ---

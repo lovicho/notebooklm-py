@@ -46,6 +46,7 @@ from .types import (  # noqa: F401
     ChatResponseLength,
     DriveMimeType,
     ExportType,
+    GrpcStatusCode,
     InfographicDetail,
     InfographicOrientation,
     InfographicStyle,
@@ -61,6 +62,7 @@ from .types import (  # noqa: F401
     get_batchexecute_url,
     get_query_url,
     get_upload_url,
+    normalize_grpc_status,
 )
 
 # Blessed public power-user surface only; see the banner comment above for why

@@ -44,6 +44,28 @@ pytestmark = pytest.mark.repo_lint
 
 _RPC_ENUM_SNAPSHOT: dict[str, dict[str, int]] = {
     "ArtifactStatus": {"PROCESSING": 1, "PENDING": 2, "COMPLETED": 3, "FAILED": 4},
+    # google.rpc.Code, as embedded at index 5 of a wrb.fr entry. Not our
+    # numbering to choose — these are the canonical gRPC statuses, so a diff
+    # here means either a typo or that the backend stopped speaking gRPC codes.
+    "GrpcStatusCode": {
+        "OK": 0,
+        "CANCELLED": 1,
+        "UNKNOWN": 2,
+        "INVALID_ARGUMENT": 3,
+        "DEADLINE_EXCEEDED": 4,
+        "NOT_FOUND": 5,
+        "ALREADY_EXISTS": 6,
+        "PERMISSION_DENIED": 7,
+        "RESOURCE_EXHAUSTED": 8,
+        "FAILED_PRECONDITION": 9,
+        "ABORTED": 10,
+        "OUT_OF_RANGE": 11,
+        "UNIMPLEMENTED": 12,
+        "INTERNAL": 13,
+        "UNAVAILABLE": 14,
+        "DATA_LOSS": 15,
+        "UNAUTHENTICATED": 16,
+    },
     "ArtifactTypeCode": {
         "AUDIO": 1,
         "REPORT": 2,

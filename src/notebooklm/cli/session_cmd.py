@@ -493,10 +493,10 @@ def register_session_commands(cli):
             if isinstance(exc, click.ClickException):
                 raise exc
             if isinstance(exc, NotebookNotFoundError):
+                # ``str(exc)`` keeps a status-5 account-routing hint (#2132).
                 _output_error(
-                    f"Error: Notebook {notebook_id!r} not found. "
-                    "Run 'notebooklm list' to see available notebooks, "
-                    "or pass --force to bypass verification.",
+                    f"Error: {exc}. Run 'notebooklm list' to see available "
+                    "notebooks, or pass --force to bypass verification.",
                     "NOT_FOUND",
                     json_output,
                     1,

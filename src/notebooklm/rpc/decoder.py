@@ -7,6 +7,8 @@ import threading
 from enum import IntEnum
 from typing import Any
 
+from .._logging import _truncate_response_preview
+
 # Import exceptions from centralized module
 from ..exceptions import (
     AuthError,
@@ -17,9 +19,9 @@ from ..exceptions import (
     RPCTimeoutError,
     ServerError,
     UnknownRPCMethodError,
-    _truncate_response_preview,
 )
 from ._safe_index import safe_index
+from .types import GrpcStatusCode
 
 # Re-export for backward compatibility (imports from notebooklm.rpc.decoder still work)
 __all__ = [
@@ -99,29 +101,40 @@ class RPCErrorCode(IntEnum):
     SERVER_ERROR = 500  # Internal server error
 
 
-# gRPC canonical status codes (google.rpc.Code) embedded by the batchexecute
-# backend at index 5 of a `wrb.fr` response when the RPC returns null result
-# data. The bare single-element form `[code]` is what issues #114 and #294
-# observed on the wire.
+# Human-readable labels for the gRPC canonical status codes the batchexecute
+# backend embeds at index 5 of a `wrb.fr` response when the RPC returns null
+# result data. The bare single-element form `[code]` is what issues #114 and
+# #294 observed on the wire.
+#
+# The codes themselves live in `GrpcStatusCode` (rpc/types.py) — the single
+# source of truth shared with the neutral error classifier and the notebook
+# not-found translation. This table only supplies the wording, and is keyed by
+# the enum so a member added there without a label fails the guardrail test
+# rather than silently degrading to an unlabelled status.
 _GRPC_STATUS_MESSAGES: dict[int, str] = {
-    0: "OK",
-    1: "Cancelled",
-    2: "Unknown",
-    3: "Invalid argument",
-    4: "Deadline exceeded",
-    5: "Not found",
-    6: "Already exists",
-    7: "Permission denied",
-    8: "Resource exhausted",
-    9: "Failed precondition",
-    10: "Aborted",
-    11: "Out of range",
-    12: "Not implemented",
-    13: "Internal",
-    14: "Unavailable",
-    15: "Data loss",
-    16: "Unauthenticated",
+    GrpcStatusCode.OK: "OK",
+    GrpcStatusCode.CANCELLED: "Cancelled",
+    GrpcStatusCode.UNKNOWN: "Unknown",
+    GrpcStatusCode.INVALID_ARGUMENT: "Invalid argument",
+    GrpcStatusCode.DEADLINE_EXCEEDED: "Deadline exceeded",
+    GrpcStatusCode.NOT_FOUND: "Not found",
+    GrpcStatusCode.ALREADY_EXISTS: "Already exists",
+    GrpcStatusCode.PERMISSION_DENIED: "Permission denied",
+    GrpcStatusCode.RESOURCE_EXHAUSTED: "Resource exhausted",
+    GrpcStatusCode.FAILED_PRECONDITION: "Failed precondition",
+    GrpcStatusCode.ABORTED: "Aborted",
+    GrpcStatusCode.OUT_OF_RANGE: "Out of range",
+    GrpcStatusCode.UNIMPLEMENTED: "Not implemented",
+    GrpcStatusCode.INTERNAL: "Internal",
+    GrpcStatusCode.UNAVAILABLE: "Unavailable",
+    GrpcStatusCode.DATA_LOSS: "Data loss",
+    GrpcStatusCode.UNAUTHENTICATED: "Unauthenticated",
 }
+
+#: Statuses the decoder routes through ``ClientError`` rather than the generic
+#: ``RPCError``, so ``is_auth_error`` cannot misclassify them and fire a
+#: spurious token refresh. Both also carry the account-routing hint below.
+_ACCOUNT_ROUTED_STATUSES = (GrpcStatusCode.NOT_FOUND, GrpcStatusCode.PERMISSION_DENIED)
 
 # Hint appended to NOT_FOUND / PERMISSION_DENIED messages. Deliberately avoids
 # the substrings checked by AUTH_ERROR_PATTERNS in _runtime/helpers.py so these errors
@@ -749,12 +762,12 @@ def decode_response(raw_response: str, rpc_id: str, allow_null: bool = False) ->
         if status is not None:
             code, label = status
             message = f"The server rejected this request ({label.lower()})."
-            # Route NOT_FOUND (5) / PERMISSION_DENIED (7) through ClientError
-            # so is_auth_error does not misclassify them as auth
-            # failures and trigger a spurious token-refresh retry. The
-            # account-routing hint is only relevant for these two codes —
-            # other codes (e.g. INTERNAL 13) get a plain message.
-            if code in (5, 7):
+            # Route NOT_FOUND / PERMISSION_DENIED through ClientError so
+            # is_auth_error does not misclassify them as auth failures and
+            # trigger a spurious token-refresh retry. The account-routing hint
+            # is only relevant for these two codes — other codes (e.g.
+            # INTERNAL 13) get a plain message.
+            if code in _ACCOUNT_ROUTED_STATUSES:
                 raise ClientError(
                     message + _ACCOUNT_MISMATCH_HINT,
                     method_id=rpc_id,

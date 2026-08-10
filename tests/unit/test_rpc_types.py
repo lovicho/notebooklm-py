@@ -11,11 +11,14 @@ from notebooklm.rpc.types import (
     QUERY_URL,
     ArtifactStatus,
     ArtifactTypeCode,
+    GrpcStatusCode,
     RPCMethod,
     SourceStatus,
     artifact_status_to_str,
     get_batchexecute_url,
     get_query_url,
+    normalize_grpc_status,
+    normalize_rpc_code,
     source_status_to_str,
 )
 
@@ -232,3 +235,64 @@ class TestSourceStatusToStr:
         assert source_status_to_str(6) == "unknown"
         assert source_status_to_str(99) == "unknown"
         assert source_status_to_str(-1) == "unknown"
+
+
+class TestGrpcStatusCode:
+    """The canonical gRPC status table and its two coercion helpers."""
+
+    def test_values_match_the_google_rpc_code_table(self):
+        # Wire contract: these numbers come from google.rpc.Code and are what
+        # the backend embeds at index 5 of a wrb.fr entry.
+        assert GrpcStatusCode.NOT_FOUND == 5
+        assert GrpcStatusCode.PERMISSION_DENIED == 7
+        assert GrpcStatusCode.OK == 0
+        assert GrpcStatusCode.UNAUTHENTICATED == 16
+
+    def test_is_a_separate_namespace_from_rpc_error_code(self):
+        """``NOT_FOUND`` means 5 here and 404 in the HTTP-style enum.
+
+        The two enums share member names, so anything comparing a wire status
+        has to say which namespace it means. Pins that they did not get merged.
+        """
+        from notebooklm.rpc.decoder import RPCErrorCode
+
+        assert RPCErrorCode.NOT_FOUND == 404
+        assert GrpcStatusCode.NOT_FOUND == 5
+
+    def test_decoder_status_labels_cover_every_member(self):
+        """Every status has wording; a new member cannot go unlabelled."""
+        from notebooklm.rpc.decoder import _GRPC_STATUS_MESSAGES
+
+        assert set(_GRPC_STATUS_MESSAGES) == {int(code) for code in GrpcStatusCode}
+
+    def test_normalize_grpc_status_accepts_both_wire_forms(self):
+        assert normalize_grpc_status(5) is GrpcStatusCode.NOT_FOUND
+        assert normalize_grpc_status("5") is GrpcStatusCode.NOT_FOUND
+        assert normalize_grpc_status(7) is GrpcStatusCode.PERMISSION_DENIED
+
+    def test_normalize_grpc_status_rejects_non_statuses(self):
+        # rpc_code also carries non-numeric labels and may be absent entirely;
+        # neither may raise, and neither is a status.
+        assert normalize_grpc_status(None) is None
+        assert normalize_grpc_status("USER_DISPLAYABLE_ERROR") is None
+        assert normalize_grpc_status(999) is None
+        # An HTTP status is numeric but is not a gRPC code.
+        assert normalize_grpc_status(500) is None
+
+    def test_bool_is_not_a_status(self):
+        """``True`` must not normalize to CANCELLED (1) via the int subclass."""
+        assert normalize_grpc_status(True) is None
+        assert normalize_rpc_code(True) is None
+
+    def test_normalize_rpc_code_keeps_http_statuses(self):
+        """The wider helper passes 5xx through — the transient check needs it.
+
+        Narrowing this one to the gRPC table would silently drop every HTTP
+        status to ``None`` and disable the ``500 <= code < 600`` branch in the
+        neutral error classifier.
+        """
+        assert normalize_rpc_code(500) == 500
+        assert normalize_rpc_code("503") == 503
+        assert normalize_rpc_code(5) == 5
+        assert normalize_rpc_code(None) is None
+        assert normalize_rpc_code("USER_DISPLAYABLE_ERROR") is None
