@@ -1,22 +1,19 @@
-"""Unit + equivalence tests for the ADR-0031 Stage 1 ``CookieJar`` wrapper.
+"""Unit and compatibility tests for the canonical cookie values and codecs.
 
-The point of this stage is that ``CookieJar`` changes **nothing** — it gives
-the scattered cookie conversions and policy questions a type to hang off,
-while every decision still delegates to the free function that owns it. So the
-load-bearing tests here are the *equivalence* ones: for each method, assert the
-jar's answer is identical to the legacy call it wraps. If a future edit makes
-the jar diverge (e.g. reimplements a filter instead of delegating), these fail
-even though the jar's own behavior might look self-consistent.
+The value layer owns ordered immutable projections while the legacy free
+functions retain their identities as adapters over dependency-bottom codecs.
 """
 
 from __future__ import annotations
+
+from dataclasses import FrozenInstanceError, replace
 
 import httpx
 import pytest
 
 from notebooklm._auth import cookie_policy as _cookie_policy
 from notebooklm._auth import cookies as _auth_cookies
-from notebooklm._auth.cookie_types import Cookie, CookieJar
+from notebooklm._auth.cookie_types import Cookie, CookieIdentity, CookieJar
 
 
 def _storage_state() -> dict:
@@ -365,3 +362,258 @@ class TestFromHttpx:
         jar.set("SID", "real", domain=".google.com", path="/")
         mixed = CookieJar.from_httpx(jar)
         assert mixed.names() == {"SID"}
+
+
+class TestCookieIdentityAndEquality:
+    def test_typed_identity_is_tuple_shaped_with_default_path(self) -> None:
+        key = CookieIdentity("SID", ".google.com")
+        name, domain, path = key
+
+        assert type(key) is CookieIdentity
+        assert isinstance(key, tuple)
+        assert key == ("SID", ".google.com", "/")
+        assert (name, domain, path) == (key[0], key[1], key[2])
+
+    def test_legacy_identity_stays_an_exact_plain_tuple(self) -> None:
+        cookie = Cookie("SID", ".google.com", "/app", "secret")
+
+        assert type(cookie.identity) is tuple
+        assert cookie.identity == ("SID", ".google.com", "/app")
+        assert cookie.key == CookieIdentity("SID", ".google.com", "/app")
+
+    @pytest.mark.parametrize(
+        ("field_name", "replacement"),
+        [
+            ("name", "HSID"),
+            ("domain", "accounts.google.com"),
+            ("path", "/other"),
+            ("value", "other-value"),
+            ("expires", 1_900_000_000),
+            ("http_only", True),
+            ("secure", True),
+        ],
+    )
+    def test_equality_and_hash_compare_every_field_except_same_site(
+        self, field_name: str, replacement: object
+    ) -> None:
+        original = Cookie("SID", ".google.com", "/", "value")
+        changed = replace(original, **{field_name: replacement})
+
+        assert changed != original
+        assert len({original, changed}) == 2
+
+    def test_same_site_is_not_compared_or_hashed_but_serializes_independently(self) -> None:
+        lax = Cookie("SID", ".google.com", "/", "value", same_site="Lax")
+        strict = replace(lax, same_site="Strict")
+
+        assert lax == strict
+        assert hash(lax) == hash(strict)
+        assert CookieJar([lax]).to_storage_rows()[0]["sameSite"] == "Lax"
+        assert CookieJar([strict]).to_storage_rows()[0]["sameSite"] == "Strict"
+
+    def test_cookie_and_jar_representations_redact_value_and_same_site(self) -> None:
+        value_secret = "sentinel-cookie-value"
+        same_site_secret = "sentinel-samesite-text"
+        cookie = Cookie(
+            "SID",
+            ".google.com",
+            "/",
+            value_secret,
+            same_site=same_site_secret,
+        )
+        jar = CookieJar([cookie])
+
+        for rendered in (repr(cookie), str(cookie), repr(jar), str(jar)):
+            assert value_secret not in rendered
+            assert same_site_secret not in rendered
+
+        with pytest.raises(AssertionError) as caught:
+            assert cookie == replace(cookie, value="different")
+        failure = str(caught.value)
+        assert value_secret not in failure
+        assert same_site_secret not in failure
+
+        with pytest.raises(AssertionError) as jar_caught:
+            assert jar == CookieJar([replace(cookie, value="different")])
+        jar_failure = str(jar_caught.value)
+        assert value_secret not in jar_failure
+        assert same_site_secret not in jar_failure
+
+
+class TestOrderedImmutableJar:
+    @staticmethod
+    def _cookies() -> list[Cookie]:
+        return [Cookie("SID", ".google.com", "/", "first")]
+
+    def test_constructor_copies_mutable_input(self) -> None:
+        source = self._cookies()
+        jar = CookieJar(source)
+
+        source[0] = replace(source[0], value="replaced")
+        source.append(Cookie("HSID", ".google.com", "/", "added"))
+
+        assert len(jar) == 1
+        assert next(iter(jar)).value == "first"
+
+    def test_internal_tuple_cannot_be_rebound_or_deleted(self) -> None:
+        jar = CookieJar(self._cookies())
+
+        with pytest.raises(FrozenInstanceError):
+            jar._cookies = ()
+        with pytest.raises(FrozenInstanceError):
+            del jar._cookies
+
+    def test_ordered_rows_and_duplicate_projections_have_named_winners(self) -> None:
+        cookies = [
+            Cookie("SID", ".google.com", "/", "first"),
+            Cookie("SID", ".google.com", "/", "last"),
+            Cookie("SID", ".google.com", "/app", "scoped"),
+            Cookie("SID", "google.com", "/", "bare"),
+        ]
+        jar = CookieJar(cookies)
+
+        assert [row["value"] for row in jar.to_storage_rows()] == [
+            "first",
+            "last",
+            "scoped",
+            "bare",
+        ]
+        expected_map = {
+            ("SID", ".google.com", "/"): "first",
+            ("SID", ".google.com", "/app"): "scoped",
+            ("SID", "google.com", "/"): "bare",
+        }
+        assert jar.domain_map_first_wins() == expected_map
+        assert jar.to_domain_map() == expected_map
+        assert all(type(key) is tuple for key in jar.to_domain_map())
+
+        live = jar.to_httpx()
+        assert [(c.value, c.domain, c.path) for c in live.jar] == [
+            ("last", ".google.com", "/"),
+            ("scoped", ".google.com", "/app"),
+            ("bare", "google.com", "/"),
+        ]
+
+    def test_ambiguous_generic_projections_are_absent(self) -> None:
+        assert not hasattr(CookieJar, "to_flat_map")
+        assert not hasattr(CookieJar, "by_identity")
+
+
+class TestFaithfulHttpxCodec:
+    def test_legacy_storage_adapter_preserves_duck_secure_value_and_type(self) -> None:
+        marker = "sentinel-non-bool-secure"
+
+        class DuckCookie:
+            name = "SID"
+            value = "value"
+            domain = ".google.com"
+            path = "/"
+            expires = None
+            secure = marker
+
+            @staticmethod
+            def has_nonstandard_attr(_name: str) -> bool:
+                return False
+
+        row = _auth_cookies._cookie_to_storage_state(DuckCookie())
+
+        assert type(row["secure"]) is str
+        assert row["secure"] == marker
+
+    def test_full_chain_preserves_session_vs_dated_minus_one_and_attributes(self) -> None:
+        state = {
+            "cookies": [
+                {
+                    "name": "SESSION",
+                    "value": "session-value",
+                    "domain": ".google.com",
+                    "path": "/session",
+                    "expires": -1,
+                    "httpOnly": True,
+                    "secure": True,
+                },
+                {
+                    "name": "DATED",
+                    "value": "dated-value",
+                    "domain": "accounts.google.com",
+                    "path": "/dated",
+                    "expires": -1.0,
+                    "httpOnly": True,
+                    "secure": True,
+                },
+            ]
+        }
+        typed = CookieJar.from_storage_state(state)
+        typed_by_name = {cookie.name: cookie for cookie in typed}
+
+        assert typed_by_name["SESSION"].expires is None
+        assert type(typed_by_name["DATED"].expires) is float
+        assert typed_by_name["DATED"].expires == -1.0
+
+        live_by_name = {cookie.name: cookie for cookie in typed.to_httpx().jar}
+        session = live_by_name["SESSION"]
+        dated = live_by_name["DATED"]
+        assert (session.expires, session.discard) == (None, True)
+        assert (type(dated.expires), dated.expires, dated.discard) == (int, -1, False)
+        assert (session.path, session.secure, session.domain_initial_dot) == (
+            "/session",
+            True,
+            True,
+        )
+        assert (dated.path, dated.secure, dated.domain_initial_dot) == (
+            "/dated",
+            True,
+            False,
+        )
+        assert session.has_nonstandard_attr("HttpOnly")
+        assert dated.has_nonstandard_attr("HttpOnly")
+
+        session_row = _auth_cookies._cookie_to_storage_state(session)
+        dated_row = _auth_cookies._cookie_to_storage_state(dated)
+        assert (type(session_row["expires"]), session_row["expires"]) == (int, -1)
+        assert (type(dated_row["expires"]), dated_row["expires"]) == (float, -1.0)
+
+    def test_from_httpx_is_explicitly_same_site_lossy(self) -> None:
+        source = CookieJar([Cookie("SID", ".google.com", "/", "value", same_site="Strict")])
+
+        projected = CookieJar.from_httpx(source.to_httpx())
+
+        assert next(iter(projected)).same_site is None
+        assert "sameSite" not in projected.to_storage_rows()[0]
+
+
+class TestIntentionalProjectionLoss:
+    def test_storage_projection_drops_document_and_unknown_row_fields(self) -> None:
+        state = {
+            "cookies": [
+                {
+                    "name": "SID",
+                    "value": "value",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "futureCookieField": {"preserve": "only-in-document"},
+                },
+                {"malformed": "row"},
+            ],
+            "origins": [{"origin": "https://example.test"}],
+            "futureTopLevel": {"preserve": "only-in-document"},
+        }
+
+        projected = CookieJar.from_storage_state(state).to_storage_state()
+
+        assert projected["origins"] == []
+        assert "futureTopLevel" not in projected
+        assert len(projected["cookies"]) == 1
+        assert "futureCookieField" not in projected["cookies"][0]
+
+    def test_storage_and_rookiepy_inputs_are_not_mutated_or_retained(self) -> None:
+        state = {"cookies": [{"name": "SID", "value": "state-original", "domain": ".google.com"}]}
+        rookie_rows = [{"name": "SID", "value": "rookie-original", "domain": ".google.com"}]
+        state_jar = CookieJar.from_storage_state(state)
+        rookie_jar = CookieJar.from_rookiepy(rookie_rows)
+
+        state["cookies"][0]["value"] = "state-mutated"
+        rookie_rows[0]["value"] = "rookie-mutated"
+
+        assert next(iter(state_jar)).value == "state-original"
+        assert next(iter(rookie_jar)).value == "rookie-original"

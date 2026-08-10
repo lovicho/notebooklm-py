@@ -1,37 +1,9 @@
-"""Google account discovery over the NETWORK, and the identity repair built on it.
-
-This module owns the half of "account" that talks to Google: probing
-``?authuser=N`` for the accounts a cookie jar can authenticate as
-(:func:`enumerate_accounts` / :func:`_probe_authuser`), pulling the active
-user's email out of a NotebookLM page (:func:`extract_email_from_html`), and
-formatting the routing value those indices/emails become on the wire
-(:func:`format_authuser_value` / :func:`authuser_query`).
-
-It does NOT own the account RECORD. Reading, writing, promoting and scrubbing
-the persisted ``{authuser, email}`` binding is *persistence* — one profile
-document, one lock, one atomic write — so ADR-0033 PR 5.2 relocated all of it
-next to the other ``storage_state.json`` readers and writers in
-:mod:`notebooklm._auth.storage` (see that module's "account records" section).
-The split retired the whole ``account`` <-> ``storage`` deferred-import pair
-(3 sites here, 5 there): the record helpers and the writers they drove are now
-same-module calls, and what is left is a **one-way** module-scope edge,
-``account`` -> ``storage``, for the one function that legitimately spans both
-halves.
-
-That function is :func:`repair_account_metadata_from_playwright_storage`: it
-probes the network for the accounts a freshly-captured jar can reach, picks the
-one Playwright just logged into, and then *persists* the binding. It composes
-over both halves by design, and it is the reason this module imports
-``storage`` rather than the other way round.
-"""
+"""Google account discovery and compatibility repair adapters."""
 
 from __future__ import annotations
 
-import asyncio
-import logging
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -39,41 +11,8 @@ import httpx
 
 from .._env import get_base_url
 from .._url_utils import is_google_auth_redirect
-
-# Module scope, not deferred: since ADR-0033 PR 5.2 the edge is one-way.
-# ``storage`` imports nothing from here (its five function-local
-# ``from . import account`` sites all resolved to record helpers that now live
-# in ``storage`` itself), so there is no cycle left to dodge — and a module-scope
-# import keeps the binding late (``_storage.write_account_metadata`` resolves on
-# the module object at CALL time, so whitebox tests patch the owning module).
-from . import storage as _storage
-
-logger = logging.getLogger("notebooklm.auth")
-
-
-@dataclass(frozen=True)
-class Account:
-    """A Google account discovered via authuser=N probing.
-
-    Attributes:
-        authuser: The integer index used in ``?authuser=N`` URL parameters.
-            Index 0 is the default account; subsequent indices follow the
-            order Google reports for the browser session.
-        email: The account's email address as it appears in the NotebookLM
-            page's ``WIZ_global_data`` block.
-        is_default: True only for the account at ``authuser=0``.
-        browser_profile: For Chromium-family browsers with multiple
-            user-data profiles, the on-disk directory name (``"Default"``,
-            ``"Profile 1"``) the cookies came from. ``None`` for non-chromium
-            browsers and for the legacy single-jar path where source isn't
-            tracked.
-    """
-
-    authuser: int
-    email: str
-    is_default: bool
-    browser_profile: str | None = None
-
+from .account_repair import _compose_account_repair_service
+from .account_types import Account, PlaywrightAccountRepairResult
 
 # Hard cap on how many ``authuser`` indices to probe before giving up.
 # Google supports up to ~10 simultaneously signed-in accounts in a browser
@@ -278,20 +217,25 @@ def _select_playwright_account(
     return None, "no Google accounts were discovered"
 
 
-@dataclass(frozen=True)
-class PlaywrightAccountRepairResult:
-    """Outcome of :func:`repair_account_metadata_from_playwright_storage`.
+async def _enumerate_accounts_for_repair(
+    cookie_jar: httpx.Cookies,
+    poke_session: Callable[[httpx.AsyncClient, Path | None], Awaitable[None]],
+) -> list[Account]:
+    """Normalize the keyword-only network seam for account repair."""
+    return await enumerate_accounts(cookie_jar, poke_session=poke_session)
 
-    Exactly one of ``ambiguity_reason`` / ``error`` is set when ``written`` is
-    ``False`` — callers use which one is set to pick between the two distinct
-    user-facing warnings (a clean "could not disambiguate" vs. an unexpected
-    failure worth surfacing exception detail for).
-    """
 
-    written: bool
-    email: str | None = None
-    ambiguity_reason: str | None = None
-    error: str | None = None
+def _select_account_for_repair(
+    accounts: list[Account],
+    active_email: str | None,
+) -> tuple[Account | None, str | None]:
+    """Normalize the keyword-only selection seam for account repair."""
+    return _select_playwright_account(accounts, active_email=active_email)
+
+
+def _extract_active_email_for_repair(html: str) -> str | None:
+    """Keep active-email extraction late-bound in this network module."""
+    return extract_email_from_html(html)
 
 
 async def repair_account_metadata_from_playwright_storage(
@@ -299,57 +243,10 @@ async def repair_account_metadata_from_playwright_storage(
     *,
     page_html: str | None = None,
 ) -> PlaywrightAccountRepairResult:
-    """Populate ``notebooklm.account`` from Playwright storage when unambiguous.
-
-    Consolidates a recipe that used to live in ``cli/services/playwright_login.py``
-    (auth cross-boundary ledger shrink, follow-up to #2103): identify the active
-    page's account from ``page_html`` if given, probe the storage's cookie jar for
-    every Google account it can authenticate as, and select the one Playwright
-    just logged into. Ambiguous multi-account states are left unbound after
-    clearing stale metadata, matching the pre-consolidation behavior exactly —
-    including the best-effort clear (and its own swallowed-failure log) on an
-    unexpected ``OSError`` / ``ValueError`` / ``RuntimeError`` /
-    ``httpx.HTTPError`` from the probe or the write.
-
-    This is the function that recomposes the two halves ADR-0033 PR 5.2 split
-    apart: the probe is network identity (this module), the clear/write is
-    persistence (``storage.clear_account_metadata`` /
-    ``storage.write_account_metadata``). Both are reached through the module
-    object so the seam stays patchable at call time.
-
-    No presentation side effects: the CLI caller (``cli/services/playwright_login.py``)
-    owns the ``LoginIO``-mediated user-facing messages, keyed off which field of
-    the result is set.
-    """
-    from .cookies import build_httpx_cookies_from_storage
-    from .keepalive import _poke_session
-
-    active_email = extract_email_from_html(page_html) if isinstance(page_html, str) else None
-    try:
-        # ``build_httpx_cookies_from_storage`` is synchronous (blocking file I/O
-        # and, on a missing/expired PSIDTS, an inline recovery POST) — this
-        # function is ``async`` now (it wasn't before this consolidation), so
-        # the call must go through a thread like every other async caller of
-        # this function in ``_auth`` (``recovery.py``, ``refresh.py``,
-        # ``master_token.py``) rather than blocking the event loop directly.
-        jar = await asyncio.to_thread(build_httpx_cookies_from_storage, storage_path)
-        # ``poke_session`` matches what the ``notebooklm.auth`` facade's own
-        # ``enumerate_accounts`` wrapper injects — this internal call must not
-        # silently drop the keepalive session-freshness poke.
-        accounts = await enumerate_accounts(jar, poke_session=_poke_session)
-        selected, reason = _select_playwright_account(accounts, active_email=active_email)
-        if selected is None:
-            _storage.clear_account_metadata(storage_path)
-            return PlaywrightAccountRepairResult(written=False, ambiguity_reason=reason)
-        _storage.write_account_metadata(
-            storage_path, authuser=selected.authuser, email=selected.email
-        )
-        return PlaywrightAccountRepairResult(written=True, email=selected.email)
-    except (OSError, ValueError, RuntimeError, httpx.HTTPError) as exc:
-        try:
-            _storage.clear_account_metadata(storage_path)
-        except Exception as clear_exc:  # noqa: BLE001 — best-effort cleanup must not mask exc
-            logger.warning(
-                "Failed to clear stale account metadata for %s: %s", storage_path, clear_exc
-            )
-        return PlaywrightAccountRepairResult(written=False, error=str(exc))
+    """Populate ``notebooklm.account`` from Playwright storage when unambiguous."""
+    service = _compose_account_repair_service(
+        enumerate_accounts=_enumerate_accounts_for_repair,
+        select_account=_select_account_for_repair,
+        extract_active_email=_extract_active_email_for_repair,
+    )
+    return await service.repair(storage_path, page_html=page_html)

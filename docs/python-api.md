@@ -134,11 +134,17 @@ auth = AuthTokens(
 )
 client = NotebookLMClient(auth)
 
-# AuthTokens also supports profiles (AuthTokens.from_storage is async)
-auth = await AuthTokens.from_storage(profile="work")
-# Or permit one cold-start L3 browser recovery as an alternative:
-# auth = await AuthTokens.from_storage(profile="work", allow_headless=True)
 ```
+
+`AuthTokens.from_storage(...)` remains available as a v0.x compatibility loader,
+but it is deprecated in v0.9.0 and emits `DeprecationWarning` when awaited. Use
+the managed `NotebookLMClient.from_storage(...)` examples above and access
+`client.auth` while the client is open. It is scheduled for removal in v1.0.
+
+Constructing `AuthTokens(..., storage_path=..., cookie_jar=None)` also remains
+compatible through v0.x, but its implicit synchronous storage/recovery I/O is
+deprecated on the same schedule. Prefer the managed client; low-level callers
+that already own a live jar should pass `cookie_jar=` explicitly.
 
 **Building a storage state from existing browser cookies (`[cookies]` extra):**
 

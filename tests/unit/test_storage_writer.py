@@ -4,9 +4,9 @@ The writers were absorbed into ``_auth/storage.py`` by ADR-0033's persistence
 merge; this suite drives them there (``storage_mod``).
 
 Covers the relocated intent-shaped API's per-intent lock-failure policy and the
-value-free outcome contract. The CAS ``merge_cookie_delta`` body is exercised
-verbatim by the existing 51-test CAS save-race suite (via the
-``save_cookies_to_storage`` delegate) and is not re-tested here.
+value-free outcome contract. The CAS ``merge_cookie_delta`` adapter and its
+``ProfileStore`` transaction are exercised by the cookie save-race suite via
+the ``save_cookies_to_storage`` delegate and are not re-tested here.
 """
 
 from __future__ import annotations
@@ -19,18 +19,32 @@ import httpx
 import pytest
 
 from notebooklm._auth import master_token as mt_mod
+from notebooklm._auth import master_token_file, profile_store, storage_writer
 from notebooklm._auth import storage as storage_mod
+from notebooklm._auth.profile_account import ClearAccount, DomainSelection, KeepAccount
+from notebooklm._auth.profile_document import ProfileDocument
+from notebooklm._auth.profile_store import LoginWriteRequest, ReplaceResult, ReplaceStatus
+from notebooklm._auth.storage_lock import LockState
 
 
-@contextlib.contextmanager
-def _unavailable_lock(lock_path, *, blocking, log_prefix):
-    yield "unavailable"
+class _UnavailableLocks:
+    @contextlib.contextmanager
+    def acquire(self, request):
+        yield LockState.UNAVAILABLE
 
 
 def _patch_lock_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force the unified ``_file_lock`` primitive to report the sentinel as
-    permanently unavailable (infrastructure failure)."""
-    monkeypatch.setattr(storage_mod, "_file_lock", _unavailable_lock)
+    """Force bounded writer transactions to see infrastructure failure."""
+    monkeypatch.setattr(profile_store, "_STORAGE_LOCKS", _UnavailableLocks())
+
+
+def _patch_master_token_lock_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the path-owned token writer to use an unavailable manager."""
+    monkeypatch.setattr(
+        master_token_file.StorageLockManager,
+        "process_default",
+        lambda: _UnavailableLocks(),
+    )
 
 
 # --- value-free outcome contract -------------------------------------------
@@ -187,7 +201,10 @@ def test_replace_from_remint_no_carry_drops_stale_binding(tmp_path: Path) -> Non
     assert outcome.ok
     data = json.loads(path.read_text(encoding="utf-8"))
     assert {c["name"] for c in data["cookies"]} == {"SID", "SAPISID"}
-    assert "notebooklm" not in data  # stale binding dropped
+    assert data["notebooklm"] == {
+        "version": 1,
+        "account_route_cleared": True,
+    }  # stale binding dropped and cannot be resurrected from legacy context
 
 
 def test_replace_from_remint_takes_storage_lock(
@@ -226,6 +243,48 @@ def test_replace_from_remint_filters_domains_but_keeps_trusted_subdomains(
     names = {c["name"] for c in json.loads(path.read_text(encoding="utf-8"))["cookies"]}
     assert "YT" not in names  # unallowlisted domain filtered out at the chokepoint
     assert {"SID", "MEDIA", "DRV"} <= names  # trusted Google roots preserved
+
+
+@pytest.mark.parametrize(
+    ("typed_status", "compatibility_status"),
+    [
+        (ReplaceStatus.APPLIED, storage_mod.WriteStatus.OK),
+        (ReplaceStatus.LOCK_UNAVAILABLE, storage_mod.WriteStatus.LOCK_UNAVAILABLE),
+    ],
+)
+def test_replace_from_remint_is_one_typed_store_delegation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    typed_status: ReplaceStatus,
+    compatibility_status: storage_mod.WriteStatus,
+) -> None:
+    path = tmp_path / "custom.json"
+    state = _captured_state()
+    seen: list[object] = []
+
+    class FakeStore:
+        def __init__(self, actual_path: Path) -> None:
+            seen.append(actual_path)
+
+        def replace_from_remint(self, request):  # type: ignore[no-untyped-def]
+            seen.append(request)
+            return ReplaceResult(typed_status)
+
+    monkeypatch.setattr(storage_mod, "ProfileStore", FakeStore)
+    outcome = storage_mod.replace_from_remint(
+        path,
+        state,
+        carry_account="truthy",  # type: ignore[arg-type]
+        include_domains={"mail"},
+    )
+    assert outcome.status is compatibility_status
+    assert seen[0] is path
+    request = seen[1]
+    assert isinstance(request.source, ProfileDocument)
+    assert request.source.to_json() == state
+    assert request.carry_account == "truthy"
+    assert request.domain_selection == DomainSelection(frozenset({"mail"}), False)
+    assert storage_writer.replace_from_remint is storage_mod.replace_from_remint
 
 
 # --- replace_from_login: CLI login / import full-replace (b-PR3) -----------
@@ -307,8 +366,10 @@ def test_replace_from_login_default_drops_youtube_keeps_trusted_roots(tmp_path: 
     names = {c["name"] for c in data["cookies"]}
     assert "YT" not in names
     assert {"SID", "MEDIA"} <= names
-    # CLEAR + no opt-ins => no notebooklm namespace at all.
-    assert "notebooklm" not in data
+    assert data["notebooklm"] == {
+        "version": 1,
+        "account_route_cleared": True,
+    }
 
 
 def test_replace_from_login_required_dropped_writes_nothing(tmp_path: Path) -> None:
@@ -433,7 +494,153 @@ def test_replace_from_login_fails_closed_on_lock_unavailable(
     assert not path.exists()  # nothing written without the lock
 
 
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (
+            ReplaceResult(ReplaceStatus.APPLIED, backup_path=Path("A.json.bak")),
+            storage_mod.LoginWriteOutcome(
+                storage_mod.LoginWriteStatus.OK,
+                backup_path=Path("A.json.bak"),
+            ),
+        ),
+        (
+            ReplaceResult(ReplaceStatus.LOCK_UNAVAILABLE),
+            storage_mod.LoginWriteOutcome(storage_mod.LoginWriteStatus.LOCK_UNAVAILABLE),
+        ),
+        (
+            ReplaceResult(
+                ReplaceStatus.REQUIRED_COOKIES_DROPPED,
+                missing_required=("A", "Z"),
+                present_names=("B",),
+            ),
+            storage_mod.LoginWriteOutcome(
+                storage_mod.LoginWriteStatus.REQUIRED_COOKIES_DROPPED,
+                missing_required=("A", "Z"),
+                present_names=("B",),
+            ),
+        ),
+    ],
+)
+def test_replace_from_login_is_one_typed_store_delegation_and_exhaustive_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    result: ReplaceResult,
+    expected: storage_mod.LoginWriteOutcome,
+) -> None:
+    path = tmp_path / "custom.json"
+    state = _login_state()
+    seen: list[object] = []
+
+    class FakeStore:
+        def __init__(self, actual_path: Path) -> None:
+            seen.append(actual_path)
+
+        def replace_from_login(self, request: LoginWriteRequest) -> ReplaceResult:
+            seen.append(request)
+            return result
+
+    class FakeMigrator:
+        def scrub(self, store: FakeStore) -> None:
+            assert isinstance(store, FakeStore)
+            seen.append("scrub")
+
+    monkeypatch.setattr(storage_mod, "ProfileStore", FakeStore)
+    monkeypatch.setattr(storage_mod, "LegacyAccountMigrator", FakeMigrator)
+
+    outcome = storage_mod.replace_from_login(
+        path,
+        state,
+        include_domains={"mail"},
+        include_optional="truthy",  # type: ignore[arg-type]
+        account=storage_mod.CLEAR_ACCOUNT,
+        backup="truthy",  # type: ignore[arg-type]
+        io_policy=object(),
+    )
+
+    assert outcome == expected
+    assert seen[0] is path
+    request = seen[1]
+    assert isinstance(request, LoginWriteRequest)
+    assert request.source.to_json() == state
+    assert request.domain_selection == DomainSelection(frozenset({"mail"}), "truthy")
+    assert isinstance(request.account, ClearAccount)
+    assert request.backup == "truthy"
+    if result.status is ReplaceStatus.APPLIED:
+        assert seen[2:] == ["scrub"]
+    else:
+        assert seen[2:] == []
+
+
+@pytest.mark.parametrize(
+    "namespace",
+    [
+        {"account": {}},
+        {"account": None},
+        {"account": "odd"},
+        {"account": {"unknown": "only"}},
+    ],
+)
+def test_replace_from_login_keep_uses_literal_raw_account_key_for_legacy_scrub(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    namespace: dict[str, object],
+) -> None:
+    events: list[str] = []
+
+    class FakeStore:
+        def __init__(self, path: Path) -> None:
+            pass
+
+        def replace_from_login(self, request: LoginWriteRequest) -> ReplaceResult:
+            assert isinstance(request.account, KeepAccount)
+            events.append("store")
+            return ReplaceResult(ReplaceStatus.APPLIED)
+
+    class FakeMigrator:
+        def promote(self, store: FakeStore) -> None:
+            events.append("promote")
+
+        def scrub(self, store: FakeStore) -> None:
+            events.append("scrub")
+
+    monkeypatch.setattr(storage_mod, "ProfileStore", FakeStore)
+    monkeypatch.setattr(storage_mod, "LegacyAccountMigrator", FakeMigrator)
+    state = {**_login_state(), "notebooklm": namespace}
+
+    assert storage_mod.replace_from_login(tmp_path / "A.json", state, include_domains=None).ok
+    assert events == ["store", "scrub"]
+
+
+def test_replace_from_login_account_copy_failure_precedes_store_and_parent_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailsCopy:
+        def __deepcopy__(self, memo: dict[int, object]) -> object:
+            raise RuntimeError("bounded account copy failure")
+
+    monkeypatch.setattr(
+        storage_mod,
+        "ProfileStore",
+        lambda path: pytest.fail("store must not be constructed"),
+    )
+    path = tmp_path / "missing" / "A.json"
+    with pytest.raises(RuntimeError, match="bounded account copy failure"):
+        storage_mod.replace_from_login(
+            path,
+            _login_state(),
+            include_domains=None,
+            account=storage_mod.AccountRecord(FailsCopy(), FailsCopy()),  # type: ignore[arg-type]
+        )
+    assert not path.parent.exists()
+
+
 # --- persist_minted_jar: full replace, fails CLOSED ------------------------
+
+
+def test_persist_minted_jar_storage_writer_identity_is_unchanged() -> None:
+    assert storage_writer.persist_minted_jar is storage_mod.persist_minted_jar
 
 
 def _minted_jar() -> httpx.Cookies:
@@ -624,45 +831,43 @@ def test_write_master_token_roundtrip_and_mode(tmp_path: Path) -> None:
         assert (path.stat().st_mode & 0o777) == 0o600  # full-account credential
 
 
+def test_write_master_token_accepts_storage_state_name_without_reading_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "storage_state.json"
+    path.write_bytes(b"opaque prior bytes that must not be parsed")
+    real_read_text = Path.read_text
+
+    def read_text(target: Path, *args: object, **kwargs: object) -> str:
+        if target == path:
+            pytest.fail("master-token commit must not read its destination")
+        return real_read_text(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    storage_mod.write_master_token(
+        path,
+        email="e@x.com",
+        master_token="aas_et/M",
+        android_id="abc",
+    )
+    assert path.read_bytes() == (
+        b'{\n  "version": 1,\n  "email": "e@x.com",\n'
+        b'  "android_id": "abc",\n  "master_token": "aas_et/M"\n}'
+    )
+    lock = tmp_path / ".storage_state.json.lock"
+    assert lock.exists()
+    assert not path.with_name(path.name + ".bak").exists()
+
+
 def test_write_master_token_fails_closed_on_lock_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "master_token.json"
-    _patch_lock_unavailable(monkeypatch)
+    _patch_master_token_lock_unavailable(monkeypatch)
     with pytest.raises(storage_mod.LockUnavailableError):
         storage_mod.write_master_token(
             path, email="e@x.com", master_token="aas_et/M", android_id="abc"
         )
-
-
-# --- bounded acquire tristate ----------------------------------------------
-
-
-def test_acquire_storage_lock_held_then_released(tmp_path: Path) -> None:
-    lock_path = tmp_path / ".storage_state.json.lock"
-    with storage_mod._acquire_storage_lock(lock_path, log_prefix="test") as state:
-        assert state == "held"
-    # After release the same-process acquire succeeds again (in-process lock freed).
-    with storage_mod._acquire_storage_lock(lock_path, log_prefix="test") as state:
-        assert state == "held"
-
-
-def test_acquire_storage_lock_times_out_bounded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Under persistent contention the bounded acquire yields 'unavailable'
-    within the deadline rather than blocking forever."""
-    lock_path = tmp_path / ".storage_state.json.lock"
-
-    @contextlib.contextmanager
-    def always_contended(lp, *, blocking, log_prefix):
-        yield "contended"
-
-    monkeypatch.setattr(storage_mod, "_file_lock", always_contended)
-    with storage_mod._acquire_storage_lock(
-        lock_path, log_prefix="test", deadline_seconds=0.05
-    ) as state:
-        assert state == "unavailable"
 
 
 # --- parent-dir permission self-heal ---------------------------------------
@@ -675,7 +880,7 @@ def test_ensure_secure_parent_dir_creates_at_0700(tmp_path: Path) -> None:
     if sys.platform == "win32":
         pytest.skip("POSIX permission semantics")
     path = tmp_path / "sub" / "storage_state.json"
-    storage_mod._ensure_secure_parent_dir(path)
+    profile_store._ensure_secure_parent_dir(path)
     assert path.parent.is_dir()
     assert (path.parent.stat().st_mode & 0o777) == 0o700
 
@@ -696,7 +901,7 @@ def test_ensure_secure_parent_dir_retightens_existing_loose_dir(tmp_path: Path) 
     os.chmod(parent, 0o755)
     assert (parent.stat().st_mode & 0o777) == 0o755
 
-    storage_mod._ensure_secure_parent_dir(parent / "storage_state.json")
+    profile_store._ensure_secure_parent_dir(parent / "storage_state.json")
 
     # Unconditional chmod re-tightened the already-existing directory.
     assert (parent.stat().st_mode & 0o777) == 0o700

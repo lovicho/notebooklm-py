@@ -506,13 +506,12 @@ def test_contended_recovery_requires_routed_disk_state(
     initial = _required_state()
     app_only = _required_state({"domain": ".notebooklm.google.com", "expires": time.time() + 3600})
     path.write_text(json.dumps(initial), encoding="utf-8")
-    loads = iter([initial, app_only])
-    monkeypatch.setattr(psidts_recovery, "_load_storage_state", lambda _path: next(loads))
 
     from contextlib import contextmanager
 
     @contextmanager
     def contended(_lock_path: Path):
+        path.write_text(json.dumps(app_only), encoding="utf-8")
         yield False
 
     monkeypatch.setattr(psidts_recovery, "_file_lock_try_exclusive", contended)

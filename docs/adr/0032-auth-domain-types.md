@@ -2,11 +2,11 @@
 
 ## Status
 
-Proposed. Extends [ADR-0031](0031-credential-tier-auth-model.md) (the credential-tier model) from
-*named operations* to *named types*. The `Cookie`/`CookieJar` value types already exist
-(`_auth/cookie_types.py`, ADR-0031 Stage 1) with zero production callers, so their semantics are
-still free to fix; this ADR fixes them. Converged through three review rounds (architecture +
-adversarial + external CLI); the reasoning that shaped it is in Context.
+Accepted. Implementation remains incremental. This extends
+[ADR-0031](0031-credential-tier-auth-model.md) (the credential-tier model) from *named operations*
+to *named types*. The `Cookie`/`CookieJar` value corrections and pure codec dependency inversion are
+implemented first; persistence adoption and the remaining `MasterToken`/`AuthTokens` stages land in
+separate reviewed steps. The reasoning that shaped the decision is in Context.
 
 ## Context
 
@@ -47,23 +47,39 @@ Three findings from design review are load-bearing and non-obvious:
 Introduce (or fix) these types and boundaries. Value types are immutable and do no I/O; services own
 network and disk; the live jar stays `httpx.Cookies`.
 
-**`Cookie`** — frozen value. `name, domain, path, value, expires, http_only, secure, same_site`, with
-`same_site: str | None = field(default=None, compare=False)` — carried so round-trip preservation
-works (#2150), never compared so a source that cannot populate it cannot manufacture deltas. Its
-compared fields `(name, domain, path)` + `(value, expires, secure, http_only)` are exactly
-`CookieSnapshotKey + CookieSnapshotValue`, which it therefore unifies.
+**`Cookie`** — frozen, slotted, redacted value. `name, domain, path, value, expires, http_only,
+secure, same_site`, with `same_site: str | None = field(default=None, compare=False, repr=False)` —
+carried so round-trip preservation works (#2150), never compared so a source that cannot populate it
+cannot manufacture deltas. `value` is also excluded from repr, and custom equality keeps assertion
+introspection on the redacted representation. Its compared fields `(name, domain, path)` + `(value,
+expires, secure, http_only)` are exactly `CookieSnapshotKey + CookieSnapshotValue`. `identity`
+remains an exact plain tuple for compatibility while `key` returns the typed `CookieIdentity` tuple.
 
-**`CookieJar`** — immutable, ordered *sequence* of `Cookie`; duplicate identities are permitted and
-resolve first-occurrence-wins at the `to_domain_map()` projection (matching
-`extract_cookies_with_domains`). The type for cookie **inputs, baselines, and questions** — never the
-live jar, never a `Mapping`.
+**`CookieJar`** — genuinely immutable, ordered *sequence* of `Cookie`; construction tuple-copies its
+input and frozen slots reject rebinding or deletion. Duplicate resolution is operation-specific:
+iteration and `to_storage_rows()` preserve every row, `domain_map_first_wins()` and compatibility
+`to_domain_map()` keep the first identity, and direct stdlib insertion in `to_httpx()` uses exact-
+identity last-wins behavior while retaining domain/path siblings. The type is for cookie **inputs,
+baselines, and questions** — never the live jar, never a `Mapping`.
 - construct: `from_storage_state / from_rookiepy / from_domain_map` (exist) + `from_httpx` (new;
-  `same_site`-lossy and barred from persistence/baseline paths).
-- convert: `to_httpx() / to_storage_state()->dict / to_domain_map()->dict` (all exist; no
-  `to_flat_map` — lossy, #2054).
+  `same_site`-lossy). `from_httpx()` is a valid transient live observation for pure merge decisions,
+  but never a durable baseline or a standalone document serializer; persistence adapters that must
+  preserve legacy all-domain and HttpOnly observation behavior build their observation explicitly.
+- convert: `to_httpx() / to_storage_rows()->list / to_storage_state()->dict /
+  domain_map_first_wins()->dict / to_domain_map()->dict`; no `to_flat_map` or ambiguous
+  `by_identity` projection. `to_storage_state()` is deliberately the filtered typed view with empty
+  origins, not a lossless profile-document round trip.
 - ask: `names() / has_secondary_binding() / is_rotatable() / validate_required() / missing_hint()`,
   delegating to the `cookie_policy` tables, which stay a module (they are consumed at extraction
   *failure*, where no jar exists).
+
+**Codec direction** — `cookie_semantics.py` owns dependency-bottom scalar/row mechanics: expiry and
+shape normalization, legacy-map and rookiepy adaptation, HttpOnly observation, faithful stdlib
+construction, and storage-row serialization. `cookie_types.py` imports only that leaf plus
+`cookie_policy`; it never imports compatibility, persistence, recovery, runtime, CLI, or facade
+layers. `cookies.py` keeps the legacy free-function identities and logging/policy boundaries as thin
+adapters pointing downward to the leaf and values. Thus `cookies → cookie_types → cookie_semantics`
+replaces the former upward `cookie_types → cookies` edge.
 
 **`MasterToken`** — pure value: `email, android_id, secret` + trivial accessors. No network, no file
 I/O, and no writability logic — `assert_account_writable` reads two disk sources and is only advisory
@@ -138,6 +154,10 @@ destination: it keeps the shadow and computes it, so it does not remove the bug 
 
 - The six input shapes collapse to one constructor family; the questions become methods; the
   free-function fan-out that made #2139 unsafe goes private behind types.
+- Pure codec dependencies now point downward. Legacy free-function identities and public exports
+  remain intact while the value module has no compatibility or persistence rejoin.
+- Projection names make duplicate winners explicit, and `to_httpx()` preserves expiry/session type,
+  path, domain spelling, dotted-domain metadata, secure, and HttpOnly without a map collapse.
 - `Cookie` retires the parallel `CookieSnapshotKey`/`CookieSnapshotValue` at the storage level while
   the comparison policy stays where the disk state is — a real consolidation, verified not to change
   CAS semantics (the `same_site`/dotted-variant predicates are preserved out-of-band).

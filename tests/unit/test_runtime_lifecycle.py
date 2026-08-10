@@ -50,6 +50,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from notebooklm._auth.storage import snapshot_cookie_jar
 from notebooklm._runtime.helpers import _resolve_keepalive_interval
 from notebooklm._runtime.lifecycle import (
     ClientLifecycle,
@@ -163,7 +164,10 @@ class _StubHost:
         self._chat = MagicMock()
         self.cookie_persistence = MagicMock()
         self.cookie_persistence.save = AsyncMock()
+        self.cookie_persistence._save_canonical = AsyncMock()
+        self.cookie_persistence._prepare_open_baseline = AsyncMock()
         self.cookie_persistence.capture_open_snapshot = MagicMock()
+        self.cookie_persistence.loaded_cookie_snapshot = None
         # Stage B1 PR 2 dropped the close-time null on ``_rpc_executor``;
         # the slot is left as-set by the composition root. Set a stable
         # sentinel here in case future regression tests want to assert
@@ -176,6 +180,7 @@ def _make_lifecycle(
     *,
     keepalive_interval: float | None = None,
     keepalive_storage_path: Path | None = None,
+    auth: AuthTokens | None = None,
 ) -> ClientLifecycle:
     """Construct a :class:`ClientLifecycle` with defaults safe for unit tests.
 
@@ -189,6 +194,8 @@ def _make_lifecycle(
         limits=ConnectionLimits(),
         keepalive_interval=keepalive_interval,
         keepalive_storage_path=keepalive_storage_path,
+        auth=auth or AuthTokens(csrf_token="CSRF", session_id="SID", cookies={"SID": "v1"}),
+        cookie_persistence_path=keepalive_storage_path,
     )
 
 
@@ -340,8 +347,12 @@ async def test_open_captures_cookie_snapshot() -> None:
     the contract that the open-time baseline reflects httpx-normalized
     domains.
     """
-    lifecycle = _make_lifecycle()
+    auth = AuthTokens(csrf_token="CSRF", session_id="SID", cookies={"SID": "v1"})
+    lifecycle = _make_lifecycle(auth=auth)
     host = _StubHost()
+    host.auth = auth
+    mirrored = snapshot_cookie_jar(auth.cookie_jar)
+    host.cookie_persistence.loaded_cookie_snapshot = mirrored
 
     await _open(lifecycle, host)
     try:
@@ -349,6 +360,7 @@ async def test_open_captures_cookie_snapshot() -> None:
         passed_jar = host.cookie_persistence.capture_open_snapshot.call_args.args[0]
         # The jar passed to capture is the AsyncClient's live jar.
         assert passed_jar is lifecycle._http_client.cookies  # type: ignore[union-attr]
+        assert auth.cookie_snapshot is mirrored
     finally:
         await _close(lifecycle, host)
 
@@ -553,6 +565,48 @@ async def test_save_cookies_invokes_cookie_persistence(
     assert call.kwargs["to_thread"] is asyncio.to_thread
 
 
+@pytest.mark.asyncio
+async def test_save_cookies_uses_typed_default_and_mirrors_snapshot(tmp_path: Path) -> None:
+    """An untouched default saver selects the private typed owner exactly once."""
+    auth = AuthTokens(csrf_token="CSRF", session_id="SID", cookies={"SID": "v1"})
+    lifecycle = _make_lifecycle(auth=auth, keepalive_storage_path=tmp_path / "storage.json")
+    host = _StubHost()
+    mirrored = snapshot_cookie_jar(httpx.Cookies({"SID": "v2"}))
+    host.cookie_persistence.loaded_cookie_snapshot = mirrored
+    jar = httpx.Cookies({"SID": "v2"})
+
+    await lifecycle.save_cookies(host.cookie_persistence, jar)
+
+    host.cookie_persistence._save_canonical.assert_awaited_once_with(
+        jar,
+        tmp_path / "storage.json",
+        to_thread=asyncio.to_thread,
+    )
+    host.cookie_persistence.save.assert_not_awaited()
+    assert auth.cookie_snapshot is mirrored
+
+
+@pytest.mark.asyncio
+async def test_save_cookies_legacy_direct_defaults_skip_mirror_and_keep_no_target() -> None:
+    lifecycle = ClientLifecycle(
+        timeout=30.0,
+        connect_timeout=10.0,
+        limits=ConnectionLimits(),
+        keepalive_interval=None,
+        keepalive_storage_path=None,
+    )
+    host = _StubHost()
+    jar = httpx.Cookies({"SID": "v2"})
+
+    await lifecycle.save_cookies(host.cookie_persistence, jar)
+
+    host.cookie_persistence._save_canonical.assert_awaited_once_with(
+        jar,
+        None,
+        to_thread=asyncio.to_thread,
+    )
+
+
 # ---------------------------------------------------------------------------
 # _bound_loop accessor + cross-loop guard
 # ---------------------------------------------------------------------------
@@ -683,22 +737,39 @@ def test_init_is_event_loop_agnostic() -> None:
     the ``httpx.AsyncClient`` and keepalive task are deferred to ``open()``.
     """
     # Outside ``asyncio.run`` — no running loop available.
+    auth = AuthTokens(csrf_token="CSRF", session_id="SID", cookies={"SID": "v1"})
     lifecycle = ClientLifecycle(
         timeout=30.0,
         connect_timeout=10.0,
         limits=ConnectionLimits(),
         keepalive_interval=60.0,
         keepalive_storage_path=Path("/tmp/storage.json"),
+        auth=auth,
+        cookie_persistence_path=Path("/tmp/storage.json"),
     )
     assert lifecycle._http_client is None
     assert lifecycle._bound_loop is None
     assert lifecycle._keepalive_task is None
     assert lifecycle._keepalive_interval == 60.0
     assert lifecycle._keepalive_storage_path == Path("/tmp/storage.json")
+    assert lifecycle._auth is auth
     assert lifecycle._timeout == 30.0
     assert lifecycle._connect_timeout == 10.0
     assert lifecycle.is_open() is False
     assert lifecycle.get_bound_loop() is None
+
+
+def test_init_preserves_legacy_direct_construction_defaults() -> None:
+    lifecycle = ClientLifecycle(
+        timeout=30.0,
+        connect_timeout=10.0,
+        limits=ConnectionLimits(),
+        keepalive_interval=None,
+        keepalive_storage_path=None,
+    )
+
+    assert lifecycle._auth is None
+    assert lifecycle._cookie_persistence_path is None
 
 
 # ---------------------------------------------------------------------------
@@ -782,13 +853,16 @@ def test_init_wires_default_seams_when_none_supplied() -> None:
     without the new kwargs, and the ``or _default_*`` resolution preserves the
     canonical late-bound seams.
     """
-    # Defaults: omit the kwargs entirely.
+    auth = AuthTokens(csrf_token="CSRF", session_id="SID", cookies={"SID": "v1"})
+    # Defaults: omit the seam kwargs entirely.
     default_lifecycle = ClientLifecycle(
         timeout=30.0,
         connect_timeout=10.0,
         limits=ConnectionLimits(),
         keepalive_interval=None,
         keepalive_storage_path=None,
+        auth=auth,
+        cookie_persistence_path=None,
     )
     assert default_lifecycle._cookie_saver is _default_cookie_saver
     assert default_lifecycle._cookie_rotator is _default_cookie_rotator
@@ -800,6 +874,8 @@ def test_init_wires_default_seams_when_none_supplied() -> None:
         limits=ConnectionLimits(),
         keepalive_interval=None,
         keepalive_storage_path=None,
+        auth=auth,
+        cookie_persistence_path=None,
         cookie_saver=None,
         cookie_rotator=None,
     )
@@ -816,6 +892,8 @@ def test_init_wires_default_seams_when_none_supplied() -> None:
         limits=ConnectionLimits(),
         keepalive_interval=None,
         keepalive_storage_path=None,
+        auth=auth,
+        cookie_persistence_path=None,
         cookie_saver=custom_saver,
         cookie_rotator=custom_rotator,
     )

@@ -14,6 +14,8 @@ already exercise.
 
 from __future__ import annotations
 
-from ...auth import bootstrap_missing_storage_from_master_token
+# The app operation is still a one-await adapter over the public facade.  This
+# service remains a pure re-export so its historical import path adds no frame.
+from ..._app.master_token import bootstrap_missing_storage_from_master_token
 
 __all__ = ["bootstrap_missing_storage_from_master_token"]

@@ -60,8 +60,11 @@ class TestPolicyArms:
         def _must_not_run(_path: object) -> bool:
             raise AssertionError("NAME_ONLY fired a heal")
 
-        jar = _auth_psidts_recovery.load_session_jar(
-            storage_file, HealPolicy.NAME_ONLY, heal=_must_not_run
+        jar = _auth_psidts_recovery.load_with_recovery(
+            storage_file,
+            HealPolicy.NAME_ONLY,
+            load=_auth_cookies._load_cookies_pure,
+            heal=_must_not_run,
         )
 
         assert "__Secure-1PSIDTS" in {c.name for c in jar.jar}
@@ -79,7 +82,12 @@ class TestPolicyArms:
 
         # injected, not patched — see load_with_recovery's heal seam
 
-        jar = _auth_psidts_recovery.load_session_jar(storage_file, heal=_decline)
+        jar = _auth_psidts_recovery.load_with_recovery(
+            storage_file,
+            HealPolicy.HEAL_THEN_NAME_ONLY,
+            load=_auth_cookies._load_cookies_pure,
+            heal=_decline,
+        )
 
         assert calls == [storage_file]
         assert "__Secure-1PSIDTS" in {c.name for c in jar.jar}
@@ -107,8 +115,12 @@ class TestPolicyArms:
             return real_loader(path, require_routable=require_routable)
 
         monkeypatch.setattr(_auth_cookies, "_load_cookies_pure", _counting)
-
-        _auth_psidts_recovery.load_session_jar(storage_file, heal=_heal)
+        _auth_psidts_recovery.load_with_recovery(
+            storage_file,
+            HealPolicy.HEAL_THEN_NAME_ONLY,
+            load=_auth_cookies._load_cookies_pure,
+            heal=_heal,
+        )
 
         assert heals == 1
         assert strict_passes == 1, "the post-heal retry must not re-ask the routing question"
@@ -192,7 +204,6 @@ def test_require_routable_is_internal() -> None:
         auth_facade.build_httpx_cookies_from_storage,
         _auth_cookies.build_httpx_cookies_from_storage,
         _auth_tokens.load_auth_from_storage,
-        _auth_psidts_recovery.load_session_jar,
         _auth_psidts_recovery.load_with_recovery,
     ]
     for fn in entry_points:
@@ -201,3 +212,4 @@ def test_require_routable_is_internal() -> None:
             f"{fn.__module__}.{fn.__qualname__} exposes require_routable; "
             "callers must select a HealPolicy instead"
         )
+    assert not hasattr(_auth_psidts_recovery, "load_session_jar")

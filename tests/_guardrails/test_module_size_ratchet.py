@@ -224,9 +224,51 @@ ALLOWLISTED_CEILINGS: dict[str, int] = {
     # ``atomic_write_json`` and a ``filelock`` sibling lock. No behaviour
     # changed: same function objects, same ``notebooklm.auth`` logger (both
     # modules bound it by NAME), same facade names at the same identities.
-    # Pinned at its MEASURED post-relocation LOC; shrink-locked from here on,
-    # and the plan schedules no further raise for this module.
-    "_auth/storage.py": 3102,
+    #
+    # RATCHETED DOWN 3102 -> 2829 by ADR-0034 PR4: process/OS lock mechanics,
+    # bounded retry, the raw-key thread-lock registry, and warning-once state
+    # moved to the dependency-bottom ``_auth/storage_lock.py`` owner. Storage
+    # retains only the v0.x wrappers, secure-parent policy, and transaction
+    # routing. This is an ordinary shrink pin with zero banked slack.
+    #
+    # RATCHETED DOWN 2829 -> 2563 by ADR-0034 PR5: the deterministic snapshot/CAS
+    # merge and permanent no-baseline overlay moved to the dependency-bottom
+    # ``_auth/cookie_merge.py`` leaf. Storage keeps the blocking transaction,
+    # corruption and logging policy, compatibility adapters, and sole raw write.
+    # This is another ordinary shrink pin with zero banked slack; the new leaf
+    # remains under the ordinary 1000-line budget and has no exemption here.
+    #
+    # RATCHETED DOWN 2563 -> 2329 by ADR-0034 PR6: the sealed typed commit spine,
+    # path-owned cookie transactions, document reads, and common bounded-lock
+    # template moved to ``credential_io.py`` and ``profile_store.py``. Storage
+    # keeps v0.x policy/adapters and five temporarily adapted profile writers.
+    # Both new owners remain under the ordinary budget with no exemption.
+    #
+    # RATCHETED DOWN 2329 -> 2210 by ADR-0034 PR7A: typed in-band account
+    # read/update/clear policy moved into ``ProfileStore`` while storage keeps
+    # only the raw compatibility adapters and legacy reconciliation/scrub.
+    #
+    # RATCHETED DOWN 2210 -> 1905 by ADR-0034 PR7B: the raw capture/domain
+    # filter moved to ``cookie_filter.py`` and browser/remint destination carry,
+    # bounded transaction, and commit moved into ``ProfileStore``. Storage keeps
+    # the exact v0.x adapter and the login/minted-session writers.
+    #
+    # RATCHETED DOWN 1905 -> 1771 by ADR-0034 PR7C: login/import filtering,
+    # required-cookie gating, directive-specific namespace construction, backup,
+    # and commit moved into ``ProfileStore``. Storage keeps the exact v0.x adapter
+    # and post-success legacy reconciliation; minted-session replacement remains.
+    #
+    # RATCHETED DOWN 1771 -> 1683 by ADR-0034 PR7D: minted-session snapshot and
+    # error projection remain here while the owner/filter/document/commit body
+    # moved to ``ProfileStore``.
+    #
+    # RATCHETED DOWN 1683 -> 1150 by ADR-0034 PR8: lossless legacy-account
+    # resolution, context I/O, promotion lifecycle, and post-write reconciliation
+    # moved to the ordinary-budget ``_auth/profile_migration.py`` owner.
+    # RATCHETED DOWN 1150 -> 1131 by ADR-0034 PR11B: token credential
+    # encoding, secure-parent preparation, lock ownership, and commit moved to
+    # the path-owned ``MasterTokenFile``.
+    "_auth/storage.py": 1127,
     # sanctioned merge (ADR-0033) — the `_auth` load-composition merge:
     # ``_auth/browser_cookie_recovery.py`` (142) was absorbed in full and reduced
     # to a re-export shim in the same change. It held the captured-cookie
@@ -251,7 +293,7 @@ ALLOWLISTED_CEILINGS: dict[str, int] = {
     # needs an ADR-0033 amendment — the template-adoption class does not reach
     # new structure. A call-time ``heal`` seam already exists on
     # ``load_with_recovery`` / ``load_session_jar`` as the first step.
-    "_auth/psidts_recovery.py": 1234,
+    "_auth/psidts_recovery.py": 1222,
     # sanctioned merge (ADR-0033) — the `_auth` token-route fold: ``_auth/headers.py``
     # (68 lines, one function — ``_resolve_token_route_kwargs`` — whose only three
     # call sites are the token-fetch entry points here) was absorbed in full and
@@ -263,16 +305,13 @@ ALLOWLISTED_CEILINGS: dict[str, int] = {
     # its MEASURED post-PR LOC; shrink-locked from here on.
     #
     # The ladder-alignment change (cold start reordered to ADR-0030's L2.5 → L3
-    # → L4) landed against this pin at EXACTLY 1200 — net-neutral, as it had to
-    # be: growth has no legal fix here, since a sanctioned behavior change is
-    # not a merge and ADR-0033's raise classes reach only merges and
-    # donor-shrinking relocations. It paid for the fall-through wrapper by
-    # deleting the ``err = retry_err`` rebinds the reorder made dead, collapsing
-    # the L3/L4 arm's two nested ``try`` blocks into one, and folding the
-    # docstring paragraphs the reorder obsoleted into ADR-0030's amendment. The
-    # ceiling stays shrink-only: the next change to this module still has to
-    # come in at or below 1200.
-    "_auth/refresh.py": 1200,
+    # → L4) landed net-neutral at the then-current pin. Phase 12A moved its
+    # operation-scoped control flow behind ``ColdRecoveryCoordinator`` while
+    # retaining this module's late-bound callback composition and exact public
+    # adapters. Phase 12B then replaced the legacy cookie-saver adapter with a
+    # direct typed ``ProfileStore`` merge, shrinking the measured module by a
+    # further five lines; freeze all saved ground immediately.
+    "_auth/refresh.py": 1184,
     # sanctioned merge (ADR-0033) — the `_auth` browser-cluster merge (PR 4.1):
     # ``_auth/browser_state_validation.py`` (56) and ``_auth/login_wait_trace.py``
     # (181) were absorbed in full and reduced to re-export shims in the same
@@ -479,3 +518,67 @@ def test_ratchet_checks_detect_their_offending_shapes() -> None:
     assert _stale_entries({}, allowlist) == ["fat.py"]
     assert _stale_entries({"fat.py": 1000}, allowlist) == []
     assert _stale_entries({"other.py": 5}, {"b.py": 1, "a.py": 1}) == ["a.py", "b.py"]
+
+
+def test_credential_store_and_migration_modules_use_the_ordinary_budget() -> None:
+    leaves = {
+        "_auth/credential_io.py",
+        "_auth/master_token_file.py",
+        "_auth/profile_migration.py",
+        "_auth/profile_store.py",
+    }
+    measured = _measure_all()
+    assert leaves.isdisjoint(ALLOWLISTED_CEILINGS)
+    assert {path: measured[path] for path in leaves} == {
+        "_auth/credential_io.py": 23,
+        "_auth/master_token_file.py": 89,
+        "_auth/profile_migration.py": 375,
+        "_auth/profile_store.py": 864,
+    }
+    assert (
+        measured["_auth/storage.py"]
+        + measured["_auth/profile_store.py"]
+        + measured["_auth/cookie_filter.py"]
+        + measured["_auth/profile_migration.py"]
+        == 2462
+    )
+    synthetic = dict.fromkeys(leaves, MODULE_SIZE_BUDGET + 1)
+    assert _over_budget_offenders(synthetic, {}, MODULE_SIZE_BUDGET) == synthetic
+
+
+def test_phase_11d_bootstrap_extraction_modules_are_measured_exactly() -> None:
+    measured = _measure_all()
+    assert {
+        path: measured[path]
+        for path in {
+            "_auth/master_token.py",
+            "_auth/master_token_bootstrap.py",
+            "_auth/storage.py",
+        }
+    } == {
+        "_auth/master_token.py": 455,
+        "_auth/master_token_bootstrap.py": 373,
+        "_auth/storage.py": 1127,
+    }
+
+
+def test_phase_13_caller_cleanup_modules_are_measured_exactly() -> None:
+    measured = _measure_all()
+    expected = {
+        "_app/login_cookie.py": 533,
+        "_app/master_token.py": 216,
+        "_app/profile.py": 355,
+        "cli/_cookie_import.py": 153,
+        "cli/master_token_login.py": 101,
+        "cli/playwright_login_io.py": 254,
+        "cli/profile_cmd.py": 436,
+        "cli/services/auth_refresh.py": 21,
+        "cli/services/login/browser_accounts.py": 365,
+        "cli/services/login/chromium_accounts.py": 266,
+        "cli/services/login/cookie_domains.py": 155,
+        "cli/services/login/cookie_jar.py": 244,
+        "cli/services/login/master_token.py": 152,
+        "cli/services/login/profile_targets.py": 150,
+        "cli/services/playwright_login.py": 539,
+    }
+    assert {path: measured[path] for path in expected} == expected

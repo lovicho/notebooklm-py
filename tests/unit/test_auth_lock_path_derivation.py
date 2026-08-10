@@ -226,13 +226,13 @@ def test_env_auth_none_path_yields_no_sentinel(monkeypatch: pytest.MonkeyPatch) 
 def test_storage_lock_is_free_inside_the_bootstrap_critical_section(tmp_path: Path) -> None:
     """The storage sentinel must be acquirable while the bootstrap lock is held.
 
-    ``_resolve_bootstrap_outcome`` holds ``filelock.FileLock(bootstrap)`` across
-    ``_run_remint_to_settlement`` -> ``remint_from_stored_token`` ->
-    ``persist_minted_jar``, which takes the storage lock through
-    ``storage._file_lock``. The second assertion shows what "collapse the
-    paths" would actually cost: the same acquire against the bootstrap path is
-    reported CONTENDED — guaranteed-unavailable inside the section that holds
-    it, not merely slow.
+    ``MasterTokenBootstrapper.bootstrap_storage`` holds
+    ``filelock.FileLock(bootstrap)`` across ``_run_remint_to_settlement`` ->
+    ``remint_from_stored_token`` -> ``ProfileStore.replace_minted_session``,
+    which takes the storage lock. The second assertion shows what "collapse
+    the paths" would actually cost: the same acquire against the bootstrap path
+    is reported CONTENDED — guaranteed-unavailable inside the section that
+    holds it, not merely slow.
     """
     from filelock import FileLock
 

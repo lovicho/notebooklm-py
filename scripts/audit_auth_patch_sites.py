@@ -32,20 +32,13 @@ Each site is classified ``private`` when the attribute name starts with an
 underscore and ``public`` otherwise, because §9's acceptance criterion is about
 private-attribute coupling specifically.
 
-Baseline (2026-08-07, PR 0.2 — the figures §9's reduction target measures against)
----------------------------------------------------------------------------------
-TOTAL 131 public / 87 private / 218 sites. The three modules scoped for deps
-records in plan §7 carry 127 of those and 66 of the private ones::
-
-    refresh           31 public / 41 private /  72
-    headless_reauth   23 public / 13 private /  36
-    psidts_recovery    7 public / 12 private /  19
-
-These figures REPLACE an earlier 155/107/262 baseline, which was inflated by
-function-scoped shadowing in the call idioms (see below) — 44 sites that were
-never module patches at all. The correction moved both sides of the comparison
-by the same amount, so deltas measured against the old baseline still hold; the
-absolute numbers do not. Re-measure rather than quoting either from memory.
+Baseline (2026-08-08, ``87227de1``, ADR-0034 PR 0)
+--------------------------------------------------
+TOTAL 171 public / 109 private / 280 sites. ``_auth/storage.py`` carries 53 of
+those: 27 public and 26 private. The committed ``auth_patch_sites`` baseline
+also freezes every ``(module, attribute, idiom)`` count, so a privacy rename or
+helper rewrite cannot make the scorecard look healthier without a reviewed
+baseline diff. Re-measure rather than quoting an older number from memory.
 
 Re-run this script to compare; do not trust a number quoted elsewhere.
 
@@ -59,10 +52,11 @@ This is a static count, so two things can move it without the coupling changing:
 * **Helper indirection.** Collapsing N patches into one shared fixture reduces the
   count to 1 while the coupling is unchanged. A falling count next to a new
   conftest helper deserves a look at the helper, not applause.
-* **Function-scoped shadowing** is now rejected for BOTH idioms: a scope that
-  rebinds a module alias (assignment, walrus, ``for``/``with``/``except`` target,
-  parameter, nested import) no longer resolves through it, and nested scopes
-  inherit that. Before this, ``storage = object()`` followed by
+* **Lexical alias scopes** are resolved independently for BOTH idioms: a genuine
+  function-local auth import is usable in that function, while an assignment,
+  walrus, ``for``/``with``/``except`` target, parameter, or unrelated nested
+  import shadows an outer module alias and nested scopes inherit that. Before
+  this, ``storage = object()`` followed by
   ``storage.SEAM = 1`` counted as a patch of the real module whenever ``SEAM``
   happened to be a genuine module-level name — the ``mock.return_value`` shape,
   and 44 of the original 262 sites.
@@ -114,8 +108,9 @@ import ast
 import json
 import sys
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 AUTH_PACKAGE = ("notebooklm", "_auth")
 AUTH_DOTTED = ".".join(AUTH_PACKAGE)
@@ -151,108 +146,446 @@ def _dotted_name(node: ast.AST) -> str | None:
     return ".".join(reversed(parts))
 
 
-def _locally_shadowed_aliases(tree: ast.Module, aliases: dict[str, str]) -> dict[int, set[str]]:
-    """Per function scope, which module aliases it REBINDS to something local.
-
-    ``load_module_level_names`` was the first half of keeping the ``assignment``
-    idiom honest: it rejects ``storage.NOT_A_REAL_NAME = 1`` because the alias
-    map is file-global while a Python binding is function-scoped. It cannot
-    reject ``storage = object()`` followed by ``storage.SEAM = 1``, because
-    ``SEAM`` *is* a real module-level name — so that shadowed local was counted
-    as a patch of the module it merely shares a name with, inflating the metric.
-    This is the other half: a scope that rebinds the alias no longer resolves
-    through it.
-
-    Keyed by ``id(scope_node)``. Rebinding means anything that makes the name
-    local: assignment, walrus, ``for`` target, ``with ... as``, ``except ... as``,
-    a parameter, or a nested import — not merely reading it.
-    """
-    shadowed: dict[int, set[str]] = {}
-    for scope in ast.walk(tree):
-        if not isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
-            continue
-        names: set[str] = set()
-        args = scope.args
-        for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
-            names.add(arg.arg)
-        for extra in (args.vararg, args.kwarg):
-            if extra is not None:
-                names.add(extra.arg)
-        for node in ast.walk(scope):
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-                if node is not scope:
-                    names.add(node.name)
-                continue
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-                names.add(node.id)
-            elif isinstance(node, ast.alias):
-                names.add((node.asname or node.name).split(".")[0])
-            elif isinstance(node, ast.ExceptHandler) and node.name:
-                names.add(node.name)
-        hits = names & set(aliases)
-        if hits:
-            shadowed[id(scope)] = hits
-    return shadowed
-
-
-def _is_shadowed(target: ast.AST, shadowed: frozenset[str]) -> bool:
-    """Does this target expression start from a locally-rebound alias?"""
-    dotted = _dotted_name(target)
-    return dotted is not None and dotted.split(".")[0] in shadowed
-
-
-def _shadow_context(tree: ast.Module, aliases: dict[str, str]) -> dict[int, frozenset[str]]:
-    """Per NODE, the aliases shadowed by the scope chain enclosing it.
-
-    Accumulated down the chain so a nested function inherits its enclosing
-    scope's shadowing — the inner body reads the outer local, not the module.
-    """
-    shadowed = _locally_shadowed_aliases(tree, aliases)
-    context: dict[int, frozenset[str]] = {}
-
-    def _descend(node: ast.AST, active: frozenset[str]) -> None:
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
-            active = active | shadowed.get(id(node), set())
-        context[id(node)] = active
-        for child in ast.iter_child_nodes(node):
-            _descend(child, active)
-
-    _descend(tree, frozenset())
-    return context
-
-
-def _build_alias_map(tree: ast.Module) -> dict[str, str]:
-    """Map local binding -> ``notebooklm._auth.<module>`` for one test file.
-
-    Covers every module-binding idiom in the suite. Bare ``import
-    notebooklm._auth.refresh`` binds only ``notebooklm``, so it is recorded as
-    the dotted path itself and resolved through :func:`_resolve_target`.
-    """
-    aliases: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            if module == AUTH_DOTTED:
-                # from notebooklm._auth import refresh [as _auth_refresh]
-                for alias in node.names:
-                    aliases[alias.asname or alias.name] = f"{AUTH_DOTTED}.{alias.name}"
-            elif module == AUTH_PACKAGE[0]:
-                # from notebooklm import _auth [as auth_pkg]
-                for alias in node.names:
-                    if alias.name == AUTH_PACKAGE[1]:
-                        aliases[alias.asname or alias.name] = AUTH_DOTTED
-        elif isinstance(node, ast.Import):
+def _auth_import_bindings(node: ast.Import | ast.ImportFrom) -> dict[str, str]:
+    """Auth-module bindings created by one import statement."""
+    result: dict[str, str] = {}
+    if isinstance(node, ast.ImportFrom):
+        module = node.module or ""
+        if module == AUTH_DOTTED:
             for alias in node.names:
-                if not alias.name.startswith(f"{AUTH_DOTTED}."):
-                    continue
-                if alias.asname:
-                    # import notebooklm._auth.refresh as _auth_refresh
-                    aliases[alias.asname] = alias.name
-                else:
-                    # import notebooklm._auth.refresh -> only `notebooklm` is bound;
-                    # the dotted form is resolved directly.
-                    aliases.setdefault(alias.name, alias.name)
-    return aliases
+                result[alias.asname or alias.name] = f"{AUTH_DOTTED}.{alias.name}"
+        elif module == AUTH_PACKAGE[0]:
+            for alias in node.names:
+                if alias.name == AUTH_PACKAGE[1]:
+                    result[alias.asname or alias.name] = AUTH_DOTTED
+    else:
+        for alias in node.names:
+            if not alias.name.startswith(f"{AUTH_DOTTED}."):
+                continue
+            if alias.asname:
+                result[alias.asname] = alias.name
+            else:
+                result[alias.name] = alias.name
+    return result
+
+
+def _target_names(node: ast.AST) -> set[str]:
+    """Names bound by an assignment/pattern target (attributes bind no name)."""
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Starred):
+        return _target_names(node.value)
+    if isinstance(node, ast.Tuple | ast.List):
+        return {name for item in node.elts for name in _target_names(item)}
+    return set()
+
+
+def _pattern_names(pattern: ast.pattern) -> set[str]:
+    """Capture names introduced by one structural pattern."""
+    if isinstance(pattern, ast.MatchAs):
+        names = {pattern.name} if pattern.name else set()
+        return names | (_pattern_names(pattern.pattern) if pattern.pattern else set())
+    if isinstance(pattern, ast.MatchStar):
+        return {pattern.name} if pattern.name else set()
+    if isinstance(pattern, ast.MatchMapping):
+        names = {pattern.rest} if pattern.rest else set()
+        return names | {name for item in pattern.patterns for name in _pattern_names(item)}
+    if isinstance(pattern, ast.MatchClass):
+        return {
+            name
+            for item in (*pattern.patterns, *pattern.kwd_patterns)
+            for name in _pattern_names(item)
+        }
+    if isinstance(pattern, ast.MatchSequence | ast.MatchOr):
+        return {name for item in pattern.patterns for name in _pattern_names(item)}
+    return set()
+
+
+def _scope_declarations(
+    scope: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda,
+) -> tuple[set[str], set[str], set[str]]:
+    """Return lexical locals/global/nonlocal declarations for a function scope.
+
+    Comprehensions and nested definitions are child scopes.  In particular, a
+    comprehension target must not shadow an alias in the containing function.
+    """
+    locals_: set[str] = set()
+    globals_: set[str] = set()
+    nonlocals: set[str] = set()
+    args = scope.args
+    locals_.update(arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs))
+    locals_.update(arg.arg for arg in (args.vararg, args.kwarg) if arg is not None)
+
+    class Collector(ast.NodeVisitor):
+        def visit_Name(self, node: ast.Name) -> None:
+            if isinstance(node.ctx, ast.Store | ast.Del):
+                locals_.add(node.id)
+
+        def visit_Import(self, node: ast.Import) -> None:
+            locals_.update((alias.asname or alias.name).split(".")[0] for alias in node.names)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            locals_.update(alias.asname or alias.name for alias in node.names)
+
+        def visit_Global(self, node: ast.Global) -> None:
+            globals_.update(node.names)
+
+        def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+            nonlocals.update(node.names)
+
+        def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+            if node.name:
+                locals_.add(node.name)
+            for child in node.body:
+                self.visit(child)
+
+        def visit_match_case(self, node: ast.match_case) -> None:
+            locals_.update(_pattern_names(node.pattern))
+            if node.guard:
+                self.visit(node.guard)
+            for child in node.body:
+                self.visit(child)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            locals_.add(node.name)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            locals_.add(node.name)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            pass
+
+        def visit_ListComp(self, node: ast.ListComp) -> None:
+            pass
+
+        visit_SetComp = visit_ListComp
+        visit_DictComp = visit_ListComp
+        visit_GeneratorExp = visit_ListComp
+
+    collector = Collector()
+    body = scope.body if not isinstance(scope, ast.Lambda) else [scope.body]
+    for statement in body:
+        collector.visit(statement)
+    locals_.difference_update(globals_ | nonlocals)
+    return locals_, globals_, nonlocals
+
+
+@dataclass
+class _AliasScope:
+    """One sequential Python namespace used by the patch-site resolver."""
+
+    kind: str
+    parent: _AliasScope | None
+    lexical: set[str]
+    globals: set[str]
+    nonlocals: set[str]
+    bindings: dict[str, str | None]
+
+
+class _AliasResolver:
+    """Build per-node alias states with Python's sequential scope rules."""
+
+    def __init__(self, tree: ast.Module) -> None:
+        self.context: dict[int, dict[str, str]] = {}
+        self.scope = _AliasScope("module", None, set(), set(), set(), {})
+        self._visit(tree)
+
+    def _record(self, node: ast.AST) -> None:
+        self.context[id(node)] = self._effective()
+
+    def _free_parent(self, scope: _AliasScope) -> _AliasScope | None:
+        parent = scope.parent
+        if scope.kind in {"function", "lambda", "comprehension"}:
+            while parent is not None and parent.kind == "class":
+                parent = parent.parent
+        return parent
+
+    def _effective_from(self, scope: _AliasScope | None) -> dict[str, str]:
+        if scope is None:
+            return {}
+        active = self._effective_from(self._free_parent(scope))
+        # Auth aliases are deliberately sparse while a function's lexical-name
+        # set can contain hundreds of ordinary locals. Filter the small active
+        # alias map instead of rebuilding the large shadow-name union for every
+        # AST node; under coverage on Python 3.10 the latter made this audit hit
+        # pytest's 60-second timeout.
+        for name in tuple(active):
+            if name in scope.lexical or name in scope.bindings:
+                active.pop(name)
+        for name, target in scope.bindings.items():
+            if target is not None:
+                active[name] = target
+        return active
+
+    def _effective(self) -> dict[str, str]:
+        return self._effective_from(self.scope)
+
+    def _bind(self, name: str, target: str | None) -> None:
+        # global/nonlocal declarations affect resolution inside this scope.  The
+        # overlay is intentionally local to the definition traversal: merely
+        # defining an uncalled helper must not mutate later module audit state.
+        # A non-alias binding only matters when it shadows an inherited alias or
+        # replaces a prior branch binding. Omitting every other ``None`` keeps
+        # snapshots proportional to auth aliases rather than all Python locals.
+        if target is None and name not in self.scope.bindings:
+            if name in self.scope.lexical:
+                return
+            parent = self._free_parent(self.scope)
+            if parent is None or name not in self._effective_from(parent):
+                return
+        self.scope.bindings[name] = target
+
+    def _snapshot(self) -> dict[str, str | None]:
+        return dict(self.scope.bindings)
+
+    def _restore(self, state: dict[str, str | None]) -> None:
+        self.scope.bindings = dict(state)
+
+    @staticmethod
+    def _merge(states: list[dict[str, str | None]]) -> dict[str, str | None]:
+        """Conservatively retain a facade alias possible on any branch."""
+        missing = object()
+        merged: dict[str, str | None] = {}
+        for name in set().union(*(state.keys() for state in states)):
+            values = [state.get(name, missing) for state in states]
+            aliases = sorted({value for value in values if isinstance(value, str)})
+            if aliases:
+                merged[name] = aliases[0]
+            elif missing not in values:
+                merged[name] = None
+        return merged
+
+    def _visit_seq(self, nodes: list[ast.stmt]) -> None:
+        for node in nodes:
+            self._visit(node)
+
+    def _visit_function_header(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+    ) -> None:
+        if not isinstance(node, ast.Lambda):
+            for decorator in node.decorator_list:
+                self._visit(decorator)
+            for type_param in getattr(node, "type_params", []):
+                self._visit(type_param)
+        for default in (*node.args.defaults, *[item for item in node.args.kw_defaults if item]):
+            self._visit(default)
+        for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+            if arg.annotation:
+                self._visit(arg.annotation)
+        if node.args.vararg and node.args.vararg.annotation:
+            self._visit(node.args.vararg.annotation)
+        if node.args.kwarg and node.args.kwarg.annotation:
+            self._visit(node.args.kwarg.annotation)
+        if not isinstance(node, ast.Lambda) and node.returns:
+            self._visit(node.returns)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> None:
+        self._visit_function_header(node)
+        if not isinstance(node, ast.Lambda):
+            self._bind(node.name, None)
+        locals_, globals_, nonlocals = _scope_declarations(node)
+        parent = self.scope
+        self.scope = _AliasScope(
+            "lambda" if isinstance(node, ast.Lambda) else "function",
+            parent,
+            locals_,
+            globals_,
+            nonlocals,
+            {},
+        )
+        if isinstance(node, ast.Lambda):
+            self._visit(node.body)
+        else:
+            self._visit_seq(node.body)
+        self.scope = parent
+
+    def _visit_comprehension(self, node: ast.AST) -> None:
+        generators = node.generators  # type: ignore[attr-defined]
+        # The first iterable is evaluated in the enclosing scope.
+        self._visit(generators[0].iter)
+        parent = self.scope
+        lexical = set().union(*(_target_names(generator.target) for generator in generators))
+        self.scope = _AliasScope("comprehension", parent, lexical, set(), set(), {})
+        for index, generator in enumerate(generators):
+            if index:
+                self._visit(generator.iter)
+            self._visit(generator.target)
+            for name in _target_names(generator.target):
+                self._bind(name, None)
+            for condition in generator.ifs:
+                self._visit(condition)
+        if isinstance(node, ast.DictComp):
+            self._visit(node.key)
+            self._visit(node.value)
+        else:
+            self._visit(node.elt)  # type: ignore[attr-defined]
+        self.scope = parent
+
+    def _visit_pattern_values(self, pattern: ast.pattern) -> None:
+        if isinstance(pattern, ast.MatchValue):
+            self._visit(pattern.value)
+        elif isinstance(pattern, ast.MatchClass):
+            self._visit(pattern.cls)
+            for item in (*pattern.patterns, *pattern.kwd_patterns):
+                self._visit_pattern_values(item)
+        elif isinstance(pattern, ast.MatchMapping):
+            for key in pattern.keys:
+                self._visit(key)
+            for item in pattern.patterns:
+                self._visit_pattern_values(item)
+        elif isinstance(pattern, ast.MatchSequence | ast.MatchOr):
+            for item in pattern.patterns:
+                self._visit_pattern_values(item)
+        elif isinstance(pattern, ast.MatchAs) and pattern.pattern:
+            self._visit_pattern_values(pattern.pattern)
+
+    def _visit(self, node: ast.AST) -> None:  # noqa: C901, PLR0912, PLR0915
+        self._record(node)
+        if isinstance(node, ast.Module):
+            self._visit_seq(node.body)
+            return
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            self._visit_function(node)
+            return
+        if isinstance(node, ast.ClassDef):
+            for decorator in node.decorator_list:
+                self._visit(decorator)
+            for base in node.bases:
+                self._visit(base)
+            for keyword in node.keywords:
+                self._visit(keyword.value)
+            for type_param in getattr(node, "type_params", []):
+                self._visit(type_param)
+            self._bind(node.name, None)
+            parent = self.scope
+            self.scope = _AliasScope("class", parent, set(), set(), set(), {})
+            self._visit_seq(node.body)
+            self.scope = parent
+            return
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            bindings = _auth_import_bindings(node)
+            for alias in node.names:
+                name = alias.asname or (
+                    alias.name if isinstance(node, ast.ImportFrom) else alias.name.split(".")[0]
+                )
+                self._bind(name, bindings.get(name))
+            return
+        if isinstance(node, ast.Assign):
+            self._visit(node.value)
+            for target in node.targets:
+                self._visit(target)
+                for name in _target_names(target):
+                    self._bind(name, None)
+            return
+        if isinstance(node, ast.AnnAssign):
+            self._visit(node.annotation)
+            if node.value:
+                self._visit(node.value)
+                self._visit(node.target)
+                for name in _target_names(node.target):
+                    self._bind(name, None)
+            return
+        if isinstance(node, ast.AugAssign):
+            self._visit(node.target)
+            self._visit(node.value)
+            for name in _target_names(node.target):
+                self._bind(name, None)
+            return
+        if isinstance(node, ast.NamedExpr):
+            self._visit(node.value)
+            self._visit(node.target)
+            for name in _target_names(node.target):
+                self._bind(name, None)
+            return
+        if isinstance(node, ast.If):
+            self._visit(node.test)
+            entry = self._snapshot()
+            self._visit_seq(node.body)
+            body = self._snapshot()
+            self._restore(entry)
+            self._visit_seq(node.orelse)
+            other = self._snapshot()
+            self._restore(self._merge([body, other]))
+            return
+        if isinstance(node, ast.For | ast.AsyncFor):
+            self._visit(node.iter)
+            entry = self._snapshot()
+            self._visit(node.target)
+            for name in _target_names(node.target):
+                self._bind(name, None)
+            self._visit_seq(node.body)
+            iteration = self._snapshot()
+            self._restore(entry)
+            self._visit_seq(node.orelse)
+            normal = self._snapshot()
+            self._restore(self._merge([entry, iteration, normal]))
+            return
+        if isinstance(node, ast.While):
+            self._visit(node.test)
+            entry = self._snapshot()
+            self._visit_seq(node.body)
+            iteration = self._snapshot()
+            self._restore(entry)
+            self._visit_seq(node.orelse)
+            normal = self._snapshot()
+            self._restore(self._merge([entry, iteration, normal]))
+            return
+        if isinstance(node, ast.With | ast.AsyncWith):
+            for item in node.items:
+                self._visit(item.context_expr)
+                if item.optional_vars:
+                    self._visit(item.optional_vars)
+                    for name in _target_names(item.optional_vars):
+                        self._bind(name, None)
+            self._visit_seq(node.body)
+            return
+        if isinstance(node, ast.Try) or type(node).__name__ == "TryStar":
+            try_node = cast(ast.Try, node)
+            entry = self._snapshot()
+            self._visit_seq(try_node.body)
+            exits = [self._snapshot()]
+            for handler in try_node.handlers:
+                self._restore(entry)
+                if handler.type:
+                    self._visit(handler.type)
+                if handler.name:
+                    self._bind(handler.name, None)
+                self._visit_seq(handler.body)
+                if handler.name:
+                    self.scope.bindings.pop(handler.name, None)
+                exits.append(self._snapshot())
+            self._restore(self._merge(exits))
+            self._visit_seq(try_node.orelse)
+            self._visit_seq(try_node.finalbody)
+            return
+        if isinstance(node, ast.Match):
+            self._visit(node.subject)
+            entry = self._snapshot()
+            exits = [entry]
+            for case in node.cases:
+                self._restore(entry)
+                self._record(case)
+                self._visit_pattern_values(case.pattern)
+                for name in _pattern_names(case.pattern):
+                    self._bind(name, None)
+                if case.guard:
+                    self._visit(case.guard)
+                self._visit_seq(case.body)
+                exits.append(self._snapshot())
+            self._restore(self._merge(exits))
+            return
+        if isinstance(node, ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp):
+            self._visit_comprehension(node)
+            return
+        for child in ast.iter_child_nodes(node):
+            self._visit(child)
+
+
+def _alias_context(tree: ast.Module) -> dict[int, dict[str, str]]:
+    """Effective auth aliases at every node under sequential lexical rules."""
+    return _AliasResolver(tree).context
 
 
 def load_source_aliases(auth_dir: Path) -> dict[str, dict[str, str]]:
@@ -394,6 +727,19 @@ def _patch_idiom(call: ast.Call) -> str | None:
     return None
 
 
+def _attribute_assignment_targets(
+    node: ast.Assign | ast.AugAssign | ast.AnnAssign,
+) -> list[ast.Attribute]:
+    """Return direct attribute targets that actually rebind a value."""
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, ast.AugAssign):
+        targets = [node.target]
+    else:
+        targets = [node.target] if node.value is not None else []
+    return [target for target in targets if isinstance(target, ast.Attribute)]
+
+
 def collect_sites(tests_dir: Path, auth_dir: Path | None = None) -> list[PatchSite]:
     """Walk ``tests_dir`` and return every resolved ``_auth`` patch site."""
     if auth_dir is None:
@@ -406,15 +752,24 @@ def collect_sites(tests_dir: Path, auth_dir: Path | None = None) -> list[PatchSi
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         except (OSError, SyntaxError):
             continue
-        aliases = _build_alias_map(tree)
-        if not aliases:
+        candidates = [
+            node
+            for node in ast.walk(tree)
+            if (
+                isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+                and _attribute_assignment_targets(node)
+            )
+            or (isinstance(node, ast.Call) and _patch_idiom(node) is not None)
+        ]
+        if not candidates:
             continue
-        shadow = _shadow_context(tree, aliases)
+        alias_context = _alias_context(tree)
         try:
             rel = path.relative_to(REPO_ROOT).as_posix()
         except ValueError:
             rel = path.as_posix()
-        for node in ast.walk(tree):
+        for node in candidates:
+            aliases = alias_context.get(id(node), {})
             # Plain rebinding: ``_auth_storage._FLOCK_UNAVAILABLE_WARNED = False``.
             # This is a patch site by every meaning that matters — it reaches into a
             # module's private state — and it is STRICTLY WORSE than monkeypatch
@@ -422,20 +777,7 @@ def collect_sites(tests_dir: Path, auth_dir: Path | None = None) -> list[PatchSi
             # let a later PR "improve" the metric by converting monkeypatch calls
             # into assignments while making the coupling worse.
             if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
-                # AnnAssign carries ONE target and may have no value at all
-                # (``x.y: int``) — a bare annotation rebinds nothing, so it is
-                # not a patch site.
-                if isinstance(node, ast.Assign):
-                    targets = node.targets
-                elif isinstance(node, ast.AugAssign):
-                    targets = [node.target]
-                else:
-                    targets = [node.target] if node.value is not None else []
-                for target_node in targets:
-                    if not isinstance(target_node, ast.Attribute):
-                        continue
-                    if _is_shadowed(target_node.value, shadow.get(id(node), frozenset())):
-                        continue
+                for target_node in _attribute_assignment_targets(node):
                     module = _resolve_target(target_node.value, aliases, source_aliases)
                     if module is None:
                         continue
@@ -476,8 +818,6 @@ def collect_sites(tests_dir: Path, auth_dir: Path | None = None) -> list[PatchSi
                 continue
             if not (isinstance(attr_node, ast.Constant) and isinstance(attr_node.value, str)):
                 continue
-            if _is_shadowed(target, shadow.get(id(node), frozenset())):
-                continue
             module = _resolve_target(target, aliases, source_aliases)
             if module is None:
                 continue
@@ -507,6 +847,21 @@ def summarize(sites: list[PatchSite]) -> dict[str, dict[str, int]]:
         "total": sum(row["total"] for row in summary.values()),
     }
     return summary
+
+
+def build_projection(sites: list[PatchSite]) -> dict[str, object]:
+    """Return the stable, path/line-free baseline projection."""
+    counts: dict[tuple[str, str, str], int] = defaultdict(int)
+    for site in sites:
+        counts[(site.module, site.attribute, site.idiom)] += 1
+    return {
+        "version": 1,
+        "summary": summarize(sites),
+        "sites": [
+            {"module": module, "attribute": attribute, "idiom": idiom, "count": count}
+            for (module, attribute, idiom), count in sorted(counts.items())
+        ],
+    }
 
 
 def render_table(summary: dict[str, dict[str, int]]) -> str:
@@ -571,12 +926,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = summarize(sites)
 
     if args.json:
-        json.dump(
-            {"summary": summary, "sites": [asdict(site) for site in sites]},
-            sys.stdout,
-            indent=2,
-            sort_keys=True,
-        )
+        json.dump(build_projection(sites), sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0
 

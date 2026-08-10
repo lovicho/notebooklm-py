@@ -1237,7 +1237,13 @@ def test_baseline_registry_is_non_trivial() -> None:
     below vacuously pass. Pin the stable names so that is caught loudly.
     """
     names = {baseline.name for baseline in BASELINES}
-    assert {"types_all", "ungated_surface", "cli_contract"} <= names, names
+    assert {
+        "auth_import_graph",
+        "auth_patch_sites",
+        "types_all",
+        "ungated_surface",
+        "cli_contract",
+    } <= names, names
     # Names are unique (parametrize ids + lookup rely on it).
     assert len(names) == len(BASELINES)
 

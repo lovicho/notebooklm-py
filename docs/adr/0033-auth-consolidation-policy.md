@@ -2,12 +2,9 @@
 
 ## Status
 
-Proposed — governs the `_auth` consolidation effort: a staged sequence of structural PRs that merges
-the modules whose split exists only to satisfy the module-size cap, unifies the recovery ladder's
-sequencing, and retires the cycle-breaking function-local imports. This record and the ratchet's
-policy amendment are that effort's first step; they carry no source change. Each later step is named
-below by what it does, so this ADR stands on its own — the working plan is not a tracked document
-(`docs/plans/` was deliberately removed in #1572).
+Accepted (#2156). Amended by
+[ADR-0034](0034-auth-storage-object-model.md), which preserves this record's consolidation safety
+boundary while extracting independently owned state and lifecycles from the consolidated facade.
 
 **Amended during PR 1.2 (2026-08-08):** decision 1 gains a **third** sanctioned class, *template
 adoption*. The effort's plan assumed PR 1.2 would shrink `storage.py`; it does not — converting a
@@ -24,7 +21,7 @@ granularity without weakening its guarantee. Supersedes-by-deferral
 
 ## Context
 
-`_auth` is 27 modules / 12,730 lines (measured 2026-08-07; regenerate with
+Before #2156, `_auth` was 27 modules / 12,730 lines (measured 2026-08-07; regenerate with
 `python -c "from pathlib import Path; ps=sorted(Path('src/notebooklm/_auth').rglob('*.py')); print(len(ps), sum(len(p.read_text(encoding='utf-8').splitlines()) for p in ps))"`
 — the snippet in `tests/_guardrails/test_module_size_ratchet.py` lists per-module counts over the
 budget, which is a different figure). The 2026-08-07 architecture review found the

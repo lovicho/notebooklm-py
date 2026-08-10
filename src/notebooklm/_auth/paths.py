@@ -108,6 +108,9 @@ def resolve_auth_json_env() -> str | None:
 # rotation, ``refresh._fetch_tokens_with_refresh`` / ``try_refresh_cmd_reauth``
 # for the refresh-cmd flock). ``tests/unit/test_auth_lock_path_derivation.py``
 # pins all four against hard-coded strings, base policy included.
+# ADR-0034 Phase 11D moves the bootstrap-lock execution owner to
+# ``master_token_bootstrap.MasterTokenBootstrapper``; the v0.x function named
+# in the historical docstrings remains its exact composition adapter.
 
 
 def _lock_sibling(base_path: Path, kind: str) -> Path:

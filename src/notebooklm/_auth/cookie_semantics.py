@@ -1,14 +1,16 @@
-"""Dependency-free validation and expiry normalization for cookie rows.
+"""Dependency-bottom scalar and row codecs for cookies.
 
 Cookie rows come from browser stores, rookiepy, and hand-editable JSON.  Keep
-the small amount of schema handling in this leaf so every loader and writer
-agrees about session cookies and malformed expiry values before a stdlib
-``Cookie`` object is constructed.
+schema handling and mechanical conversion in this leaf so every loader, value,
+and writer agrees about cookie identity, flags, and expiry representation.  The
+module makes no policy or logging decisions.
 """
 
 from __future__ import annotations
 
+import http.cookiejar
 import math
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -130,3 +132,123 @@ def sanitize_cookie_entry(entry: Any, *, check_value: bool = True) -> dict[str, 
     normalized = validate_cookie_shape(entry, check_value=check_value)
     normalized["expires"] = normalize_cookie_expiry(entry.get("expires")).value
     return normalized
+
+
+def normalize_legacy_cookie_map(
+    cookies: Mapping[Any, str] | None,
+    *,
+    on_invalid_key: Callable[[Any], None] | None = None,
+) -> dict[tuple[str, str, str], str]:
+    """Widen path-aware, legacy two-tuple, and flat cookie maps.
+
+    Invalid tuple arity is skipped.  The optional callback lets a compatibility
+    boundary retain its warning without putting a logging decision in this leaf.
+    """
+    normalized: dict[tuple[str, str, str], str] = {}
+    if not cookies:
+        return normalized
+
+    for key, value in cookies.items():
+        if isinstance(key, tuple):
+            if len(key) == 3:
+                name, domain, path = key
+            elif len(key) == 2:
+                name, domain = key
+                path = "/"
+            else:
+                if on_invalid_key is not None:
+                    on_invalid_key(key)
+                continue
+        else:
+            name, domain, path = key, ".google.com", "/"
+        if name:
+            normalized[(name, domain or ".google.com", path or "/")] = value
+    return normalized
+
+
+def rookiepy_row_to_storage_row(normalized: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt one already-normalized rookiepy row to Playwright spelling."""
+    same_site = normalized.get("sameSite", normalized.get("same_site"))
+    if same_site not in {"Strict", "Lax", "None"}:
+        same_site = "None"
+    return {
+        "name": normalized["name"],
+        "value": normalized["value"],
+        "domain": normalized["domain"],
+        "path": normalized["path"],
+        "expires": -1 if normalized["expires"] is None else normalized["expires"],
+        "httpOnly": bool(normalized.get("http_only", False)),
+        "secure": bool(normalized.get("secure", False)),
+        "sameSite": same_site,
+    }
+
+
+def cookie_is_http_only(cookie: Any) -> bool:
+    """Observe the two stdlib spellings of the HttpOnly nonstandard flag."""
+    try:
+        return bool(
+            cookie.has_nonstandard_attr("HttpOnly") or cookie.has_nonstandard_attr("httponly")
+        )
+    except AttributeError:
+        return False
+
+
+def cookie_from_normalized_entry(
+    normalized: Mapping[str, Any], *, http_only_key: str
+) -> http.cookiejar.Cookie:
+    """Construct a faithful stdlib cookie from a normalized row."""
+    expires_value = normalized["expires"]
+    domain = normalized["domain"]
+    rest: dict[str, str] = {"HttpOnly": ""} if normalized.get(http_only_key) else {}
+    return http.cookiejar.Cookie(
+        version=0,
+        name=normalized["name"],
+        value=normalized["value"],
+        port=None,
+        port_specified=False,
+        domain=domain,
+        domain_specified=bool(domain),
+        domain_initial_dot=domain.startswith("."),
+        path=normalized["path"],
+        path_specified=True,
+        secure=bool(normalized.get("secure", False)),
+        expires=expires_value,
+        discard=expires_value is None,
+        comment=None,
+        comment_url=None,
+        rest=rest,
+    )
+
+
+def cookie_to_storage_row(
+    cookie: Any,
+    *,
+    http_only: bool,
+    same_site: str | None = None,
+    include_same_site: bool = False,
+) -> dict[str, Any]:
+    """Serialize cookie-shaped attributes to one Playwright storage row.
+
+    ``http.cookiejar`` coerces a dated ``-1.0`` expiry to integer ``-1``.
+    Emitting float ``-1.0`` for every non-session ``-1`` preserves its
+    distinction from Playwright's exact integer session sentinel.
+    """
+    expires = cookie.expires
+    if expires is None:
+        stored_expires: int | float = -1
+    elif expires == -1:
+        stored_expires = -1.0
+    else:
+        stored_expires = expires
+    row = {
+        "name": cookie.name,
+        "value": cookie.value,
+        "domain": cookie.domain,
+        "path": cookie.path or "/",
+        "expires": stored_expires,
+        "httpOnly": http_only,
+        "secure": cookie.secure,
+    }
+    if include_same_site:
+        row["sameSite"] = same_site
+    return row

@@ -44,66 +44,82 @@ from typing import Any, TypeVar
 
 import httpx
 
+from . import cookie_merge as _cookie_merge
 from . import cookie_policy as _cookie_policy
 from . import cookie_semantics as _cookie_semantics
-from . import cookies as _auth_cookies
 from . import keepalive as _keepalive
-from . import storage as _auth_storage
+from .cookie_merge import RecoveryObservation
+from .cookie_types import CookieIdentity, CookieJar
 from .paths import resolve_auth_json_env
+from .profile_document import _ProfileDocumentStructureError
+from .profile_store import CookieMergeResult, ProfileStore
 
-# ----------------------------------------------------------------------------
-# Cross-module helpers (module-scope aliases)
-# ----------------------------------------------------------------------------
-# These are documented at module scope to make the cross-module surface
-# explicit, matching the precedent at ``_auth/cookies.py:34-40``. The
-# underscored names remain module-private to their owning modules
-# (``_cookie_policy``, ``_keepalive``, ``_auth_cookies``); this module
-# consumes them through documented local aliases.
-#
-# Tests must patch these aliases at this module's path, not at the
-# canonical owner's path, because aliases are import-time bound.
-# ----------------------------------------------------------------------------
 _has_rotatable_secondary_binding = _cookie_policy._has_rotatable_secondary_binding
 _is_allowed_auth_domain = _cookie_policy._is_allowed_auth_domain
 _rotation_lock_path = _keepalive._rotation_lock_path
 _file_lock_try_exclusive = _keepalive._file_lock_try_exclusive
 _try_claim_rotation = _keepalive._try_claim_rotation
-# The RotateCookies POST itself is _keepalive's single wire contract (see the
-# ``_ROTATE_POST_KWARGS`` block there); this module composes recovery policy
-# around it and never re-assembles the request from the raw
-# headers/body/timeout constants.
 _rotate_post_sync = _keepalive._rotate_post_sync
 _rotation_http_client = _keepalive._rotation_http_client
-_load_storage_state = _auth_cookies._load_storage_state
-_storage_entry_to_cookie = _auth_cookies._storage_entry_to_cookie
-_safe_to_cookie = _auth_cookies._safe_to_cookie
-_validate_cookie_shape = _auth_cookies._validate_cookie_shape
 
 logger = logging.getLogger("notebooklm.auth")
 
 _PSIDTS_COOKIE = "__Secure-1PSIDTS"
-# Rows whose pre-POST value recovery observes for the compare-and-set that
-# decides whether a rotated row may replace a stored one.  PSIDTS only: these
-# are the cookies the gate reasons about as present/absent/unusable.  Defined
-# once in the ``cookie_policy`` leaf and shared with ``storage``, whose
-# ``_merge_recovery_target_rows`` merges the deltas this module observes.
 _RECOVERY_TARGET_COOKIE_NAMES = _cookie_policy._RECOVERY_TARGET_COOKIE_NAMES
-# Rows merged back out of a rotated jar.  Strictly wider than the observation
-# set — see the ``LSID`` rationale at the merge loop in
-# :func:`recover_psidts_in_memory` (#1977).
 _ROTATION_MERGE_COOKIE_NAMES = _RECOVERY_TARGET_COOKIE_NAMES | {"LSID"}
 
-
-# Converter from a raw cookie entry to an ``http.cookiejar.Cookie``. Two shapes
-# exist and differ only in the http-only field spelling: storage_state entries
-# (camelCase ``httpOnly``, :func:`_storage_entry_to_cookie`) and rookiepy rows
-# (snake_case ``http_only``, :func:`_rookiepy_entry_to_cookie`). Callers select
-# the converter; nothing is round-tripped through
-# ``convert_rookiepy_cookies_to_storage_state`` on the way.
 _CookieConverter = Callable[[dict[str, Any]], http.cookiejar.Cookie]
-
-# RFC 6265 §5.3 cookie identity: ``(name, domain, path)``.
 _CookieIdentity = tuple[str, str, str]
+
+
+def _bounded_row_field(entry: Any, field: str) -> str:
+    if not isinstance(entry, dict):
+        return type(entry).__name__
+    value = entry.get(field)
+    return value[:80] if isinstance(value, str) else type(value).__name__
+
+
+def _sanitize_recovery_row(entry: Any) -> dict[str, Any] | None:
+    try:
+        return _cookie_semantics.sanitize_cookie_entry(entry)
+    except _cookie_semantics.CookieRowError as exc:
+        logger.debug(
+            "Skipping malformed cookie row name=%s domain=%s row_type=%s error=%s",
+            _bounded_row_field(entry, "name"),
+            _bounded_row_field(entry, "domain"),
+            type(entry).__name__,
+            type(exc).__name__,
+        )
+        return None
+
+
+def _storage_cookie(entry: dict[str, Any]) -> http.cookiejar.Cookie:
+    normalized = _cookie_semantics.sanitize_cookie_entry(entry)
+    return _cookie_semantics.cookie_from_normalized_entry(normalized, http_only_key="httpOnly")
+
+
+def _try_cookie(entry: Any, converter: _CookieConverter) -> http.cookiejar.Cookie | None:
+    try:
+        _cookie_semantics.validate_cookie_shape(entry)
+    except _cookie_semantics.CookieRowError as exc:
+        logger.debug(
+            "Skipping malformed cookie row name=%s domain=%s row_type=%s error=%s",
+            _bounded_row_field(entry, "name"),
+            _bounded_row_field(entry, "domain"),
+            type(entry).__name__,
+            type(exc).__name__,
+        )
+        return None
+    try:
+        return converter(entry)
+    except (ValueError, TypeError, OverflowError) as exc:
+        logger.debug(
+            "Skipping unusable cookie row name=%s domain=%s error=%s",
+            _bounded_row_field(entry, "name"),
+            _bounded_row_field(entry, "domain"),
+            type(exc).__name__,
+        )
+        return None
 
 
 def _cookie_header_names(header: str) -> set[str]:
@@ -142,7 +158,7 @@ def _allowed_cookie_name(entry: Any) -> str | None:
     bare traceback instead of an auth diagnostic. A missing or ``null`` domain
     normalizes to ``""``, which is simply not allowlisted.
     """
-    normalized = _auth_cookies._sanitize_cookie_entry(entry)
+    normalized = _sanitize_recovery_row(entry)
     if normalized is None or not _is_allowed_auth_domain(normalized["domain"]):
         return None
     return normalized["name"]
@@ -246,17 +262,13 @@ def _iter_routable_psidts_cookies(
     for entry in entries:
         if _allowed_cookie_name(entry) != _PSIDTS_COOKIE:
             continue
-        cookie = _safe_to_cookie(entry, to_cookie)
+        cookie = _try_cookie(entry, to_cookie)
         if cookie is None:
             continue
         identity = (cookie.name, cookie.domain, cookie.path)
         if _is_expired(cookie, now):
             dead.add(identity)
         else:
-            # Last-write-wins, matching ``CookieJar.set_cookie``. The boolean the
-            # predicates read is unaffected either way, but retaining the same
-            # occurrence the jar would retain keeps this function an honest model
-            # of the thing it stands in for.
             live[identity] = cookie
     for identity, cookie in live.items():
         if identity not in dead:
@@ -284,7 +296,7 @@ def _build_recovery_jar(
     for entry in entries:
         if _allowed_cookie_name(entry) is None:
             continue
-        cookie = _safe_to_cookie(entry, to_cookie)
+        cookie = _try_cookie(entry, to_cookie)
         if cookie is not None:
             jar.jar.set_cookie(cookie)
     return jar
@@ -350,14 +362,14 @@ def _psidts_is_live(
     """
     for entry in entries:
         try:
-            normalized = _validate_cookie_shape(entry)
+            normalized = _cookie_semantics.validate_cookie_shape(entry)
         except _cookie_semantics.CookieRowError:
             continue
         if normalized["name"] != _PSIDTS_COOKIE or not _is_allowed_auth_domain(
             normalized["domain"]
         ):
             continue
-        cookie = _safe_to_cookie(entry, to_cookie)
+        cookie = _try_cookie(entry, to_cookie)
         if cookie is not None and not _is_expired(cookie, now):
             return True
         # A structurally valid row with malformed expiry is still present on
@@ -522,7 +534,7 @@ def _recover_psidts_inline(path: Path | str | None) -> bool:
     if "SID" not in cookie_names:
         logger.debug("PSIDTS recovery skipped: SID missing — session is truly broken")
         return False
-    if _psidts_routes_to_rotate(cookie_entries, to_cookie=_storage_entry_to_cookie):
+    if _psidts_routes_to_rotate(cookie_entries, to_cookie=_storage_cookie):
         return False
     if not _has_rotatable_secondary_binding(cookie_names):
         logger.debug(
@@ -569,7 +581,7 @@ def _recover_psidts_inline(path: Path | str | None) -> bool:
         if fresh is None:
             return False
         fresh_entries, fresh_names = fresh
-        if _psidts_routes_to_rotate(fresh_entries, to_cookie=_storage_entry_to_cookie):
+        if _psidts_routes_to_rotate(fresh_entries, to_cookie=_storage_cookie):
             # Nothing to fire. Reporting this as a heal is sound because
             # routed ⇒ live: a cookie that appears in the header for
             # ``accounts.google.com`` is by construction unexpired and on an
@@ -603,17 +615,15 @@ def _read_storage_for_recovery(
     builder :func:`_build_recovery_jar` apply their own row filter, and the
     predicates need the raw ``expires`` that a name-only view cannot carry.
 
-    The narrow exception scope catches the documented raise sites of
-    ``_load_storage_state`` (``OSError`` for missing file,
-    ``json.JSONDecodeError`` for malformed JSON) and lets unexpected
-    ``ValueError`` propagate as an implementation bug.
+    The narrow exception scope catches only documented file/document failures
+    and lets unexpected ``ValueError`` propagate as an implementation bug.
     """
     try:
-        storage_state = _load_storage_state(storage_path)
-    except _auth_cookies.StorageStateValidationError as exc:
+        rows = ProfileStore(storage_path).read_document().raw_cookie_rows()
+    except _ProfileDocumentStructureError:
         logger.debug(
             "PSIDTS recovery skipped: invalid storage state (%s)",
-            type(exc).__name__,
+            "StorageStateValidationError",
         )
         return None
     except (OSError, json.JSONDecodeError) as exc:
@@ -622,12 +632,7 @@ def _read_storage_for_recovery(
             type(exc).__name__,
         )
         return None
-    if not isinstance(storage_state, dict):
-        return None
-    raw_entries = storage_state.get("cookies", [])
-    if not isinstance(raw_entries, list):
-        return None
-    cookie_entries: list[dict] = [entry for entry in raw_entries if isinstance(entry, dict)]
+    cookie_entries: list[dict] = [entry for entry in rows if isinstance(entry, dict)]
     return cookie_entries, _recovery_cookie_names(cookie_entries)
 
 
@@ -649,7 +654,7 @@ def _is_psidts_persisted(storage_path: Path) -> bool:
     if state is None:
         return False
     entries, _ = state
-    return _psidts_is_live(entries, to_cookie=_storage_entry_to_cookie)
+    return _psidts_is_live(entries, to_cookie=_storage_cookie)
 
 
 def _is_psidts_routed_on_disk(storage_path: Path) -> bool:
@@ -658,12 +663,10 @@ def _is_psidts_routed_on_disk(storage_path: Path) -> bool:
     if state is None:
         return False
     entries, _ = state
-    return _psidts_routes_to_rotate(entries, to_cookie=_storage_entry_to_cookie)
+    return _psidts_routes_to_rotate(entries, to_cookie=_storage_cookie)
 
 
-def _psidts_save_succeeded(
-    result: _auth_storage.CookieSaveResult | bool, storage_path: Path
-) -> bool:
+def _psidts_save_succeeded(result: CookieMergeResult, storage_path: Path) -> bool:
     """Did a fresh ``__Secure-1PSIDTS`` actually land on disk after the save?
 
     The coarse ``CookieSaveResult.ok`` bool from
@@ -693,16 +696,16 @@ def _psidts_save_succeeded(
     logger.warning(
         "Inline PSIDTS recovery: %s did not persist (save ok=%s); on-disk state still lacks it",
         _PSIDTS_COOKIE,
-        getattr(result, "ok", result),
+        result.advances_ordering and not result.rejected,
     )
     return False
 
 
 def _recovery_observation(
     entries: Iterable[Any],
-) -> _auth_storage.RecoveryCookieObservation:
+) -> RecoveryObservation:
     """Capture value-only recovery observations before the RotateCookies POST."""
-    observed: dict[_auth_storage.CookieSnapshotKey, set[str | None]] = {}
+    observed: dict[CookieIdentity, set[str | None]] = {}
     for raw_entry in entries:
         # Recovery must observe the identity even when the source row cannot
         # enter a request jar.  Empty/non-string values and malformed expiry
@@ -720,10 +723,10 @@ def _recovery_observation(
         domain = normalized["domain"]
         if name not in _RECOVERY_TARGET_COOKIE_NAMES or not _is_allowed_auth_domain(domain):
             continue
-        key = _auth_storage.CookieSnapshotKey(name, domain, normalized["path"])
+        key = CookieIdentity(name, domain, normalized["path"])
         value = raw_entry.get("value")
         observed.setdefault(key, set()).add(value if isinstance(value, str) and value else None)
-    return {key: frozenset(values) for key, values in observed.items()}
+    return RecoveryObservation({key: frozenset(values) for key, values in observed.items()})
 
 
 def _attempt_rotation(storage_path: Path, cookie_entries: list[dict]) -> bool:
@@ -740,7 +743,7 @@ def _attempt_rotation(storage_path: Path, cookie_entries: list[dict]) -> bool:
         )
         return False
 
-    jar = _build_recovery_jar(cookie_entries, _storage_entry_to_cookie)
+    jar = _build_recovery_jar(cookie_entries, _storage_cookie)
 
     # ``httpx.Client(cookies=jar)`` copies the source jar into a private client
     # jar; Set-Cookie responses land in ``client.cookies``, not in ``jar``. So
@@ -749,9 +752,10 @@ def _attempt_rotation(storage_path: Path, cookie_entries: list[dict]) -> bool:
     observation = _recovery_observation(cookie_entries)
     try:
         with _rotation_http_client(jar) as client:
-            snapshot = _auth_storage.snapshot_cookie_jar(client.cookies)
+            baseline = CookieJar.from_live_httpx_for_merge(client.cookies, include_none=False)
             _rotate_post_sync(client)
             rotated_jar = client.cookies
+            rotated = CookieJar.from_live_httpx_for_merge(rotated_jar, include_none=False)
             # ROUTABLE, not merely present-by-name. The request jar still holds
             # whatever PSIDTS was already on disk, so a name-only check would see
             # that pre-existing cookie and report a mint that never happened —
@@ -789,12 +793,10 @@ def _attempt_rotation(storage_path: Path, cookie_entries: list[dict]) -> bool:
     # ``ok=True``). Whether PSIDTS actually healed is decided by re-reading disk
     # in :func:`_psidts_save_succeeded` (issue #1273).
     try:
-        result = _auth_storage.save_cookies_to_storage(
-            rotated_jar,
-            storage_path,
-            original_snapshot=snapshot,
+        result = ProfileStore(storage_path).merge_cookie_observation(
+            rotated,
+            baseline=baseline,
             recovery_observation=observation,
-            return_result=True,
         )
     except Exception as exc:  # noqa: BLE001 - persistence failure is non-fatal here
         logger.warning(
@@ -915,26 +917,6 @@ def load_with_recovery(
         return load(path, require_routable=False)
 
 
-def load_session_jar(
-    path: Path | None = None,
-    policy: HealPolicy = HealPolicy.HEAL_THEN_NAME_ONLY,
-    *,
-    heal: Callable[[Path | None], bool] | None = None,
-) -> httpx.Cookies:
-    """Load the session cookie jar from storage under ``policy``.
-
-    The jar-producing spelling of :func:`load_with_recovery`.
-    :func:`notebooklm._auth.cookies.build_httpx_cookies_from_storage` and
-    :func:`notebooklm._auth.cookies._build_httpx_cookies_from_storage_strict`
-    are one-line delegates over it, differing only in the policy they select.
-
-    The loader is resolved through the ``cookies`` module namespace at call time
-    so tests patching ``notebooklm._auth.cookies._load_cookies_pure`` keep
-    biting.
-    """
-    return load_with_recovery(path, policy, load=_auth_cookies._load_cookies_pure, heal=heal)
-
-
 def _rookiepy_entry_to_cookie(entry: dict[str, Any]) -> http.cookiejar.Cookie:
     """Build an ``http.cookiejar.Cookie`` from a rookiepy cookie dict.
 
@@ -947,7 +929,7 @@ def _rookiepy_entry_to_cookie(entry: dict[str, Any]) -> http.cookiejar.Cookie:
     entries on domains we don't allowlist).
     """
     normalized = _cookie_semantics.sanitize_cookie_entry(entry)
-    return _auth_cookies._cookie_from_normalized_entry(normalized, http_only_key="http_only")
+    return _cookie_semantics.cookie_from_normalized_entry(normalized, http_only_key="http_only")
 
 
 def recover_psidts_in_memory(rookiepy_cookies: list[dict[str, Any]]) -> bool:
@@ -1028,29 +1010,13 @@ def recover_psidts_in_memory(rookiepy_cookies: list[dict[str, Any]]) -> bool:
         )
         return False
 
-    # Index the source rows by RFC 6265 identity so the replace-in-place
-    # contract above can be honoured. Split-state recovery (#1523) is what makes
-    # it necessary: __Secure-1PSIDTS is missing/expired (so recovery fires) while
-    # a fresh __Secure-3PSIDTS is already present — RotateCookies rotates BOTH,
-    # and a blind append leaves a duplicate __Secure-3PSIDTS (and a stale
-    # __Secure-1PSIDTS twin) row with no analog in any real browser jar. Letting
-    # the rotated occurrence win mirrors the last-occurrence-wins dedup in
-    # ``filter_storage_state_cookies_by_domain_policy`` (#1513). ``path or "/"``
-    # matches the normalization the loaders and save_cookies_to_storage use.
-    index_by_identity: dict[_auth_storage.CookieSnapshotKey, list[int]] = {}
+    index_by_identity: dict[CookieIdentity, list[int]] = {}
     for pos, entry in enumerate(rookiepy_cookies):
-        identity = _auth_storage._stored_cookie_snapshot_key(entry)
+        identity = _cookie_merge.stored_cookie_identity(entry)
         if identity is None:
             continue
         index_by_identity.setdefault(identity, []).append(pos)
 
-    # ``LSID`` rides along: when ``OSID`` is absent the fallback binding needs
-    # all three of ``APISID``, ``SAPISID`` and ``LSID`` (#1977) — ``LSID`` is one
-    # of the three, not half of a pair. This path allows the POST on ``APISID``+``SAPISID``
-    # alone — so a rotation that *supplies* the missing ``LSID`` is exactly the
-    # case worth keeping. Dropping it here would discard the cookie that makes
-    # the set usable. The file-backed ``_attempt_rotation`` already persists the
-    # whole rotated jar and so never had this gap.
     replacements: dict[int, dict[str, Any]] = {}
     removals: set[int] = set()
     for cookie in rotated_cookies:
@@ -1067,14 +1033,11 @@ def recover_psidts_in_memory(rookiepy_cookies: list[dict[str, Any]]) -> bool:
             "secure": True,
             "http_only": True,
         }
-        identity = _auth_storage.CookieSnapshotKey(cookie.name, cookie.domain, cookie.path or "/")
+        identity = CookieIdentity(cookie.name, cookie.domain, cookie.path or "/")
         existing = index_by_identity.get(identity)
         if not existing:
             rookiepy_cookies.append(rotated_entry)
         else:
-            # Same (name, domain, path) already present — overwrite one row and
-            # remove every exact duplicate so malformed/stale twins cannot be
-            # serialized again. Domain variants remain literal and independent.
             replacements[existing[0]] = rotated_entry
             removals.update(existing[1:])
 
@@ -1088,43 +1051,6 @@ def recover_psidts_in_memory(rookiepy_cookies: list[dict[str, Any]]) -> bool:
         _PSIDTS_COOKIE,
     )
     return True
-
-
-# ----------------------------------------------------------------------------
-# In-memory browser-cookie validation (ADR-0031 Stage 2)
-# ----------------------------------------------------------------------------
-# Absorbed from ``browser_cookie_recovery.py`` (ADR-0033 PR 2.1). That module
-# existed for one reason, stated in the comment this section replaces: the
-# validator "lives in a leaf so this recovery module stays under the
-# repository's 1,000-line module budget", reached through a 4-line pass-through
-# that lazily imported back into the leaf. The leaf in turn imported this module
-# at module scope, so the pair was a two-node cycle held open by that lazy
-# import. With the cap scoped to file size for ``_auth`` (ADR-0033) the split
-# has no remaining reason, and the validator sits next to the heal it composes.
-#
-# Stage 2 split the two verbs this section's wrapper used to fuse.
-# ``validate_with_recovery`` did three things behind one name — check, then try
-# to fix, then check again — with the outcome threaded through an ``initial``
-# variable across nested try/except/else. The name says the quiet part out loud:
-# a function called "validate WITH RECOVERY" is two operations, and callers who
-# wanted only the question ("is this set usable?") had no way to ask it without
-# also triggering a network POST and an in-place mutation of their rows.
-#
-# The verbs are separable, and the three names are this module's public seam:
-#
-# * :func:`validate` — **pure**. Converts, runs both checks, returns a
-#   :class:`ValidationResult`. No network, no mutation.
-# * :func:`heal` — the fix. Fires one in-memory ``RotateCookies`` rotation and
-#   mutates ``rookiepy_cookies`` in place on success.
-# * :func:`validate_with_recovery` — compat wrapper composing
-#   ``validate → heal → re-check``, byte-identical in behavior to pre-Stage-2.
-#
-# The wrapper keeps its exact signature, its in-place mutation contract (which
-# ``cli/services/login/refresh.py`` depends on and documents), and its
-# ``(storage_state, error_or_None)`` return shape. It has four first-party
-# callers plus a ``RefreshDeps`` injection seam and an entry in the auth
-# cross-boundary ledger, so it is not going anywhere.
-# ----------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -1147,10 +1073,65 @@ class ValidationResult:
         return self.error.reason if self.error is not None else None
 
 
+def _rookiepy_storage_state(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    converted: list[dict[str, Any]] = []
+    for raw in rows:
+        normalized = _sanitize_recovery_row(raw)
+        if normalized is None or not _is_allowed_auth_domain(normalized["domain"]):
+            continue
+        converted.append(_cookie_semantics.rookiepy_row_to_storage_row(normalized))
+    return {"cookies": converted, "origins": []}
+
+
 def _check_required_present(storage_state: dict[str, Any]) -> ValidationResult:
     """Tier-1 presence check against a converted storage state."""
+    raw_entries = storage_state.get("cookies", [])
+    source_entries = raw_entries if isinstance(raw_entries, list) else []
+    entries = [
+        entry
+        for raw in source_entries
+        if (entry := _sanitize_recovery_row(raw)) is not None
+        and _is_allowed_auth_domain(entry["domain"])
+    ]
+    selected: dict[str, str] = {}
+    domains: dict[str, str] = {}
+    priorities: dict[str, int] = {}
+    for entry in entries:
+        name = entry["name"]
+        domain = entry["domain"]
+        priority = _cookie_policy._auth_domain_priority(domain)
+        if name not in selected or priority > priorities[name]:
+            if name in selected:
+                logger.debug(
+                    "Cookie %s: using %s value (overriding %s)", name, domain, domains[name]
+                )
+            selected[name] = entry["value"]
+            domains[name] = domain
+            priorities[name] = priority
+        else:
+            logger.debug(
+                "Cookie %s: ignoring duplicate from %s (keeping %s)", name, domain, domains[name]
+            )
+    if domains:
+        logger.debug(
+            "Extracted %d cookies from domains: %s",
+            len(selected),
+            ", ".join(sorted(set(domains.values()))),
+        )
+        if "SID" in domains:
+            logger.debug("SID cookie from domain: %s", domains["SID"])
+    extras: list[str] = []
+    if not _cookie_policy.MINIMUM_REQUIRED_COOKIES.issubset(selected):
+        google_domains = sorted(
+            {entry["domain"] for entry in entries if "google" in entry["domain"].lower()}
+        )
+        found_names = list(selected)[:5]
+        if found_names:
+            extras.append(f"Found cookies: {found_names}{'...' if len(selected) > 5 else ''}")
+        if google_domains:
+            extras.append(f"Google domains in storage: {google_domains}")
     try:
-        _auth_cookies.extract_cookies_from_storage(storage_state)
+        _cookie_policy._validate_required_cookies(set(selected), extra_diagnostics=extras)
     except _cookie_policy.RequiredCookieValidationError as exc:
         return ValidationResult(ok=False, error=exc)
     return ValidationResult(ok=True)
@@ -1164,13 +1145,20 @@ def _check_routable(rookiepy_cookies: list[dict[str, Any]]) -> ValidationResult:
     this check needs the rookiepy converter (:func:`_rookiepy_entry_to_cookie`)
     so the cookies it reasons about are the ones a request would actually send.
     """
-    entries = _auth_cookies._sanitized_auth_entries({"cookies": rookiepy_cookies})
+    entries = [
+        entry
+        for raw in rookiepy_cookies
+        if (entry := _sanitize_recovery_row(raw)) is not None
+        and _is_allowed_auth_domain(entry["domain"])
+    ]
     try:
-        _auth_cookies._validate_routable_entries(
-            entries,
-            to_cookie=_rookiepy_entry_to_cookie,
-            require_routable=True,
-        )
+        _cookie_policy._validate_required_cookies({entry["name"] for entry in entries})
+        if not _psidts_routes_to_rotate(entries, to_cookie=_rookiepy_entry_to_cookie):
+            raise _cookie_policy.RequiredCookieValidationError(
+                "Required cookie __Secure-1PSIDTS is not routable.\n"
+                f"{_cookie_policy._EXTRACTION_HINT}",
+                reason="psidts_unroutable",
+            )
     except _cookie_policy.RequiredCookieValidationError as exc:
         return ValidationResult(ok=False, error=exc)
     return ValidationResult(ok=True)
@@ -1185,7 +1173,7 @@ def validate(
     the first failure. Returns the converted storage state alongside the result
     so callers that need the converted form do not convert twice.
     """
-    storage_state = _auth_cookies.convert_rookiepy_cookies_to_storage_state(rookiepy_cookies)
+    storage_state = _rookiepy_storage_state(rookiepy_cookies)
     present = _check_required_present(storage_state)
     if not present.ok:
         return storage_state, present
@@ -1230,5 +1218,5 @@ def validate_with_recovery(
     if not heal(rookiepy_cookies):
         return storage_state, result.error
 
-    healed_state = _auth_cookies.convert_rookiepy_cookies_to_storage_state(rookiepy_cookies)
+    healed_state = _rookiepy_storage_state(rookiepy_cookies)
     return healed_state, _check_required_present(healed_state).error

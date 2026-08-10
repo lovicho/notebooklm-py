@@ -202,15 +202,16 @@ def replace_file_atomically(temp_path: Path, path: Path) -> None:
 def _atomic_write_json_unchecked(path: Path, data: Any, *, mode: int = 0o600) -> None:
     """Atomic + durable JSON write **without** the storage-state path guard.
 
-    Module-private **bypass** used only by the canonical storage writer
-    (:mod:`notebooklm._auth.storage`), which legitimately writes
-    ``storage_state.json`` under the canonical dotted lock. Every other caller
-    must use the public :func:`atomic_write_json`, which rejects
+    Module-private **bypass** imported only by the sealed credential commit
+    spine (:mod:`notebooklm._auth.credential_io`). Its two typed wrappers are
+    reached by the path-owning profile store and the temporary compatibility
+    policy in :mod:`notebooklm._auth.storage`, after those owners take the
+    appropriate credential lock. Every other caller must use the public
+    :func:`atomic_write_json`, which rejects
     ``storage_state.json`` paths (see that function and :func:`atomic_update_json`
     for the lost-update rationale, #1215). The boundary is enforced by
     ``tests/_guardrails/test_storage_writer_boundary.py`` (an equality-asserted
-    allowlist of this private symbol's importers == ``{storage.py}``, plus a
-    function-granular allowlist of the intent writers inside it — ADR-0033).
+    allowlist of this private symbol's importer and its two typed callers).
 
     Steps:
 
@@ -250,6 +251,7 @@ def _atomic_write_json_unchecked(path: Path, data: Any, *, mode: int = 0o600) ->
         with tempfile.NamedTemporaryFile(
             "w",
             encoding="utf-8",
+            newline="\n",
             dir=path.parent,
             prefix=f".{path.name}.",
             suffix=".tmp",
@@ -305,9 +307,8 @@ def atomic_write_json(path: Path, data: Any, *, mode: int = 0o600) -> None:
     mutation must serialize on the canonical dotted ``.storage_state.json.lock``
     sentinel (``_auth.paths._storage_state_lock_path``); a bare atomic write skips
     that lock and re-opens the lost-update race, so it is refused here. Cookie /
-    account writers use the dedicated locked writers in
-    :mod:`notebooklm._auth.storage` (the sole sanctioned user of the
-    private bypass) instead.
+    account writers use the dedicated locked profile/store intents, which reach
+    the bypass only through :mod:`notebooklm._auth.credential_io`.
 
     Raises:
         ValueError: If ``path`` names ``storage_state.json`` (case-insensitive) —

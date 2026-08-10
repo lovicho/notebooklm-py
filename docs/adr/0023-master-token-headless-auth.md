@@ -138,3 +138,21 @@ browser `oauth_token` capture (Directive B) stays CLI-side.
   CLI driver keeps only its cheap pre-capture `read_master_token` probe (fail
   fast on a malformed `master_token.json` before the ~300s interactive sign-in,
   not after).
+
+## Amendment (ADR-0034 Phase 11D): one path-owned bootstrap coordinator
+
+`_auth/master_token_bootstrap.py` now owns bootstrap, re-mint, and
+missing-storage coordination in one concrete `MasterTokenBootstrapper`. Each
+instance retains one stateless `MintService`, one authoritative `ProfileStore`,
+one bootstrap `FileLock`, and one verifier. It cannot receive an independently
+pairable token file or storage writer; every token read/write derives through
+the retained store.
+
+The coordinator preserves the two-owner advisory check, authoritative
+under-lock session-owner gate, session-before-token durability order, strict
+post-persist reload, four-state recheck-after-wait result, and
+shield-to-settlement cancellation rule. `_auth/master_token.py` remains the
+v0.x boundary: public signatures and facade identities are unchanged, and its
+call-time bridges retain legacy account lookup, strict-loader, Android-ID, and
+default-verifier monkeypatch timing without importing runtime/client code into
+the coordinator.

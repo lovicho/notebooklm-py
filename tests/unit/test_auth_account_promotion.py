@@ -38,9 +38,13 @@ from typing import Any
 import pytest
 
 from notebooklm._auth import storage as _auth_storage
-from notebooklm._auth.paths import canonical_storage_key
+from notebooklm._auth.profile_migration import (
+    LegacyAccountContext,
+    LegacyAccountMigrator,
+    LegacyPromotionScheduler,
+)
+from notebooklm._auth.profile_store import ProfileStore
 from notebooklm._auth.storage import (
-    _drain_promotions_for_tests,
     get_account_email_for_storage,
     get_authuser_for_storage,
     read_account_metadata,
@@ -108,8 +112,16 @@ def _legacy_profile(root: Path, legacy_account: dict[str, Any]) -> Path:
 
 
 def _canonical(storage: Path) -> str:
-    """The key ``_schedule_legacy_promotion`` uses for its single flight."""
-    return str(canonical_storage_key(storage))
+    """The scheduler key for one profile's single flight."""
+    return str(ProfileStore(storage).ordering_key)
+
+
+def _scheduler() -> LegacyPromotionScheduler:
+    return LegacyPromotionScheduler.process_default()
+
+
+def _drain_promotions_for_tests() -> None:
+    _scheduler().drain(30.0)
 
 
 def _in_band_on_disk(storage: Path) -> dict[str, Any] | None:
@@ -230,26 +242,30 @@ class TestReadTakesNoLocks:
             encoding="utf-8",
         )
         counting = _CountingLock()
-        monkeypatch.setattr(_auth_storage, "_PROMOTION_LOCK", counting)
+        scheduler = LegacyPromotionScheduler()
+        scheduler._registry_lock = counting
+        monkeypatch.setattr(LegacyPromotionScheduler, "_process_default_scheduler", scheduler)
 
-        def _fail(*args, **kwargs):
+        def _fail(*args, **kwargs):  # pragma: no cover - assertion callback
             raise AssertionError("the read must not enter the storage writer")
 
-        monkeypatch.setattr(_auth_storage, "update_account_metadata", _fail)
+        monkeypatch.setattr(ProfileStore, "update_account", _fail)
 
         for _ in range(5):
             assert read_account_metadata(storage) == {"authuser": 4, "email": "i@x.com"}
 
         assert counting.acquisitions == 0
-        assert not _auth_storage._PROMOTION_ONCE_PATHS
-        assert not _auth_storage._PROMOTION_THREADS
+        assert not scheduler._scheduled_paths_for_tests()
+        assert not scheduler._workers_for_tests()
 
     def test_empty_profile_fast_path_takes_no_lock(self, tmp_path, monkeypatch):
         """No in-band record AND no legacy sibling — the fresh-profile case."""
         storage = tmp_path / "storage_state.json"
         storage.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
         counting = _CountingLock()
-        monkeypatch.setattr(_auth_storage, "_PROMOTION_LOCK", counting)
+        scheduler = LegacyPromotionScheduler()
+        scheduler._registry_lock = counting
+        monkeypatch.setattr(LegacyPromotionScheduler, "_process_default_scheduler", scheduler)
 
         assert read_account_metadata(storage) == {}
         assert counting.acquisitions == 0
@@ -263,14 +279,14 @@ class TestReadTakesNoLocks:
         storage lock is not, on this thread, ever.
         """
         storage = _legacy_profile(tmp_path, {"authuser": 9, "email": "j@example.com"})
-        real_update = _auth_storage.update_account_metadata
+        real_update = ProfileStore.update_account
         threads_seen: list[threading.Thread] = []
 
         def _record(*args, **kwargs):
             threads_seen.append(threading.current_thread())
             return real_update(*args, **kwargs)
 
-        monkeypatch.setattr(_auth_storage, "update_account_metadata", _record)
+        monkeypatch.setattr(ProfileStore, "update_account", _record)
         reader = threading.current_thread()
 
         assert read_account_metadata(storage) == {"authuser": 9, "email": "j@example.com"}
@@ -290,8 +306,16 @@ class TestReadTakesNoLocks:
 
     def test_worker_is_a_daemon_so_it_cannot_wedge_interpreter_shutdown(self, tmp_path):
         storage = _legacy_profile(tmp_path, {"authuser": 1})
-        worker = _auth_storage._schedule_legacy_promotion(storage)
-        assert worker is not None
+        workers: list[threading.Thread] = []
+
+        def _thread_factory(**kwargs):
+            worker = threading.Thread(**kwargs)
+            workers.append(worker)
+            return worker
+
+        scheduler = LegacyPromotionScheduler(thread_factory=_thread_factory)
+        assert scheduler.schedule(ProfileStore(storage), LegacyAccountMigrator())
+        worker = workers[0]
         assert worker.daemon is True
         worker.join(30.0)
 
@@ -316,12 +340,12 @@ class TestPromotionRacingTheReader:
         self, tmp_path, monkeypatch
     ):
         storage = _legacy_profile(tmp_path, {"authuser": 7, "email": "race@example.com"})
-        real_read_legacy = _auth_storage._read_legacy_account
+        real_read_legacy = LegacyAccountContext.read
         promoted_during_read: list[bool] = []
 
         promoting: list[bool] = []
 
-        def _promote_mid_read(path: Path) -> dict[str, Any]:
+        def _promote_mid_read(context: LegacyAccountContext, path: Path) -> dict[str, Any] | None:
             """Let a full promotion land, THEN take the sibling sample.
 
             This is the exact interleaving. The caller already sampled in-band
@@ -335,19 +359,19 @@ class TestPromotionRacingTheReader:
             pre-strip record or the promotion has nothing to promote.
             """
             if promoted_during_read or promoting:
-                return real_read_legacy(path)
+                return real_read_legacy(context, path)
             promoting.append(True)
             try:
                 promoted_during_read.append(True)
                 assert _auth_storage.promote_legacy_account(path) is True
             finally:
                 promoting.pop()
-            legacy = real_read_legacy(path)
+            legacy = real_read_legacy(context, path)
             # The premise of the interleaving: this sample is empty.
-            assert legacy == {}, "the strip did not happen; test would be vacuous"
+            assert legacy is None, "the strip did not happen; test would be vacuous"
             return legacy
 
-        monkeypatch.setattr(_auth_storage, "_read_legacy_account", _promote_mid_read)
+        monkeypatch.setattr(LegacyAccountContext, "read", _promote_mid_read)
 
         record = read_account_metadata(storage)
 
@@ -370,7 +394,7 @@ class TestSingleFlightOneShot:
 
     def test_concurrent_reads_of_one_profile_promote_exactly_once(self, tmp_path, monkeypatch):
         storage = _legacy_profile(tmp_path, {"authuser": 3, "email": "k@example.com"})
-        real_update = _auth_storage.update_account_metadata
+        real_update = ProfileStore.update_account
         calls = []
         calls_lock = threading.Lock()
 
@@ -380,7 +404,7 @@ class TestSingleFlightOneShot:
             time.sleep(0.05)  # widen the window a duplicate would land in
             return real_update(*args, **kwargs)
 
-        monkeypatch.setattr(_auth_storage, "update_account_metadata", _count)
+        monkeypatch.setattr(ProfileStore, "update_account", _count)
 
         readers = 8
         start = threading.Barrier(readers)
@@ -404,7 +428,7 @@ class TestSingleFlightOneShot:
         assert len(results) == readers
         assert all(r == {"authuser": 3, "email": "k@example.com"} for r in results)
         assert len(calls) == 1, f"expected exactly one promotion, got {len(calls)}"
-        assert sorted(_auth_storage._PROMOTION_ONCE_PATHS) == [_canonical(storage)]
+        assert sorted(_scheduler()._scheduled_paths_for_tests()) == [_canonical(storage)]
 
     def test_a_failed_promotion_is_not_retried_by_later_reads(self, tmp_path, monkeypatch):
         """One-shot, not a retry loop.
@@ -420,7 +444,7 @@ class TestSingleFlightOneShot:
             attempts.append(1)
             raise OSError("disk full")
 
-        monkeypatch.setattr(_auth_storage, "update_account_metadata", _boom)
+        monkeypatch.setattr(ProfileStore, "update_account", _boom)
 
         for _ in range(4):
             assert read_account_metadata(storage) == {"authuser": 2, "email": "l@example.com"}
@@ -447,14 +471,14 @@ class TestPromotionCannotAffectTheRead:
 
     def test_a_slow_promotion_does_not_delay_the_read(self, tmp_path, monkeypatch):
         storage = _legacy_profile(tmp_path, {"authuser": 5, "email": "m@example.com"})
-        real_update = _auth_storage.update_account_metadata
+        real_update = ProfileStore.update_account
         released = threading.Event()
 
         def _slow(*args, **kwargs):
             released.wait(timeout=30)
             return real_update(*args, **kwargs)
 
-        monkeypatch.setattr(_auth_storage, "update_account_metadata", _slow)
+        monkeypatch.setattr(ProfileStore, "update_account", _slow)
         try:
             started = time.monotonic()
             assert read_account_metadata(storage) == {"authuser": 5, "email": "m@example.com"}
@@ -474,7 +498,7 @@ class TestPromotionCannotAffectTheRead:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated writer explosion")
 
-        monkeypatch.setattr(_auth_storage, "update_account_metadata", _boom)
+        monkeypatch.setattr(ProfileStore, "update_account", _boom)
 
         assert read_account_metadata(storage) == {"authuser": 6, "email": "n@example.com"}
         _drain_promotions_for_tests()
@@ -484,23 +508,59 @@ class TestPromotionCannotAffectTheRead:
         legacy = json.loads((storage.with_name("context.json")).read_text(encoding="utf-8"))
         assert legacy["account"] == {"authuser": 6, "email": "n@example.com"}
 
-    def test_a_crashing_worker_is_contained(self, tmp_path, monkeypatch):
+    def test_a_crashing_worker_is_contained(self, tmp_path):
         """``_run_promotion_once`` must swallow even what ``promote_legacy_account``
         does not — a detached worker has no caller to raise to, and its
         deregistration must still happen."""
 
-        def _explode(_path):
-            raise BaseException("not even an Exception")  # noqa: TRY002
+        class ExplodingMigrator:
+            def promote(self, _store):
+                raise BaseException("not even an Exception")  # noqa: TRY002
 
-        monkeypatch.setattr(_auth_storage, "promote_legacy_account", _explode)
+        workers: list[threading.Thread] = []
+
+        def _thread_factory(**kwargs):
+            worker = threading.Thread(**kwargs)
+            workers.append(worker)
+            return worker
+
+        scheduler = LegacyPromotionScheduler(thread_factory=_thread_factory)
         storage = _legacy_profile(tmp_path, {"authuser": 1})
-        assert read_account_metadata(storage) == {"authuser": 1}
-        _drain_promotions_for_tests()
-        assert not _auth_storage._PROMOTION_THREADS
+        assert scheduler.schedule(ProfileStore(storage), ExplodingMigrator())  # type: ignore[arg-type]
+        scheduler.drain(30.0)
+        assert not scheduler._workers_for_tests()
 
 
 class TestInBandAlwaysWins:
     """The re-check that keeps a concurrent login from being overtaken."""
+
+    def test_empty_placeholder_is_promoted_then_scrubbed_end_to_end(self, tmp_path):
+        """An empty typed placeholder is absent for read and under-lock promotion."""
+        legacy = {"authuser": 6, "email": " legacy@example.com "}
+        storage = _legacy_profile(tmp_path, legacy)
+        payload = json.loads(storage.read_text(encoding="utf-8"))
+        payload["notebooklm"] = {"version": 1, "account": {}}
+        storage.write_text(json.dumps(payload), encoding="utf-8")
+
+        expected = {"authuser": 6, "email": "legacy@example.com"}
+        assert read_account_metadata(storage) == expected
+        _drain_promotions_for_tests()
+
+        assert _in_band_on_disk(storage) == expected
+        context = tmp_path / "context.json"
+        assert json.loads(context.read_text(encoding="utf-8")) == {"notebook_id": "nb-1"}
+        assert read_account_metadata(storage) == expected
+
+    def test_non_empty_unknown_mapping_wins_and_is_not_overwritten(self, tmp_path):
+        storage = _legacy_profile(tmp_path, {"authuser": 6, "email": "legacy@example.com"})
+        payload = json.loads(storage.read_text(encoding="utf-8"))
+        payload["notebooklm"] = {"version": 1, "account": {"unknown": [1, 2]}}
+        storage.write_text(json.dumps(payload), encoding="utf-8")
+
+        assert _auth_storage.promote_legacy_account(storage) is False
+        assert _in_band_on_disk(storage) == {"unknown": [1, 2]}
+        context = tmp_path / "context.json"
+        assert json.loads(context.read_text(encoding="utf-8")) == {"notebook_id": "nb-1"}
 
     def test_in_band_beats_a_stale_legacy_sibling(self, tmp_path, monkeypatch):
         storage = tmp_path / "storage_state.json"
@@ -521,7 +581,7 @@ class TestInBandAlwaysWins:
         def _fail(*args, **kwargs):
             raise AssertionError("the legacy sibling must not even be consulted")
 
-        monkeypatch.setattr(_auth_storage, "_read_legacy_account", _fail)
+        monkeypatch.setattr(LegacyAccountContext, "read", _fail)
         assert read_account_metadata(storage) == {"authuser": 9, "email": "new@x.com"}
 
     def test_a_login_landing_during_the_sibling_read_still_wins(self, tmp_path):
@@ -535,19 +595,19 @@ class TestInBandAlwaysWins:
         own check-then-act race.
         """
         storage = _legacy_profile(tmp_path, {"authuser": 1, "email": "old@x.com"})
-        real_read_legacy = _auth_storage._read_legacy_account
+        real_read_legacy = LegacyAccountContext.read
 
-        def _read_then_race_a_login(path):
-            legacy = real_read_legacy(path)
+        def _read_then_race_a_login(context, path):
+            legacy = real_read_legacy(context, path)
             _auth_storage.update_account_metadata(path, authuser=8, email="fresh@x.com")
             return legacy
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(_auth_storage, "_read_legacy_account", _read_then_race_a_login)
+            mp.setattr(LegacyAccountContext, "read", _read_then_race_a_login)
             assert read_account_metadata(storage) == {"authuser": 8, "email": "fresh@x.com"}
 
         # No promotion was scheduled — in-band won before we got that far.
-        assert not _auth_storage._PROMOTION_ONCE_PATHS
+        assert not _scheduler()._scheduled_paths_for_tests()
 
 
 class TestAllThreeEntryPathsReachTheOneShot:
@@ -565,7 +625,7 @@ class TestAllThreeEntryPathsReachTheOneShot:
         storage = _legacy_profile(tmp_path, {"authuser": 3, "email": "route@example.com"})
         kwargs = _refresh._resolve_token_route_kwargs(storage, authuser=None, account_email=None)
         assert kwargs == {"authuser": 3, "account_email": "route@example.com"}
-        assert sorted(_auth_storage._PROMOTION_ONCE_PATHS) == [_canonical(storage)]
+        assert sorted(_scheduler()._scheduled_paths_for_tests()) == [_canonical(storage)]
         _drain_promotions_for_tests()
         assert _in_band_on_disk(storage) == {"authuser": 3, "email": "route@example.com"}
 
@@ -595,7 +655,7 @@ class TestAllThreeEntryPathsReachTheOneShot:
         assert [(e.name, e.account, e.authenticated) for e in entries] == [
             ("default", "cli@example.com", True)
         ]
-        assert sorted(_auth_storage._PROMOTION_ONCE_PATHS) == [_canonical(storage)]
+        assert sorted(_scheduler()._scheduled_paths_for_tests()) == [_canonical(storage)]
         _drain_promotions_for_tests()
         assert _in_band_on_disk(storage) == {"authuser": 4, "email": "cli@example.com"}
 
@@ -617,8 +677,8 @@ class TestAllThreeEntryPathsReachTheOneShot:
         assert read_account_metadata(None) == {}
         kwargs = _refresh._resolve_token_route_kwargs(None, authuser=None, account_email=None)
         assert kwargs == {"authuser": 5, "account_email": "env@example.com"}
-        assert not _auth_storage._PROMOTION_ONCE_PATHS
-        assert not _auth_storage._PROMOTION_THREADS
+        assert not _scheduler()._scheduled_paths_for_tests()
+        assert not _scheduler()._workers_for_tests()
 
 
 def test_short_lived_process_still_lands_the_durable_promotion(tmp_path: Path) -> None:

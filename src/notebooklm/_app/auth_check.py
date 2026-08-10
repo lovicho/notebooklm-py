@@ -210,35 +210,27 @@ def _account_info(plan: AuthCheckPlan, storage_state: dict[str, Any]) -> dict[st
 
 
 def _master_token_status(plan: AuthCheckPlan) -> dict[str, Any]:
-    """Note a sibling ``master_token.json`` (headless master-token profile).
-
-    The record lives beside ``storage_state.json`` (login --master-token writes
-    both into the profile dir), so resolve it via the sole derivation site
-    (``notebooklm.paths.master_token_path_for``, #2103 PR-1) — this also
-    honors a ``--storage`` override, INCLUDING a symlinked/relative one (this
-    site previously used an unresolved ``with_name``, one of the three
-    canonicalization policies the four call sites disagreed on before the
-    convergence). Env-var auth carries no profile directory, so master-token
-    is N/A there.
-    """
-    if plan.has_env_auth:
-        return {"present": False, "path": None, "account": None}
-
-    from ..auth import read_master_token
-    from ..paths import master_token_path_for
-
-    path = master_token_path_for(plan.storage_path)
-    if not path.exists():
-        return {"present": False, "path": str(path), "account": None}
-    account: str | None = None
+    """Project the coarse master-token app status into auth-check details."""
+    status = None
     try:
-        record = read_master_token(path)
-    except Exception as exc:  # malformed/unreadable — still report presence
-        logger.debug("master_token.json present but unreadable: %s", type(exc).__name__)
-        record = None
-    if record:
-        account = record.get("email")
-    return {"present": True, "path": str(path), "account": account}
+        from . import master_token
+
+        status = master_token.inspect_master_token_status(
+            plan.storage_path,
+            has_env_auth=plan.has_env_auth,
+        )
+        if status.unreadable_error_type is not None:
+            logger.debug(
+                "master_token.json present but unreadable: %s",
+                status.unreadable_error_type,
+            )
+        return {
+            "present": status.present,
+            "path": str(status.path) if status.path is not None else None,
+            "account": status.account,
+        }
+    finally:
+        del status
 
 
 async def run_auth_check(

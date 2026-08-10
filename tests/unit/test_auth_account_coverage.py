@@ -3,8 +3,8 @@
 Targets the read/clear/migration helpers and error-handling branches that the
 concern-aligned ``test_auth_account.py`` suite does not exercise: malformed /
 non-dict storage payloads, the ``_probe_authuser`` non-200 path, legacy
-``context.json`` migration cleanup, the corrupt-storage ``RuntimeError`` guard,
-and the in-band clear helper's no-op / lock branches.
+``context.json`` migration cleanup, and the in-band clear adapter's no-op / lock
+branches.
 
 ADR-0033 PR 5.2 relocated the account *record* helpers to ``_auth.storage``;
 only the NETWORK identity half (``_probe_authuser``, page-email extraction)
@@ -26,7 +26,7 @@ import pytest
 
 from notebooklm._auth import account as _auth_account
 from notebooklm._auth import keepalive as _auth_keepalive
-from notebooklm._auth import storage as _auth_storage_mod
+from notebooklm._auth import profile_migration as _profile_migration
 from notebooklm._auth.account import (
     Account,
     _probe_authuser,
@@ -35,14 +35,12 @@ from notebooklm._auth.account import (
     repair_account_metadata_from_playwright_storage,
 )
 
-# The account RECORD helpers moved to ``_auth.storage`` in ADR-0033 PR 5.2 (the
-# network-identity half above stayed in ``_auth.account``). Imported from their
-# owning module so the whitebox patches below land where the calls resolve.
+# Compatibility account adapters remain in ``_auth.storage``. Concrete legacy
+# context, migration, and lifecycle tests use their owners in
+# ``_auth.profile_migration`` so whitebox patches land where calls resolve.
+from notebooklm._auth.profile_migration import LegacyAccountContext
+from notebooklm._auth.profile_store import ProfileStore
 from notebooklm._auth.storage import (
-    _drop_legacy_account_key,
-    _load_storage_state_for_write,
-    _read_in_band_account,
-    _read_legacy_account,
     clear_account_metadata,
     get_account_email_for_storage,
     promote_legacy_account,
@@ -144,12 +142,12 @@ class TestReadInBandAccount:
     """In-band reader malformed / non-dict branches (lines 232-234, 241)."""
 
     def test_missing_file_returns_empty(self, tmp_path):
-        assert _read_in_band_account(tmp_path / "missing.json") == {}
+        assert read_account_metadata(tmp_path / "missing.json") == {}
 
     def test_malformed_json_returns_empty(self, tmp_path):
         storage = tmp_path / "storage_state.json"
         storage.write_text("not json", encoding="utf-8")
-        assert _read_in_band_account(storage) == {}
+        assert read_account_metadata(storage) == {}
 
     def test_non_dict_storage_state_returns_empty(self):
         # read_account_metadata_from_storage_state guard: non-dict → {} (line 241).
@@ -175,25 +173,25 @@ class TestReadInBandAccount:
 class TestReadLegacyAccount:
     """Legacy ``context.json`` reader non-dict branch (line 260)."""
 
-    def test_missing_context_returns_empty(self, tmp_path):
-        assert _read_legacy_account(tmp_path / "storage_state.json") == {}
+    def test_missing_context_returns_none(self, tmp_path):
+        assert LegacyAccountContext().read(tmp_path / "storage_state.json") is None
 
     def test_malformed_legacy_json_returns_empty(self, tmp_path):
         storage = tmp_path / "storage_state.json"
         (tmp_path / "context.json").write_text("not json", encoding="utf-8")
-        assert _read_legacy_account(storage) == {}
+        assert LegacyAccountContext().read(storage) is None
 
     def test_non_dict_legacy_payload_returns_empty(self, tmp_path):
         storage = tmp_path / "storage_state.json"
         (tmp_path / "context.json").write_text(json.dumps(["x"]), encoding="utf-8")
-        assert _read_legacy_account(storage) == {}
+        assert LegacyAccountContext().read(storage) is None
 
     def test_legacy_account_returned(self, tmp_path):
         storage = tmp_path / "storage_state.json"
         (tmp_path / "context.json").write_text(
             json.dumps({"account": {"authuser": 4}}), encoding="utf-8"
         )
-        assert _read_legacy_account(storage) == {"authuser": 4}
+        assert LegacyAccountContext().read(storage) == {"authuser": 4}
 
 
 class TestPromoteLegacyAccount:
@@ -260,7 +258,7 @@ class TestPromoteLegacyAccount:
 
         assert promote_legacy_account(storage) is False
 
-        assert _read_legacy_account(storage) == {}
+        assert LegacyAccountContext().read(storage) is None
         in_band = json.loads(storage.read_text(encoding="utf-8"))["notebooklm"]["account"]
         assert in_band == {"authuser": 7}  # untouched — in-band already won
 
@@ -274,17 +272,11 @@ class TestPromoteLegacyAccount:
         RMW deadline applies. Waiting out real contention is now strictly
         better than giving up, because the one-shot never retries in-process.
 
-        Pinned by capturing what ``update_account_metadata`` receives: no
-        ``deadline_seconds`` at all, and the parameter no longer exists on the
-        writer to pass."""
+        Pinned by capturing what ``ProfileStore.update_account`` receives: no
+        deadline override exists on the concrete writer."""
         import inspect
 
-        import notebooklm._auth.storage as _storage_mod
-
-        assert (
-            "deadline_seconds"
-            not in inspect.signature(_storage_mod.update_account_metadata).parameters
-        )
+        assert "deadline_seconds" not in inspect.signature(ProfileStore.update_account).parameters
 
         storage = tmp_path / "storage_state.json"
         storage.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
@@ -293,21 +285,21 @@ class TestPromoteLegacyAccount:
             encoding="utf-8",
         )
 
-        real_update = _storage_mod.update_account_metadata
+        real_update = ProfileStore.update_account
         captured: dict[str, object] = {}
 
         def _capture(*args, **kwargs):
             captured["kwargs"] = dict(kwargs)
             return real_update(*args, **kwargs)
 
-        monkeypatch.setattr(_storage_mod, "update_account_metadata", _capture)
+        monkeypatch.setattr(ProfileStore, "update_account", _capture)
 
         assert promote_legacy_account(storage) is True
         assert "deadline_seconds" not in captured["kwargs"]
 
     def test_strip_failure_after_successful_embed_still_returns_true(self, tmp_path, monkeypatch):
         """The embed's success is independent of the strip's outcome: a
-        (hypothetical — ``_drop_legacy_account_key`` already swallows every
+        (hypothetical — ``LegacyAccountContext.scrub`` already swallows every
         realistic OSError/JSONDecodeError internally) exception during the
         cosmetic legacy-key cleanup must not erase a promotion that already
         durably committed, nor propagate up through ``read_account_metadata``
@@ -323,7 +315,7 @@ class TestPromoteLegacyAccount:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated unexpected failure during cleanup")
 
-        monkeypatch.setattr(_auth_storage_mod, "_drop_legacy_account_key", _boom)
+        monkeypatch.setattr(LegacyAccountContext, "scrub", _boom)
 
         assert promote_legacy_account(storage) is True
         in_band = json.loads(storage.read_text(encoding="utf-8"))["notebooklm"]["account"]
@@ -339,8 +331,8 @@ class TestPromoteLegacyAccount:
         The stale write must not win — closes the check-then-act race a prior
         review round found (unlocked pre-check + unconditional overwrite).
 
-        Simulated deterministically via a monkeypatch on ``_read_legacy_account``
-        (the first thing ``promote_legacy_account`` calls) that performs the
+        Simulated deterministically via a monkeypatch on ``LegacyAccountContext.read``
+        (the first thing the migrator calls) that performs the
         "concurrent" fresh write as a side effect before returning — so by the
         time ``promote_legacy_account`` reaches its own write, a different
         record is already committed, exactly reproducing the race's timing
@@ -351,19 +343,17 @@ class TestPromoteLegacyAccount:
             json.dumps({"account": {"authuser": 2, "email": "stale@example.com"}}),
             encoding="utf-8",
         )
-        real_read_legacy = _auth_storage_mod._read_legacy_account
+        real_read_legacy = LegacyAccountContext.read
 
-        def _read_legacy_then_race_a_fresh_write(path):
-            legacy = real_read_legacy(path)
+        def _read_legacy_then_race_a_fresh_write(context, path):
+            legacy = real_read_legacy(context, path)
             from notebooklm._auth import storage as _sw
 
             _sw.update_account_metadata(path, authuser=0, email="fresh@example.com")
             return legacy
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(
-                _auth_storage_mod, "_read_legacy_account", _read_legacy_then_race_a_fresh_write
-            )
+            mp.setattr(LegacyAccountContext, "read", _read_legacy_then_race_a_fresh_write)
             assert promote_legacy_account(storage) is False  # lost the race, not "nothing to do"
 
         in_band = json.loads(storage.read_text(encoding="utf-8"))["notebooklm"]["account"]
@@ -382,7 +372,7 @@ class TestPromoteLegacyAccount:
 
         in_band = json.loads(storage.read_text(encoding="utf-8"))["notebooklm"]["account"]
         assert in_band == {"authuser": 0}
-        assert _read_legacy_account(storage) == {}
+        assert LegacyAccountContext().read(storage) is None
 
     def test_promotion_failure_leaves_legacy_record_intact(self, tmp_path, monkeypatch, caplog):
         """Best-effort by design: if the in-band embed raises, the legacy record
@@ -401,18 +391,14 @@ class TestPromoteLegacyAccount:
         def _boom(*args, **kwargs):
             raise OSError("disk full")
 
-        # Since ADR-0033 PR 5.2 both functions live in ``_auth/storage.py``, so
-        # the call resolves through that module's own global namespace at call
-        # time. Patching the module attribute is still what takes effect — but
-        # for that reason, not the old cross-module ``from . import storage``
-        # one, which no longer exists.
-        import notebooklm._auth.storage as _storage_mod
-
-        monkeypatch.setattr(_storage_mod, "update_account_metadata", _boom)
+        monkeypatch.setattr(ProfileStore, "update_account", _boom)
 
         with caplog.at_level(logging.WARNING, logger="notebooklm.auth"):
             assert promote_legacy_account(storage) is False
-        assert _read_legacy_account(storage) == {"authuser": 4, "email": "dana@example.com"}
+        assert LegacyAccountContext().read(storage) == {
+            "authuser": 4,
+            "email": "dana@example.com",
+        }
         assert any(
             r.levelno == logging.WARNING and "disk full" in r.message for r in caplog.records
         )
@@ -435,12 +421,11 @@ class TestPromoteLegacyAccount:
             json.dumps({"account": {"authuser": 4, "email": "dana@example.com"}}),
             encoding="utf-8",
         )
-        import notebooklm._auth.storage as _storage_mod
 
         def _boom(*args, **kwargs):
             raise OSError("disk full")
 
-        monkeypatch.setattr(_storage_mod, "update_account_metadata", _boom)
+        monkeypatch.setattr(ProfileStore, "update_account", _boom)
 
         with caplog.at_level(logging.DEBUG, logger="notebooklm.auth"):
             promote_legacy_account(storage)
@@ -450,7 +435,7 @@ class TestPromoteLegacyAccount:
         assert any(
             r.levelno == logging.WARNING and "disk full" in r.message for r in caplog.records
         )
-        assert not hasattr(_auth_storage_mod, "_PROMOTION_WARNED_PATHS")
+        assert not hasattr(_profile_migration, "_PROMOTION_WARNED_PATHS")
 
     def test_read_account_metadata_derives_legacy_when_promotion_fails(self, tmp_path, monkeypatch):
         """A failing durable write must not collapse ``read_account_metadata``
@@ -470,43 +455,41 @@ class TestPromoteLegacyAccount:
             encoding="utf-8",
         )
 
-        import notebooklm._auth.storage as _storage_mod
-
         def _boom(*args, **kwargs):
             raise OSError("disk full")
 
-        monkeypatch.setattr(_storage_mod, "update_account_metadata", _boom)
+        monkeypatch.setattr(ProfileStore, "update_account", _boom)
 
         result = read_account_metadata(storage)
         # Never {} — and sanitized (malformed authuser -> 0, blank email dropped)
         # exactly as ``_sanitize_legacy_account_record`` would embed it.
         assert result == {"authuser": 0}
-        _auth_storage_mod._drain_promotions_for_tests()
+        _profile_migration.LegacyPromotionScheduler.process_default().drain(30.0)
         # The legacy record is untouched — nothing was scrubbed on a failure.
-        assert _read_legacy_account(storage) == {"authuser": -1, "email": "  "}
+        assert LegacyAccountContext().read(storage) == {"authuser": -1, "email": "  "}
         # And the read still answers identically after the failed attempt.
         assert read_account_metadata(storage) == {"authuser": 0}
 
 
-class TestDropLegacyAccountKey:
-    """``_drop_legacy_account_key`` migration branches (lines 353, 366, 368)."""
+class TestLegacyAccountContextScrub:
+    """``LegacyAccountContext.scrub`` migration branches."""
 
     def test_no_context_file_is_noop(self, tmp_path):
         # context.json missing → early return (line ~348-349).
-        _drop_legacy_account_key(tmp_path / "storage_state.json")
+        LegacyAccountContext().scrub(tmp_path / "storage_state.json")
 
     def test_malformed_context_json_skipped(self, tmp_path):
         # Read under lock raises → debug log + return (line ~357-359).
         storage = tmp_path / "storage_state.json"
         (tmp_path / "context.json").write_text("not json", encoding="utf-8")
-        _drop_legacy_account_key(storage)  # no raise
+        LegacyAccountContext().scrub(storage)  # no raise
         assert (tmp_path / "context.json").read_text(encoding="utf-8") == "not json"
 
     def test_non_dict_or_missing_account_key_returns(self, tmp_path):
         # data is a dict but no account key → return without write (line 360-361).
         storage = tmp_path / "storage_state.json"
         (tmp_path / "context.json").write_text(json.dumps({"notebook_id": "nb"}), encoding="utf-8")
-        _drop_legacy_account_key(storage)
+        LegacyAccountContext().scrub(storage)
         assert json.loads((tmp_path / "context.json").read_text(encoding="utf-8")) == {
             "notebook_id": "nb"
         }
@@ -518,7 +501,7 @@ class TestDropLegacyAccountKey:
             json.dumps({"notebook_id": "nb", "account": {"authuser": 1}}),
             encoding="utf-8",
         )
-        _drop_legacy_account_key(storage)
+        LegacyAccountContext().scrub(storage)
         assert json.loads((tmp_path / "context.json").read_text(encoding="utf-8")) == {
             "notebook_id": "nb"
         }
@@ -528,7 +511,7 @@ class TestDropLegacyAccountKey:
         storage = tmp_path / "storage_state.json"
         context = tmp_path / "context.json"
         context.write_text(json.dumps({"account": {"authuser": 1}}), encoding="utf-8")
-        _drop_legacy_account_key(storage)
+        LegacyAccountContext().scrub(storage)
         assert not context.exists()
 
     def test_oserror_from_lock_is_swallowed(self, tmp_path, monkeypatch):
@@ -548,36 +531,10 @@ class TestDropLegacyAccountKey:
             def __exit__(self, *exc):
                 return False
 
-        monkeypatch.setattr(_auth_storage_mod, "FileLock", _BoomLock)
-        _drop_legacy_account_key(storage)  # swallows OSError, no raise
+        monkeypatch.setattr(_profile_migration, "FileLock", _BoomLock)
+        LegacyAccountContext().scrub(storage)  # swallows OSError, no raise
         # Untouched because the lock failed before any read/write.
         assert json.loads(context.read_text(encoding="utf-8")) == {"account": {"authuser": 1}}
-
-
-class TestLoadStorageStateForWrite:
-    """``_load_storage_state_for_write`` synthetic + corruption guards
-    (lines 430-433)."""
-
-    def test_missing_file_returns_synthetic_document(self, tmp_path):
-        result = _load_storage_state_for_write(tmp_path / "missing.json")
-        assert result == {"cookies": [], "origins": []}
-
-    def test_corrupt_json_raises_runtime_error(self, tmp_path):
-        storage = tmp_path / "storage_state.json"
-        storage.write_text("{not valid json", encoding="utf-8")
-        with pytest.raises(RuntimeError, match="is corrupted"):
-            _load_storage_state_for_write(storage)
-
-    def test_non_dict_shape_raises_runtime_error(self, tmp_path):
-        storage = tmp_path / "storage_state.json"
-        storage.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
-        with pytest.raises(RuntimeError, match="unexpected shape"):
-            _load_storage_state_for_write(storage)
-
-    def test_valid_dict_returned(self, tmp_path):
-        storage = tmp_path / "storage_state.json"
-        storage.write_text(json.dumps({"cookies": []}), encoding="utf-8")
-        assert _load_storage_state_for_write(storage) == {"cookies": []}
 
 
 class TestClearInBandAccount:
@@ -600,24 +557,27 @@ class TestClearInBandAccount:
         _clear_in_band_account(storage)
         assert json.loads(storage.read_text(encoding="utf-8")) == ["x"]
 
-    def test_namespace_missing_account_key_returns(self, tmp_path):
-        # namespace present but no account key → return (line 483-484).
+    def test_namespace_missing_account_key_records_clear(self, tmp_path):
         storage = tmp_path / "storage_state.json"
         storage.write_text(
             json.dumps({"cookies": [], "notebooklm": {"version": 1}}), encoding="utf-8"
         )
         _clear_in_band_account(storage)
-        # Untouched.
-        assert json.loads(storage.read_text(encoding="utf-8"))["notebooklm"] == {"version": 1}
+        assert json.loads(storage.read_text(encoding="utf-8"))["notebooklm"] == {
+            "version": 1,
+            "account_route_cleared": True,
+        }
 
-    def test_account_cleared_drops_version_only_namespace(self, tmp_path):
-        # account removed; remaining namespace is {version} → namespace dropped.
+    def test_account_clear_records_authoritative_absence(self, tmp_path):
         storage = tmp_path / "storage_state.json"
         write_account_metadata(storage, authuser=2, email="bob@example.com")
         assert "notebooklm" in json.loads(storage.read_text(encoding="utf-8"))
         _clear_in_band_account(storage)
         data = json.loads(storage.read_text(encoding="utf-8"))
-        assert "notebooklm" not in data
+        assert data["notebooklm"] == {
+            "version": 1,
+            "account_route_cleared": True,
+        }
 
     def test_account_cleared_keeps_namespace_with_extra_keys(self, tmp_path):
         # namespace carries an extra (non-version) key → namespace retained.
@@ -657,7 +617,10 @@ class TestClearAccountMetadataFacade:
 
         clear_account_metadata(storage)
 
-        assert "notebooklm" not in json.loads(storage.read_text(encoding="utf-8"))
+        assert json.loads(storage.read_text(encoding="utf-8"))["notebooklm"] == {
+            "version": 1,
+            "account_route_cleared": True,
+        }
         assert json.loads((tmp_path / "context.json").read_text(encoding="utf-8")) == {
             "notebook_id": "nb"
         }
@@ -691,8 +654,8 @@ class TestAccountEmailAndAuthuserValue:
         assert format_authuser_value() == "0"
 
 
-class TestDropLegacyMalformedUnderLock:
-    """``_drop_legacy_account_key`` malformed-read-under-lock branch (line 354)."""
+class TestLegacyScrubMalformedUnderLock:
+    """``LegacyAccountContext.scrub`` malformed-read-under-lock branch."""
 
     def test_malformed_json_under_lock_is_skipped(self, tmp_path):
         # The file exists with content that survives the first existence check
@@ -700,7 +663,7 @@ class TestDropLegacyMalformedUnderLock:
         storage = tmp_path / "storage_state.json"
         context = tmp_path / "context.json"
         context.write_text("{not valid json", encoding="utf-8")
-        _drop_legacy_account_key(storage)  # no raise
+        LegacyAccountContext().scrub(storage)  # no raise
         assert context.read_text(encoding="utf-8") == "{not valid json"
 
 
@@ -738,7 +701,7 @@ class TestWriteAccountMetadataNamespaceReplace:
         assert namespace["extra"] == "keep"
 
 
-class TestDropLegacyTocTouRecheck:
+class TestLegacyScrubTocTouRecheck:
     """Inner existence re-check return under the lock (line 354)."""
 
     def test_file_vanishes_after_lock_acquired(self, tmp_path, monkeypatch):
@@ -760,7 +723,7 @@ class TestDropLegacyTocTouRecheck:
             return original_exists(self)
 
         monkeypatch.setattr(Path, "exists", flaky_exists)
-        _drop_legacy_account_key(storage)  # returns without touching the file
+        LegacyAccountContext().scrub(storage)  # returns without touching the file
         # File is left intact because the inner re-check short-circuited.
         assert json.loads(context.read_text(encoding="utf-8")) == {"account": {"authuser": 1}}
 
@@ -769,7 +732,7 @@ class TestClearInBandLockFailure:
     """Best-effort lock-unavailable handling in ``_clear_in_band_account``.
 
     The in-band clear now delegates to ``storage.clear_in_band_account``,
-    which serializes on the unified ``storage._file_lock`` primitive. When the
+    which serializes on the unified storage lock manager. When the
     lock is unavailable the clear stays best-effort (swallows, never raises) and
     leaves the file untouched — the legacy reader still resolves the record.
     """
@@ -777,16 +740,18 @@ class TestClearInBandLockFailure:
     def test_lock_unavailable_is_swallowed(self, tmp_path, monkeypatch):
         import contextlib
 
-        from notebooklm._auth import storage as _auth_storage
+        from notebooklm._auth import profile_store as _profile_store
+        from notebooklm._auth.storage_lock import LockState
 
         storage = tmp_path / "storage_state.json"
         write_account_metadata(storage, authuser=1)
 
-        @contextlib.contextmanager
-        def unavailable_lock(lock_path, *, blocking, log_prefix):
-            yield "unavailable"
+        class UnavailableLocks:
+            @contextlib.contextmanager
+            def acquire(self, request):
+                yield LockState.UNAVAILABLE
 
-        monkeypatch.setattr(_auth_storage, "_file_lock", unavailable_lock)
+        monkeypatch.setattr(_profile_store, "_STORAGE_LOCKS", UnavailableLocks())
         # Should swallow the lock-unavailable outcome and not raise.
         _clear_in_band_account(storage)
         # File untouched because the lock was unavailable before any write.

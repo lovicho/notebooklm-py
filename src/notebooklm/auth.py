@@ -12,9 +12,8 @@ This module provides authentication utilities for the NotebookLM client:
    authenticated downloads from Google content servers.
 
 Usage:
-    # Recommended: Use AuthTokens.from_storage() for full initialization
-    auth = await AuthTokens.from_storage()
-    async with NotebookLMClient(auth) as client:
+    # Recommended: use the managed storage-backed client lifecycle
+    async with NotebookLMClient.from_storage() as client:
         ...
 
     # For authenticated artifact downloads, use the client's download methods
@@ -49,10 +48,13 @@ from ._auth import tokens as _auth_tokens
 # tests/_guardrails/test_cli_boundary.py) and as the documented programmatic
 # headless-auth surface (docs/python-api.md). Blessed in ``__all__`` below.
 #
-# #2103 PR-2 structural follow-up: the CLI now invokes whole audited
-# TRANSACTIONS (``master_token_bootstrap`` / ``master_token_remint`` /
+# #2103 PR-2 structural follow-up: the CLI invokes whole audited TRANSACTIONS
+# (``master_token_bootstrap`` / ``master_token_remint`` /
 # ``bootstrap_missing_storage_from_master_token`` / ``assert_account_writable``)
-# rather than assembling them from primitives itself. ``exchange_master_token`` /
+# rather than assembling them from primitives itself. ADR-0034 Phase 11D keeps
+# these v0.x adapters in ``_auth.master_token`` while the concrete transaction
+# owner is ``_auth.master_token_bootstrap.MasterTokenBootstrapper``.
+# ``exchange_master_token`` /
 # ``mint_cookies`` / ``persist_minted_jar`` / ``write_master_token`` /
 # ``generate_android_id`` are de-blessed accordingly (kept importable —
 # ``_AUTH_DEBLESSED_KEEP_IMPORTABLE`` — for the documented low-level recipe and
@@ -144,7 +146,6 @@ _cookie_snapshot_key_variants = _auth_storage._cookie_snapshot_key_variants
 _stored_cookie_snapshot_key = _auth_storage._stored_cookie_snapshot_key
 _file_lock = _auth_storage._file_lock
 _file_lock_exclusive = _auth_storage._file_lock_exclusive
-_FLOCK_UNAVAILABLE_WARNED = _auth_storage._FLOCK_UNAVAILABLE_WARNED
 
 REQUIRED_COOKIE_DOMAINS = _cookie_policy.REQUIRED_COOKIE_DOMAINS
 OPTIONAL_COOKIE_DOMAINS_BY_LABEL = _cookie_policy.OPTIONAL_COOKIE_DOMAINS_BY_LABEL
@@ -335,15 +336,15 @@ _REFRESH_ATTEMPTED_ENV = _auth_paths._REFRESH_ATTEMPTED_ENV
 
 
 # --- Keepalive poke ----------------------------------------------------------
-# Rotation throttle + ``RotateCookies`` POST bodies live in
-# ``notebooklm._auth.keepalive``. Re-exported here so every name that was
-# previously module-level on ``notebooklm.auth`` (constants, the per-loop /
+# Rotation policy lives in ``_auth.keepalive``; the raw wire lives in
+# ``_auth.mint_service``. This facade re-exports through keepalive so every name formerly
+# module-level on ``notebooklm.auth`` (constants, the per-loop /
 # per-profile lock registry, ``KEEPALIVE_ROTATE_URL`` (de-blessed from ``__all__``
 # in #1592 but kept importable), and white-box helpers like ``_poke_session`` /
 # ``_rotate_cookies``) keeps resolving against this module. Tests that
-# need to substitute a moved body should patch the canonical home directly
-# (``_auth.keepalive.X``) — production code no longer mirrors writes
-# (``_AuthFacadeModule`` retired per ADR-0003).
+# need to substitute policy or its import-time wire binding should patch keepalive;
+# direct ``MintService`` wire substitutions patch ``_auth.mint_service.X``. Production
+# code no longer mirrors writes (``_AuthFacadeModule`` retired per ADR-0003).
 KEEPALIVE_ROTATE_URL = _auth_keepalive.KEEPALIVE_ROTATE_URL
 _KEEPALIVE_ROTATE_HEADERS = _auth_keepalive._KEEPALIVE_ROTATE_HEADERS
 _KEEPALIVE_ROTATE_BODY = _auth_keepalive._KEEPALIVE_ROTATE_BODY

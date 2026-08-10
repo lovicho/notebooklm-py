@@ -17,6 +17,7 @@ parsing.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -25,11 +26,18 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import notebooklm.auth as auth_module
+from notebooklm._app import auth_check as auth_check_module
+from notebooklm._app import master_token as master_token_module
 from notebooklm._app.auth_check import (
     AuthCheckPlan,
     AuthCheckResult,
     run_auth_check,
 )
+from notebooklm._app.master_token import MasterTokenStatus
+
+
+class _Abort(BaseException):
+    pass
 
 
 def _plan(
@@ -378,6 +386,70 @@ async def test_master_token_present_and_account_read(tmp_path: Path) -> None:
     assert mt["present"] is True
     assert mt["account"] == "owner@gmail.com"
     assert mt["path"] == str(storage.with_name("master_token.json"))
+
+
+@pytest.mark.asyncio
+async def test_master_token_status_is_late_bound_once_and_projected_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    storage = tmp_path / "storage_state.json"
+    storage.write_text(json.dumps(_valid_storage_state()), encoding="utf-8")
+    account = {"permissive": object()}
+    calls: list[tuple[Path, bool]] = []
+
+    def inspect_status(path: Path, *, has_env_auth: bool) -> MasterTokenStatus:
+        calls.append((path, has_env_auth))
+        return MasterTokenStatus(
+            present=True,
+            path=tmp_path / "master_token.json",
+            account=account,
+            unreadable_error_type="UnicodeDecodeError",
+        )
+
+    monkeypatch.setattr(master_token_module, "inspect_master_token_status", inspect_status)
+    with caplog.at_level("DEBUG", logger=auth_check_module.__name__):
+        result = await run_auth_check(
+            _plan(storage_path=storage), read_env_auth_json=_never_read_env
+        )
+
+    assert calls == [(storage, False)]
+    assert result.details["master_token"] == {
+        "present": True,
+        "path": str(tmp_path / "master_token.json"),
+        "account": account,
+    }
+    assert "master_token.json present but unreadable: UnicodeDecodeError" in caplog.messages
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("ordinary"), asyncio.CancelledError(), _Abort("abort")]
+)
+def test_master_token_status_preserves_collaborator_error_and_scrubs_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+) -> None:
+    def fail(_path: Path, *, has_env_auth: bool) -> MasterTokenStatus:
+        assert has_env_auth is False
+        raise error
+
+    monkeypatch.setattr(master_token_module, "inspect_master_token_status", fail)
+    caught: BaseException | None = None
+    try:
+        auth_check_module._master_token_status(_plan(storage_path=tmp_path / "storage.json"))
+    except BaseException as exc:
+        caught = exc
+    assert caught is error
+    frames = []
+    traceback = caught.__traceback__
+    while traceback is not None:
+        if traceback.tb_frame.f_code.co_name == "_master_token_status":
+            frames.append(traceback.tb_frame)
+        traceback = traceback.tb_next
+    assert len(frames) == 1
+    assert "status" not in frames[0].f_locals
 
 
 @pytest.mark.asyncio

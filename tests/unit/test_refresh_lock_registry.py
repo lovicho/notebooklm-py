@@ -146,7 +146,7 @@ class TestClaimIfEpochCurrent:
             # No leader task was created, so the factory never runs.
             await asyncio.sleep(0)
             assert ran is False
-            assert _single_flight._FLIGHTS == {}
+            assert _single_flight.SingleFlight.process_default()._flights == {}
 
         asyncio.run(_run())
 
@@ -318,7 +318,7 @@ class TestPromptPopRetention:
                 # Yield so the task done-callbacks (mirror + pop) run.
                 await asyncio.sleep(0)
 
-            assert _single_flight._FLIGHTS == {}, (
+            assert _single_flight.SingleFlight.process_default()._flights == {}, (
                 "Settled flights must be popped from the process-global registry"
             )
 
@@ -352,7 +352,7 @@ class TestCrossLoopCoalescing:
             nonlocal run_count
             with run_count_lock:
                 run_count += 1
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.1)
 
         async def fake_fetch_tokens_with_jar(cookie_jar, storage_path, **kwargs):
             if not getattr(cookie_jar, "_refresh_done", False):
@@ -461,7 +461,7 @@ class TestFlockLoserWaitsThenReloads:
 
         monkeypatch.setattr(_keepalive, "_file_lock_try_exclusive", always_contended)
         # Force an already-elapsed deadline so the loop bails on the first pass.
-        monkeypatch.setattr(_keepalive._auth_storage, "_LOCK_ACQUIRE_DEADLINE_SECONDS", -1.0)
+        monkeypatch.setattr(_keepalive, "_LOCK_ACQUIRE_DEADLINE_SECONDS", -1.0)
         lock_path = tmp_path / ".storage_state.json.refresh.lock"
         assert await _auth_refresh._wait_for_refresh_holder(lock_path) is False
 

@@ -3,7 +3,8 @@
 ## Status
 
 Proposed — Stage 0 (the single RotateCookies wire contract) landed with this
-ADR; Stages 1–5 are sequenced follow-up work, each independently shippable.
+ADR and its raw wire now lives in `_auth/mint_service.py` per ADR-0034 Phase 11C;
+Stages 1–5 are sequenced follow-up work, each independently shippable.
 
 Companion to [ADR-0029](0029-canonical-storage-writer.md) (write side) and
 [ADR-0030](0030-one-recovery-ladder.md) (recovery/refresh side). Where those
@@ -70,10 +71,11 @@ different Tier-0 sources.
 Adopt the credential-tier model as the organizing principle for `_auth`, and
 introduce its objects and operations in independently shippable stages:
 
-- **Stage 0 (this PR): one RotateCookies wire contract.** The POST lives only
-  in `_auth/keepalive.py` (`_ROTATE_POST_KWARGS` + `_rotate_post` /
-  `_rotate_post_sync` / `_rotation_http_client`); the four former sites are
-  thin policy wrappers. Enforced by
+- **Stage 0, with the Phase 11C owner update: one RotateCookies wire contract.**
+  The raw URL/body/headers/kwargs and async/sync POST functions live only in
+  `_auth/mint_service.py`; `_auth/keepalive.py` imports/re-exports them and owns
+  throttle/recovery policy plus `_rotation_http_client`. The four former sites
+  remain thin policy/adapter callers. Enforced by
   `tests/_guardrails/test_rotate_wire_contract.py`.
 - **Stage 1: `CookieJar`** — one canonical cookie type
   (`_auth/cookie_types.py`, completing the `cookie_semantics` /

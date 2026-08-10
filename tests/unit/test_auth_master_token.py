@@ -13,13 +13,14 @@ import re
 import sys
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
 
 from notebooklm._auth import master_token as mt
 from notebooklm._auth.master_token import BootstrapOutcome, MasterTokenError
+from notebooklm._auth.master_token_bootstrap import MasterTokenBootstrapper
 
 _OAUTHLOGIN_RE = re.compile(r"^https://accounts\.google\.com/OAuthLogin")
 _MERGESESSION_RE = re.compile(r"^https://accounts\.google\.com/MergeSession")
@@ -310,10 +311,16 @@ async def test_bootstrap_storage_from_master_token_returns_minted(tmp_path):
     storage = tmp_path / "storage_state.json"
     (tmp_path / "master_token.json").write_text("{}", encoding="utf-8")
 
-    async def mint(storage_path):
-        storage_path.write_text(json.dumps({"cookies": []}), encoding="utf-8")
+    async def mint(bootstrapper, *, strict_loader):
+        del strict_loader
+        bootstrapper._store.path.write_text(json.dumps({"cookies": []}), encoding="utf-8")
 
-    with patch.object(mt, "remint_from_stored_token", new=AsyncMock(side_effect=mint)):
+    with patch.object(
+        MasterTokenBootstrapper,
+        "remint_from_stored_token",
+        autospec=True,
+        side_effect=mint,
+    ):
         outcome = await mt.bootstrap_storage_from_master_token(storage)
 
     assert outcome is BootstrapOutcome.MINTED
@@ -331,12 +338,19 @@ async def test_bootstrap_storage_from_master_token_returns_present_after_wait(tm
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def mint(storage_path):
+    async def mint(bootstrapper, *, strict_loader):
+        del strict_loader
+        storage_path = bootstrapper._store.path
         started.set()
         await release.wait()
         storage_path.write_text(json.dumps({"cookies": []}), encoding="utf-8")
 
-    with patch.object(mt, "remint_from_stored_token", new=AsyncMock(side_effect=mint)):
+    with patch.object(
+        MasterTokenBootstrapper,
+        "remint_from_stored_token",
+        autospec=True,
+        side_effect=mint,
+    ):
         leader = asyncio.create_task(mt.bootstrap_storage_from_master_token(storage))
         await started.wait()
         follower = asyncio.create_task(mt.bootstrap_storage_from_master_token(storage))

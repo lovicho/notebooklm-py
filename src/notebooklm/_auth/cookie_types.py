@@ -17,16 +17,15 @@ This module introduces the types those questions belong to. It completes the
 validation/normalization, :mod:`~notebooklm._auth.cookie_policy` owns which
 cookies are required and allowed, and this module owns the shape callers
 hold. (Not named ``cookie_jar`` — ``cli/services/login/cookie_jar.py`` is a
-different thing: the CLI's browser-account enumeration service.) It is deliberately
-a **wrapper, not a replacement**: every policy decision still delegates to the
-existing free function that owns it, so this stage changes no behavior and no
-public shape. ``AuthTokens`` keeps its ``cookies`` / ``cookie_jar`` field pair
+different thing: the CLI's browser-account enumeration service.) Codec work
+points down to :mod:`~notebooklm._auth.cookie_semantics`; compatibility free
+functions adapt over the same leaf rather than being imported back into this
+value module. ``AuthTokens`` keeps its ``cookies`` / ``cookie_jar`` field pair
 until ADR-0031 Stage 4.
 
 Round-tripping is lossy in one direction, by design:
-:meth:`CookieJar.from_storage_state` applies the same allowlist +
-row-sanitization filter the rest of the auth layer applies
-(:func:`notebooklm._auth.cookies._sanitized_auth_entries`), so a jar built
+:meth:`CookieJar.from_storage_state` applies the same allowlist and pure
+row-sanitization filter the rest of the auth layer applies, so a jar built
 from a storage state holds only routable, structurally valid auth rows.
 :meth:`CookieJar.to_storage_state` therefore reproduces *that filtered view*,
 not the original file. Callers persisting cookies must keep using the
@@ -36,17 +35,25 @@ deliberately does not.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
+from typing import Any, NamedTuple, cast
 
 import httpx
 
 from . import cookie_policy as _cookie_policy
-from . import cookies as _auth_cookies
+from . import cookie_semantics as _cookie_semantics
 
 
-@dataclass(frozen=True)
+class CookieIdentity(NamedTuple):
+    """RFC 6265 §5.3 cookie identity with a root-path default."""
+
+    name: str
+    domain: str
+    path: str = "/"
+
+
+@dataclass(frozen=True, slots=True, eq=False)
 class Cookie:
     """One auth cookie, keyed by its RFC 6265 §5.3 identity.
 
@@ -63,20 +70,45 @@ class Cookie:
     name: str
     domain: str
     path: str
-    value: str
+    value: str = field(repr=False)
     expires: float | int | None = None
     http_only: bool = False
     secure: bool = False
-    same_site: str | None = None
+    same_site: str | None = field(default=None, compare=False, repr=False)
 
     @property
     def identity(self) -> tuple[str, str, str]:
         """The RFC 6265 §5.3 ``(name, domain, path)`` identity."""
         return (self.name, self.domain, self.path)
 
+    @property
+    def key(self) -> CookieIdentity:
+        """Typed form of :attr:`identity` for new value-oriented code."""
+        return CookieIdentity(self.name, self.domain, self.path)
 
+    def _compared_fields(self) -> tuple[Any, ...]:
+        return (
+            self.name,
+            self.domain,
+            self.path,
+            self.value,
+            self.expires,
+            self.http_only,
+            self.secure,
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Cookie):
+            return NotImplemented
+        return self._compared_fields() == other._compared_fields()
+
+    def __hash__(self) -> int:
+        return hash(self._compared_fields())
+
+
+@dataclass(frozen=True, slots=True, init=False, repr=False, eq=False)
 class CookieJar:
-    """An ordered, immutable set of auth cookies.
+    """An ordered, immutable sequence of auth cookies.
 
     Construct through the ``from_*`` classmethods rather than ``__init__`` —
     each one routes through the conversion the auth layer already trusts for
@@ -84,10 +116,10 @@ class CookieJar:
     have filtered out.
     """
 
-    __slots__ = ("_cookies",)
+    _cookies: tuple[Cookie, ...] = field(default=(), repr=False)
 
-    def __init__(self, cookies: tuple[Cookie, ...] = ()) -> None:
-        self._cookies = tuple(cookies)
+    def __init__(self, cookies: Iterable[Cookie] = ()) -> None:
+        object.__setattr__(self, "_cookies", tuple(cookies))
 
     # -- constructors ------------------------------------------------------
 
@@ -95,35 +127,41 @@ class CookieJar:
     def from_storage_state(cls, storage_state: Mapping[str, Any]) -> CookieJar:
         """Build from a parsed Playwright ``storage_state`` mapping.
 
-        Rows are filtered and normalized by
-        :func:`notebooklm._auth.cookies._sanitized_auth_entries` — the same
-        allowlist + row-sanitization gate every other reader applies — so
-        malformed rows and non-auth domains are dropped here exactly as they
-        are everywhere else.
+        Rows pass the shared pure sanitizer and domain policy, so malformed
+        rows and non-auth domains are dropped exactly as in compatibility
+        readers. Source order and duplicate rows are retained.
         """
-        entries = _auth_cookies._sanitized_auth_entries(dict(storage_state))
-        return cls(tuple(_cookie_from_entry(entry) for entry in entries))
+        return cls(_cookie_from_entry(entry) for entry in _sanitized_auth_entries(storage_state))
 
     @classmethod
     def from_rookiepy(cls, rows: list[dict[str, Any]]) -> CookieJar:
         """Build from rookiepy's browser-extraction rows.
 
-        Delegates the snake_case → camelCase field mapping and the
-        session-cookie expiry convention to
-        :func:`notebooklm._auth.cookies.convert_rookiepy_cookies_to_storage_state`.
+        Uses the dependency-bottom snake_case → camelCase adapter and session
+        expiry convention shared by the compatibility free function.
         """
-        return cls.from_storage_state(_auth_cookies.convert_rookiepy_cookies_to_storage_state(rows))
+        converted: list[Cookie] = []
+        for row in rows:
+            try:
+                normalized = _cookie_semantics.sanitize_cookie_entry(row)
+            except _cookie_semantics.CookieRowError:
+                continue
+            if not _cookie_policy._is_allowed_auth_domain(normalized["domain"]):
+                continue
+            storage_row = _cookie_semantics.rookiepy_row_to_storage_row(normalized)
+            converted.append(
+                _cookie_from_entry(_cookie_semantics.sanitize_cookie_entry(storage_row))
+            )
+        return cls(converted)
 
     @classmethod
     def from_domain_map(cls, cookies: Any) -> CookieJar:
         """Build from any legacy cookie-map shape.
 
-        Accepts all three shapes :func:`notebooklm._auth.cookies.normalize_cookie_map`
-        accepts (path-aware 3-tuple keys, legacy 2-tuple keys, and flat
-        ``name -> value``), widening the shorter forms exactly as that function
-        does. The map shapes carry no expiry/flags, so those default.
+        Accepts path-aware three-tuple keys, legacy two-tuple keys, and flat
+        ``name -> value``. The map shapes carry no expiry/flags, so those default.
         """
-        normalized = _auth_cookies.normalize_cookie_map(cookies)
+        normalized = _cookie_semantics.normalize_legacy_cookie_map(cookies)
         return cls(
             tuple(
                 Cookie(name=name, domain=domain, path=path, value=value)
@@ -150,13 +188,11 @@ class CookieJar:
            **``same_site``-lossy — never for persistence or a save baseline.**
            ``http.cookiejar.Cookie`` cannot carry a SameSite attribute, so every
            ``Cookie`` produced here has ``same_site=None`` regardless of the
-           cookie's actual SameSite. Round-tripping this jar through
-           :meth:`to_storage_state` would drop ``sameSite`` — the exact #2150
-           downgrade. Use this only to ask read-only questions of the live
-           session (``names`` / ``validate_required`` / ``has_secondary_binding``),
-           which do not depend on SameSite. The delta/baseline machinery keeps
-           SameSite out-of-band (``storage._preserved_same_site``) and must not be
-           fed a ``from_httpx`` jar.
+           cookie's actual SameSite. It is therefore valid as a live observation
+           for pure merge decisions, whose dirtiness policy deliberately excludes
+           SameSite. Round-tripping this jar through :meth:`to_storage_state`
+           would drop ``sameSite`` — the exact #2150 downgrade — so never use it
+           as a durable save baseline or standalone document serializer.
         """
         return cls(
             tuple(
@@ -167,20 +203,38 @@ class CookieJar:
                     value=c.value,
                     expires=c.expires,
                     secure=bool(c.secure),
-                    http_only=_auth_cookies._cookie_is_http_only(c),
+                    http_only=_cookie_semantics.cookie_is_http_only(c),
                 )
                 for c in jar.jar
                 if c.name
                 and c.domain
                 and c.value is not None
-                and _auth_cookies._is_allowed_auth_domain(c.domain)
+                and _cookie_policy._is_allowed_auth_domain(c.domain)
             )
+        )
+
+    @classmethod
+    def from_live_httpx_for_merge(cls, jar: httpx.Cookies, *, include_none: bool) -> CookieJar:
+        """Project a live jar for persistence without applying domain policy."""
+        return cls(
+            Cookie(
+                name=cookie.name,
+                domain=cookie.domain,
+                path=cookie.path or "/",
+                value=cast(str, cookie.value),
+                expires=cookie.expires,
+                secure=cast(bool, cookie.secure),
+                http_only=_cookie_semantics.cookie_is_http_only(cookie),
+                same_site=None,
+            )
+            for cookie in jar.jar
+            if cookie.name and cookie.domain and (include_none or cookie.value is not None)
         )
 
     # -- converters --------------------------------------------------------
 
-    def to_domain_map(self) -> dict[tuple[str, str, str], str]:
-        """Return the path-aware ``(name, domain, path) -> value`` map.
+    def domain_map_first_wins(self) -> dict[tuple[str, str, str], str]:
+        """Project to a path-aware map with an explicit first-wins rule.
 
         First occurrence wins for a repeated identity, matching
         :func:`notebooklm._auth.cookies.extract_cookies_with_domains`.
@@ -189,6 +243,10 @@ class CookieJar:
         for cookie in self._cookies:
             result.setdefault(cookie.identity, cookie.value)
         return result
+
+    def to_domain_map(self) -> dict[tuple[str, str, str], str]:
+        """Compatibility delegate to :meth:`domain_map_first_wins`."""
+        return self.domain_map_first_wins()
 
     # NOTE: there is deliberately no ``to_flat_map`` / ``FlatCookieMap`` export.
     # Flattening to ``name -> value`` collapses the path component (#369) and
@@ -203,42 +261,60 @@ class CookieJar:
     # bytes on the wire use :meth:`to_httpx`, which is path- and domain-correct.
 
     def to_httpx(self) -> httpx.Cookies:
-        """Return a domain-preserving ``httpx.Cookies`` jar.
+        """Return a faithful domain- and attribute-preserving live jar.
 
-        Delegates to :func:`notebooklm._auth.cookies.build_cookie_jar`, the
-        single authoritative jar constructor.
+        Rows are inserted directly into the underlying stdlib jar. Exact
+        duplicate identities therefore follow its last-wins rule; path- or
+        domain-distinct siblings survive independently.
         """
-        return _auth_cookies.build_cookie_jar(cookies=self.to_domain_map())
+        jar = httpx.Cookies()
+        for cookie in self._cookies:
+            row = {
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain,
+                "path": cookie.path,
+                "expires": cookie.expires,
+                "httpOnly": cookie.http_only,
+                "secure": cookie.secure,
+            }
+            jar.jar.set_cookie(
+                _cookie_semantics.cookie_from_normalized_entry(row, http_only_key="httpOnly")
+            )
+        return jar
+
+    def to_storage_rows(self) -> list[dict[str, Any]]:
+        """Serialize the ordered typed view, retaining every source row."""
+        rows: list[dict[str, Any]] = []
+        for cookie in self._cookies:
+            rows.append(
+                _cookie_semantics.cookie_to_storage_row(
+                    cookie,
+                    http_only=cookie.http_only,
+                    same_site=cookie.same_site,
+                    include_same_site=cookie.same_site is not None,
+                )
+            )
+        return rows
 
     def to_storage_state(self) -> dict[str, Any]:
-        """Return a Playwright-shaped ``storage_state`` dict for these cookies.
+        """Compatibility projection with an empty ``origins`` list.
 
         Reproduces the jar's *filtered* view, not any original file — see the
         module docstring. ``origins`` is empty: this type models cookies only.
         """
-        rows: list[dict[str, Any]] = []
-        for c in self._cookies:
-            row: dict[str, Any] = {
-                "name": c.name,
-                "value": c.value,
-                "domain": c.domain,
-                "path": c.path,
-                "expires": -1 if c.expires is None else c.expires,
-                "httpOnly": c.http_only,
-                "secure": c.secure,
-            }
-            # Emitted only when the source row carried one, so this never
-            # invents a value the way a bare default would.
-            if c.same_site is not None:
-                row["sameSite"] = c.same_site
-            rows.append(row)
-        return {"cookies": rows, "origins": []}
+        return {"cookies": self.to_storage_rows(), "origins": []}
 
     # -- queries -----------------------------------------------------------
 
     def names(self) -> set[str]:
         """Return the set of cookie names present, on any domain."""
         return {c.name for c in self._cookies}
+
+    def _auth_material_state(self) -> dict[CookieIdentity, Cookie]:
+        """Project authentication-bearing rows by their full cookie identity."""
+        names = _cookie_policy._AUTH_MATERIAL_COOKIE_NAMES
+        return {cookie.key: cookie for cookie in self._cookies if cookie.name in names}
 
     def has_secondary_binding(self) -> bool:
         """Whether the Tier-2 binding (``OSID``, or ``APISID`` + ``SAPISID`` +
@@ -287,6 +363,22 @@ class CookieJar:
     def __repr__(self) -> str:
         """Redacted: names and count only — values are credential-equivalent."""
         return f"CookieJar({len(self._cookies)} cookies: {sorted(self.names())})"
+
+
+def _sanitized_auth_entries(storage_state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return the pure sanitized, allowlisted typed view of storage rows."""
+    raw_entries = storage_state.get("cookies", [])
+    if not isinstance(raw_entries, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for raw_entry in raw_entries:
+        try:
+            entry = _cookie_semantics.sanitize_cookie_entry(raw_entry)
+        except _cookie_semantics.CookieRowError:
+            continue
+        if _cookie_policy._is_allowed_auth_domain(entry["domain"]):
+            entries.append(entry)
+    return entries
 
 
 def _cookie_from_entry(entry: Mapping[str, Any]) -> Cookie:

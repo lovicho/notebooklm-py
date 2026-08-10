@@ -18,9 +18,9 @@ Two complementary tests guard the contract:
 1. The snapshot test (``test_*_module_has_expected_all``) pins the exact
    list, so accidental drift in shape or ordering fails loudly.
 2. The audit test (``test_*_all_matches_external_imports_audit``) AST-scans
-   ``src/``, ``tests/``, ``docs/`` for ``from notebooklm.<module> import X``
-   patterns and fails if any externally imported public name was added
-   without updating ``__all__``.
+   ``src/``, ``tests/``, ``docs/`` for direct imports and binding-aware
+   first-party ``auth.Name`` uses, then fails if any externally imported public
+   name was added without updating ``__all__``.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ import pytest
 
 import notebooklm.auth as auth_module
 import notebooklm.client as client_module
+from tests._guardrails import test_auth_storage_compatibility as _auth_compat
 from tests._guardrails._public_import_manifest import _DOCUMENTED_PUBLIC_IMPORTS
 
 pytestmark = pytest.mark.repo_lint
@@ -337,6 +338,15 @@ def _collect_external_imports_by_root() -> dict[tuple[str, str], frozenset[str]]
                     if alias.name == "*" or alias.name.startswith("_"):
                         continue
                     imports.setdefault((root, module_basename), set()).add(alias.name)
+
+    # Phase 13 app operations use the public facade as a qualified module
+    # binding (``from .. import auth; auth.Name``). Reuse the caller ledger's
+    # binding-aware, control-flow-aware detector so this liveness audit has one
+    # truth source for shadowing rather than a weaker parallel scanner.
+    qualified = _auth_compat._alias_callers(src_root / "notebooklm")
+    imports.setdefault(("src", "auth"), set()).update(
+        name for name in qualified if not name.startswith("_")
+    )
     return {key: frozenset(names) for key, names in imports.items()}
 
 
@@ -459,7 +469,7 @@ def test_auth_cross_boundary_names_stay_importable_and_unblessed() -> None:
         )
 
 
-def test_auth_cross_boundary_names_have_first_party_importers() -> None:
+def test_auth_cross_boundary_names_have_first_party_importers(tmp_path: pathlib.Path) -> None:
     """No dead entries: every cross-boundary name is really imported by ``src/``.
 
     The list is a cost, not a catalogue — each entry pins a name the auth layer
@@ -474,6 +484,66 @@ def test_auth_cross_boundary_names_have_first_party_importers() -> None:
         "Drop them from the list (they stay importable via "
         "_AUTH_DEBLESSED_KEEP_IMPORTABLE only if an external caller still needs them)."
     )
+
+    path = tmp_path / "src" / "notebooklm" / "feature" / "synthetic.py"
+    path.parent.mkdir(parents=True)
+
+    def qualified_attributes(source: str) -> set[str]:
+        old_root = _auth_compat.REPO_ROOT
+        try:
+            _auth_compat.REPO_ROOT = tmp_path
+            collector = _auth_compat._AliasUseCollector(path)
+            collector.visit(ast.parse(source))
+            return collector.attributes
+        finally:
+            _auth_compat.REPO_ROOT = old_root
+
+    recognized = qualified_attributes(
+        "import notebooklm.auth as module\n"
+        "from notebooklm import auth as absolute\n"
+        "from .. import auth as relative\n"
+        "module.AbsoluteModule\n"
+        "@absolute.Decorator\n"
+        "def outer(value: relative.Parameter = absolute.Default) -> relative.Return:\n"
+        "    if value:\n"
+        "        relative.ControlFlow\n"
+        "    def inner():\n"
+        "        return absolute.Closure\n"
+        "    return inner\n"
+    )
+    assert recognized == {
+        "AbsoluteModule",
+        "Closure",
+        "ControlFlow",
+        "Decorator",
+        "Default",
+        "Parameter",
+        "Return",
+    }
+
+    shadowed = qualified_attributes(
+        "from .. import auth as facade\n"
+        "def parameter(facade):\n    return facade.ParameterShadow\n"
+        "def assigned():\n    facade = object()\n    return facade.AssignmentShadow\n"
+        "def imported():\n    import math as facade\n    return facade.ImportShadow\n"
+        "def local_scope():\n    facade.LocalShadow\n    facade = object()\n"
+        "[facade.ComprehensionShadow for facade in values]\n"
+        "match value:\n    case facade:\n        facade.PatternShadow\n"
+        "try:\n    operation()\nexcept Exception as facade:\n    facade.ExceptionShadow\n"
+        "(facade := object()).WalrusShadow\n"
+    )
+    assert shadowed == set()
+
+    dynamic = qualified_attributes(
+        "from .. import auth as facade\n"
+        "getattr(facade, 'Getattr')\n"
+        "vars(facade)['Vars']\n"
+        "globals()['facade'].Globals\n"
+        "facade.__dict__['Dict']\n"
+        "facade['Subscript']\n"
+        "facade['Computed' + 'Key']\n"
+    )
+    assert dynamic == {"__dict__"}
 
 
 def test_auth_deblessed_names_stay_importable_but_unblessed() -> None:

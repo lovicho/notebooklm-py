@@ -120,6 +120,13 @@ _STRING_TARGET_FIXTURE = (
             "    monkeypatch.setattr(_st, '_PRIVATE_SEAM', 1)\n",
             {("storage", "_PRIVATE_SEAM")},
         ),
+        (
+            "function-local-auth-import",
+            "def test_x(monkeypatch):\n"
+            "    from notebooklm._auth import storage as local_storage\n"
+            "    monkeypatch.setattr(local_storage, 'SEAM', 1)\n",
+            {("storage", "SEAM")},
+        ),
     ],
 )
 def test_counted_shapes(script, tmp_path, label, body, expected):
@@ -201,6 +208,311 @@ def test_private_and_public_are_split(script, tmp_path):
     assert summary["TOTAL"] == {"public": 1, "private": 1, "total": 2}
 
 
+def test_real_function_local_import_sites_are_not_dropped(script):
+    sites = script.collect_sites(REPO_ROOT / "tests", REPO_ROOT / "src" / "notebooklm" / "_auth")
+    actual = {(site.path, site.module, site.attribute) for site in sites}
+    assert {
+        ("tests/unit/test_warning_dedupe.py", "profile_store", "_STORAGE_LOCKS"),
+        ("tests/unit/test_profile_atomic_write.py", "profile_store", "_STORAGE_LOCKS"),
+        ("tests/unit/test_auth_account_coverage.py", "profile_store", "_STORAGE_LOCKS"),
+    } <= actual
+    account_commit_sites = [
+        site
+        for site in sites
+        if site.path == "tests/unit/test_auth_profile_store_account.py"
+        and site.module == "profile_store"
+        and site.attribute == "_commit_profile_json"
+    ]
+    assert len(account_commit_sites) == 2
+
+
+def test_live_replacement_patch_contract_and_scorecard_are_exact(script):
+    sites = script.collect_sites(REPO_ROOT / "tests", REPO_ROOT / "src/notebooklm/_auth")
+    projection = script.build_projection(sites)
+    assert projection["summary"]["TOTAL"] == {
+        "public": 138,
+        "private": 156,
+        "total": 294,
+    }
+    relevant = {
+        (row["module"], row["attribute"], row["idiom"]): row["count"]
+        for row in projection["sites"]
+        if (row["module"], row["attribute"])
+        in {
+            ("account_email", "_write_account_metadata_if_document_unchanged"),
+            ("profile_migration", "FileLock"),
+            ("profile_migration", "atomic_write_json"),
+            ("master_token", "MasterTokenFile"),
+            ("master_token", "_bootstrapper"),
+            ("master_token", "_verify_by_listing_notebooks"),
+            ("master_token", "generate_android_id"),
+            ("master_token_file", "_commit_master_token_json"),
+            ("master_token_file", "_ensure_secure_parent_dir"),
+            ("master_token_file", "_master_token_from_legacy_record"),
+            ("master_token_file", "_master_token_to_legacy_record"),
+            ("master_token_file", "_storage_state_lock_path"),
+            ("profile_store", "MasterTokenFile"),
+            ("storage", "replace_from_remint"),
+            ("storage", "MasterTokenFile"),
+            ("storage", "write_master_token"),
+            ("storage", "ProfileStore"),
+            ("storage", "LegacyAccountMigrator"),
+            ("cookie_policy", "MINIMUM_REQUIRED_COOKIES"),
+            ("cookie_policy", "cookie_names_from_storage"),
+            ("profile_store", "_commit_profile_json"),
+            ("profile_store", "filter_storage_state_cookies_by_domain_policy"),
+            ("cookies", "build_httpx_cookies_from_storage"),
+            ("cookies", "_build_httpx_cookies_from_storage_strict"),
+            ("cookies", "_cookie_from_normalized_entry"),
+            ("cookie_semantics", "sanitize_cookie_entry"),
+            ("recovery", "_try_headless_reauth_result"),
+            ("recovery", "_try_master_token_reauth_result"),
+            ("recovery", "coalesced_cold_recovery"),
+            ("recovery", "try_headless_reauth"),
+            ("recovery", "try_master_token_reauth"),
+            ("refresh", "_fetch_tokens_with_exact_baseline"),
+            ("refresh", "_fetch_tokens_with_refresh"),
+            ("storage", "save_cookies_to_storage"),
+            ("storage", "get_account_email_for_storage"),
+            ("tokens", "_load_stored_auth"),
+            ("tokens", "resolve_auth_json_env"),
+        }
+    }
+    assert relevant == {
+        (
+            "account_email",
+            "_write_account_metadata_if_document_unchanged",
+            "monkeypatch.setattr",
+        ): 2,
+        ("profile_migration", "FileLock", "monkeypatch.setattr"): 2,
+        ("profile_migration", "atomic_write_json", "monkeypatch.setattr"): 2,
+        ("master_token", "MasterTokenFile", "monkeypatch.setattr"): 4,
+        ("master_token", "_bootstrapper", "monkeypatch.setattr"): 2,
+        ("master_token", "_verify_by_listing_notebooks", "monkeypatch.setattr"): 1,
+        ("master_token", "generate_android_id", "monkeypatch.setattr"): 1,
+        ("master_token_file", "_commit_master_token_json", "monkeypatch.setattr"): 5,
+        ("master_token_file", "_ensure_secure_parent_dir", "monkeypatch.setattr"): 3,
+        (
+            "master_token_file",
+            "_master_token_from_legacy_record",
+            "monkeypatch.setattr",
+        ): 3,
+        (
+            "master_token_file",
+            "_master_token_to_legacy_record",
+            "monkeypatch.setattr",
+        ): 2,
+        ("master_token_file", "_storage_state_lock_path", "monkeypatch.setattr"): 2,
+        ("profile_store", "MasterTokenFile", "monkeypatch.setattr"): 1,
+        ("storage", "replace_from_remint", "patch.object"): 1,
+        ("storage", "MasterTokenFile", "monkeypatch.setattr"): 1,
+        ("storage", "write_master_token", "monkeypatch.setattr"): 1,
+        ("storage", "ProfileStore", "monkeypatch.setattr"): 9,
+        ("storage", "LegacyAccountMigrator", "monkeypatch.setattr"): 3,
+        ("cookie_policy", "MINIMUM_REQUIRED_COOKIES", "monkeypatch.setattr"): 3,
+        ("cookie_policy", "cookie_names_from_storage", "monkeypatch.setattr"): 1,
+        ("profile_store", "_commit_profile_json", "monkeypatch.setattr"): 18,
+        (
+            "profile_store",
+            "filter_storage_state_cookies_by_domain_policy",
+            "monkeypatch.setattr",
+        ): 7,
+        ("cookies", "build_httpx_cookies_from_storage", "monkeypatch.setattr"): 3,
+        ("cookies", "build_httpx_cookies_from_storage", "patch.object"): 4,
+        ("cookies", "_build_httpx_cookies_from_storage_strict", "monkeypatch.setattr"): 1,
+        ("cookies", "_cookie_from_normalized_entry", "monkeypatch.setattr"): 1,
+        ("cookie_semantics", "sanitize_cookie_entry", "monkeypatch.setattr"): 1,
+        ("recovery", "_try_headless_reauth_result", "monkeypatch.setattr"): 7,
+        ("recovery", "_try_master_token_reauth_result", "monkeypatch.setattr"): 6,
+        ("recovery", "coalesced_cold_recovery", "monkeypatch.setattr"): 2,
+        ("refresh", "_fetch_tokens_with_exact_baseline", "monkeypatch.setattr"): 6,
+        ("storage", "save_cookies_to_storage", "monkeypatch.setattr"): 3,
+        ("storage", "get_account_email_for_storage", "monkeypatch.setattr"): 1,
+        ("tokens", "_load_stored_auth", "monkeypatch.setattr"): 6,
+        ("tokens", "resolve_auth_json_env", "monkeypatch.setattr"): 1,
+    }
+    grouped = {(row["module"], row["attribute"], row["idiom"]) for row in projection["sites"]}
+    assert not any(
+        row["module"] == "refresh" and row["attribute"] == "save_cookies_to_storage"
+        for row in projection["sites"]
+    )
+    assert grouped.isdisjoint(
+        {
+            ("cookies", "get_storage_path", "monkeypatch.setattr"),
+            ("master_token", "remint_from_stored_token", "patch.object"),
+            ("master_token", "mint_cookies", "patch.object"),
+            ("master_token", "persist_minted_jar", "patch.object"),
+            ("psidts_recovery", "_load_storage_state", "monkeypatch.setattr"),
+            ("storage", "clear_account_metadata", "patch.object"),
+            ("storage", "write_account_metadata", "patch.object"),
+        }
+    )
+
+
+def test_definition_headers_resolve_in_the_enclosing_scope(script, tmp_path):
+    body = (
+        "from unittest.mock import patch\n"
+        "from notebooklm._auth import storage\n"
+        "@patch.object(storage, 'SEAM')\n"
+        "def decorated(\n"
+        "    value: patch.object(storage, 'SEAM') = patch.object(storage, 'SEAM'),\n"
+        ") -> patch.object(storage, 'SEAM'):\n"
+        "    pass\n"
+        "@patch.object(storage, 'SEAM')\n"
+        "class HeaderClass(\n"
+        "    patch.object(storage, 'SEAM'),\n"
+        "    metaclass=patch.object(storage, 'SEAM'),\n"
+        "):\n"
+        "    pass\n"
+    )
+    sites = _sites(script, tmp_path, body, auth_module="storage", module_body=_MODULE_BODY)
+    assert len(sites) == 7
+    assert {(site.module, site.attribute, site.idiom) for site in sites} == {
+        ("storage", "SEAM", "patch.object")
+    }
+
+
+def test_comprehension_scope_does_not_poison_outer_alias(script, tmp_path):
+    body = (
+        "from notebooklm._auth import storage\n"
+        "[storage for storage in values]\n"
+        "monkeypatch.setattr(storage, 'SEAM', 1)\n"
+    )
+    sites = _sites(script, tmp_path, body, auth_module="storage", module_body=_MODULE_BODY)
+    assert [(site.module, site.attribute) for site in sites] == [("storage", "SEAM")]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            "from notebooklm._auth import storage\n"
+            "[monkeypatch.setattr(storage, 'SEAM', 1) for storage in values]\n"
+        ),
+        (
+            "from notebooklm._auth import storage\n"
+            "match value:\n"
+            "    case storage:\n"
+            "        monkeypatch.setattr(storage, 'SEAM', 1)\n"
+        ),
+        (
+            "from notebooklm._auth import storage\n"
+            "storage = object()\n"
+            "monkeypatch.setattr(storage, 'SEAM', 1)\n"
+        ),
+    ],
+    ids=("comprehension-capture", "match-capture", "later-rebinding"),
+)
+def test_sequential_captures_and_rebindings_are_not_false_sites(script, tmp_path, body):
+    assert _sites(script, tmp_path, body, auth_module="storage", module_body=_MODULE_BODY) == []
+
+
+def test_function_global_auth_import_resolves_inside_that_scope(script, tmp_path):
+    body = (
+        "def test_x(monkeypatch):\n"
+        "    global storage\n"
+        "    from notebooklm._auth import storage\n"
+        "    monkeypatch.setattr(storage, 'SEAM', 1)\n"
+    )
+    sites = _sites(script, tmp_path, body, auth_module="storage", module_body=_MODULE_BODY)
+    assert [(site.module, site.attribute) for site in sites] == [("storage", "SEAM")]
+
+
+def test_projection_aggregates_idiom_counts_without_paths_or_lines(script, tmp_path):
+    body = (
+        "from notebooklm._auth import storage\n"
+        "def test_x(monkeypatch):\n"
+        "    monkeypatch.setattr(storage, 'SEAM', 1)\n"
+        "    monkeypatch.setattr(storage, 'SEAM', 2)\n"
+        "    storage._PRIVATE_SEAM = 3\n"
+    )
+    sites = _sites(script, tmp_path, body, auth_module="storage", module_body=_MODULE_BODY)
+    assert script.build_projection(sites) == {
+        "version": 1,
+        "summary": {
+            "storage": {"public": 2, "private": 1, "total": 3},
+            "TOTAL": {"public": 2, "private": 1, "total": 3},
+        },
+        "sites": [
+            {
+                "module": "storage",
+                "attribute": "SEAM",
+                "idiom": "monkeypatch.setattr",
+                "count": 2,
+            },
+            {
+                "module": "storage",
+                "attribute": "_PRIVATE_SEAM",
+                "idiom": "assignment",
+                "count": 1,
+            },
+        ],
+    }
+
+
+def test_projection_bites_on_changed_idiom_and_count(script, tmp_path):
+    monkeypatch_body = (
+        "from notebooklm._auth import storage\n"
+        "def test_x(monkeypatch):\n"
+        "    monkeypatch.setattr(storage, 'SEAM', 1)\n"
+    )
+    assignment_body = "from notebooklm._auth import storage\ndef test_x():\n    storage.SEAM = 1\n"
+    doubled_monkeypatch_body = (
+        "from notebooklm._auth import storage\n"
+        "def test_x(monkeypatch):\n"
+        "    monkeypatch.setattr(storage, 'SEAM', 1)\n"
+        "    monkeypatch.setattr(storage, 'SEAM', 2)\n"
+    )
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    (tmp_path / "three").mkdir()
+    first = script.build_projection(
+        _sites(
+            script,
+            tmp_path / "one",
+            monkeypatch_body,
+            auth_module="storage",
+            module_body=_MODULE_BODY,
+        )
+    )
+    second = script.build_projection(
+        _sites(
+            script,
+            tmp_path / "two",
+            assignment_body,
+            auth_module="storage",
+            module_body=_MODULE_BODY,
+        )
+    )
+    increased_count = script.build_projection(
+        _sites(
+            script,
+            tmp_path / "three",
+            doubled_monkeypatch_body,
+            auth_module="storage",
+            module_body=_MODULE_BODY,
+        )
+    )
+    assert first != second
+    assert first["sites"] == [
+        {
+            "module": "storage",
+            "attribute": "SEAM",
+            "idiom": "monkeypatch.setattr",
+            "count": 1,
+        }
+    ]
+    assert increased_count["sites"] == [
+        {
+            "module": "storage",
+            "attribute": "SEAM",
+            "idiom": "monkeypatch.setattr",
+            "count": 2,
+        }
+    ]
+    assert increased_count != first
+
+
 def test_missing_auth_dir_is_loud_not_a_silent_zero(script, tmp_path):
     """A renamed/missing ``_auth`` must not read as "the metric went down"."""
     tests_dir = tmp_path / "tests"
@@ -215,6 +527,12 @@ def test_missing_auth_dir_is_loud_not_a_silent_zero(script, tmp_path):
 
 def test_script_parses_and_exposes_its_contract(script):
     """Guards the loader itself: the API these tests drive must exist."""
-    for name in ("collect_sites", "summarize", "main", "load_module_level_names"):
+    for name in (
+        "build_projection",
+        "collect_sites",
+        "summarize",
+        "main",
+        "load_module_level_names",
+    ):
         assert hasattr(script, name), f"{name} disappeared from the audit script"
     ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))

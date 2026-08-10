@@ -197,9 +197,10 @@ def test_no_cli_module_imports_minting_primitives() -> None:
             violations[str(module.relative_to(PROJECT_ROOT))] = found
 
     assert not violations, (
-        "cli/ must call the audited coarse ops (master_token_bootstrap / "
+        "cli/ must call the audited coarse adapters (master_token_bootstrap / "
         "master_token_remint / bootstrap_missing_storage_from_master_token / "
-        "assert_account_writable) instead of assembling minting primitives "
+        "assert_account_writable), whose coordinator owns minting composition, "
+        "instead of assembling minting primitives "
         "itself (#2103 PR-2/PR-3):\n"
         + "\n".join(f"  {path}: {names}" for path, names in violations.items())
     )

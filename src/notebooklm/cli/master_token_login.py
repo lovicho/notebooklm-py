@@ -13,14 +13,13 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from ..auth import (
+from .._app.master_token import (
     MasterTokenError,
-    assert_account_writable,
-    master_token_bootstrap,
-    master_token_remint,
-    read_master_token,
+    MasterTokenLoginPlan,
+    bootstrap_login,
+    remint_login,
 )
-from ..paths import get_storage_path, master_token_path_for
+from ..paths import get_storage_path
 from .error_handler import exit_with_code
 from .rendering import console
 from .services.login import master_token as mt_service
@@ -40,46 +39,63 @@ def run_master_token_login(
 ):
     """Bootstrap or refresh headless master-token auth (see ``login --master-token``)."""
     profile = ctx.obj.get("profile") if ctx.obj else None
-    # Canonicalize an explicit ``--storage`` exactly like the auth-source resolver
-    # does (``cli/services/auth_source.py``): a symlinked/relative alias must select
-    # the same profile as its target, or the token would be written beside the alias
-    # while the L4 recovery rung (which resolves via ``canonical_storage_key``) looks
-    # beside the real file. Profile-derived paths are already absolute.
-    storage_path = (
-        Path(storage).expanduser().resolve() if storage else get_storage_path(profile=profile)
-    )
-
+    del ctx
+    storage_path = None
+    plan = None
+    capture_oauth_token = None
+    run_async = None
+    login_result = None
+    remint_result = None
     try:
-        if refresh:
-            asyncio.run(master_token_remint(storage_path))
-            console.print(f"[green]Re-minted cookies[/green] -> {storage_path}")
-            return
-        if not account_email:
-            console.print("[red]--master-token requires --account EMAIL[/red]")
-            exit_with_code(1)
-        # Guard before the (interactive) oauth_token capture so a wrong profile
-        # fails fast instead of after a full sign-in. Advisory only — the
-        # authoritative, race-free enforcement lives under the storage-write
-        # lock inside master_token_bootstrap's persist step (#2103 PR-2 D6).
-        assert_account_writable(email=account_email, storage_path=storage_path, force=force)
-        # Cheap pre-capture probe (#2103 PR-2 D5): a malformed master_token.json
-        # fails BEFORE the ~300s interactive sign-in, not after. android_id
-        # resolution itself (explicit -> stored -> generated) now happens
-        # inside master_token_bootstrap.
-        read_master_token(master_token_path_for(storage_path))
-        token = oauth_token or mt_service.capture_oauth_token(browser=browser, cdp_url=cdp_url)
-        count = asyncio.run(
-            master_token_bootstrap(
+        # Canonicalize an explicit ``--storage`` exactly like the auth-source
+        # resolver. Profile-derived paths are already absolute.
+        storage_path = (
+            Path(storage).expanduser().resolve() if storage else get_storage_path(profile=profile)
+        )
+        run_async = asyncio.run
+        try:
+            if refresh:
+                remint_result = remint_login(storage_path, run_async=run_async)
+                console.print(f"[green]Re-minted cookies[/green] -> {remint_result.storage_path}")
+                return
+            if not account_email:
+                console.print("[red]--master-token requires --account EMAIL[/red]")
+                exit_with_code(1)
+            plan = MasterTokenLoginPlan(
                 email=account_email,
-                oauth_token=token,
                 storage_path=storage_path,
                 android_id=android_id,
                 force=force,
             )
-        )
-        console.print(
-            f"[green]Master-token login OK[/green] — {count} notebooks. Saved to {storage_path}"
-        )
-    except MasterTokenError as exc:
-        console.print(f"[red]{exc}[/red]")
-        exit_with_code(1)
+            capture_oauth_token = mt_service.capture_oauth_token
+            login_result = bootstrap_login(
+                plan,
+                oauth_token=oauth_token,
+                browser=browser,
+                cdp_url=cdp_url,
+                capture_oauth_token=capture_oauth_token,
+                run_async=run_async,
+            )
+            console.print(
+                "[green]Master-token login OK[/green] — "
+                f"{login_result.notebook_count} notebooks. Saved to {login_result.storage_path}"
+            )
+        except MasterTokenError as exc:
+            console.print(f"[red]{exc}[/red]")
+            exit_with_code(1)
+    finally:
+        del profile
+        del storage_path
+        del plan
+        del capture_oauth_token
+        del run_async
+        del login_result
+        del remint_result
+        del storage
+        del browser
+        del account_email
+        del oauth_token
+        del android_id
+        del cdp_url
+        del refresh
+        del force

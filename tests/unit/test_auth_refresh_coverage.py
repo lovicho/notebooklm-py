@@ -276,7 +276,7 @@ class TestSettleCallbackCancel:
         await started.wait()
         # Cancel the leader task directly so ``_mirror`` runs the
         # ``t.cancelled()`` branch (bridge.set_exception(CancelledError)).
-        inflight = list(_single_flight._LEADER_TASKS)
+        inflight = list(_single_flight.SingleFlight.process_default()._leader_tasks)
         assert inflight, "expected an in-flight leader task"
         for t in inflight:
             t.cancel()
