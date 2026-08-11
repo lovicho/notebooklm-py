@@ -31,6 +31,27 @@ def _args(*, skip_browser: bool) -> argparse.Namespace:
     return live_auth_matrix.parse_args(argv)
 
 
+def _interactive_args() -> argparse.Namespace:
+    return live_auth_matrix.parse_args(
+        [
+            "--profile",
+            "source",
+            "--account",
+            "maintainer@example.com",
+            "--base-url",
+            "https://notebooklm.google.com",
+            "--timeout",
+            "10",
+            "--skip-browser",
+            "--skip-rest",
+            "--skip-mcp",
+            "--include-interactive",
+            "--cdp-url",
+            "http://127.0.0.1:9222",
+        ]
+    )
+
+
 def _source_profile(tmp_path: Path) -> Path:
     source = tmp_path / "profiles" / "source"
     source.mkdir(parents=True)
@@ -81,6 +102,21 @@ def test_skip_browser_still_runs_storage_and_access_gate_cells(
         "phase_browser_mid_session",
         lambda: pytest.fail("browser refresh must be skipped"),
     )
+    monkeypatch.setattr(
+        matrix,
+        "phase_interactive_playwright_login",
+        lambda: pytest.fail("interactive Playwright login must be opt-in"),
+    )
+    monkeypatch.setattr(
+        matrix,
+        "phase_interactive_master_token_login",
+        lambda: pytest.fail("interactive master-token login must be opt-in"),
+    )
+    monkeypatch.setattr(
+        matrix,
+        "phase_interactive_cdp_master_token_login",
+        lambda: pytest.fail("interactive CDP login must be opt-in"),
+    )
     monkeypatch.setattr(matrix, "revision", lambda: "test-revision")
     monkeypatch.setattr(
         matrix,
@@ -91,6 +127,207 @@ def test_skip_browser_still_runs_storage_and_access_gate_cells(
     assert matrix.run() == 0
     capsys.readouterr()
     assert calls == list(always)
+
+
+def test_include_interactive_runs_all_human_cells_and_reports_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _source_profile(tmp_path)
+    monkeypatch.setattr(live_auth_matrix, "DEFAULT_HOME", tmp_path)
+    matrix = live_auth_matrix.Matrix(_interactive_args())
+    calls: list[str] = []
+    always = (
+        "phase_baseline",
+        "phase_master_refresh",
+        "phase_import_filter",
+        "phase_hosts",
+        "phase_rpc_bundle_health",
+        "phase_rpc_health",
+        "phase_concurrency",
+        "phase_storage_mid_session",
+        "phase_sibling_concurrent_mid_session",
+        "phase_master_token_mid_session",
+        "phase_rpc_access_gate_contract",
+        "phase_fault_injection",
+        "phase_crash_safety",
+    )
+    for name in always:
+        monkeypatch.setattr(matrix, name, lambda: None)
+    interactive = (
+        "phase_interactive_playwright_login",
+        "phase_interactive_master_token_login",
+        "phase_interactive_cdp_master_token_login",
+    )
+    for name in interactive:
+        monkeypatch.setattr(matrix, name, lambda name=name: calls.append(name))
+    monkeypatch.setattr(matrix, "revision", lambda: "test-revision")
+    monkeypatch.setattr(
+        matrix,
+        "worktree_info",
+        lambda: {"worktree_dirty": False, "worktree_diff_hash": "test"},
+    )
+
+    assert matrix.run() == 0
+    report = json.loads(capsys.readouterr().out)
+    assert calls == list(interactive)
+    assert report["interactive_cells"] == "executed"
+    assert report["interactive_cdp"] == "configured"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com:9222",
+        "http://user@127.0.0.1:9222",
+        "http://127.0.0.1:9222/json/version",
+        "http://127.0.0.1:9222?token=secret",
+        "ws://127.0.0.1:9222",
+        "http://127.0.0.1",
+    ],
+)
+def test_interactive_cdp_rejects_non_loopback_or_non_root_url(url: str) -> None:
+    with pytest.raises(SystemExit):
+        live_auth_matrix.parse_args(
+            [
+                "--account",
+                "maintainer@example.com",
+                "--include-interactive",
+                "--cdp-url",
+                url,
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--account", "maintainer@example.com", "--include-interactive"],
+        [
+            "--account",
+            "maintainer@example.com",
+            "--cdp-url",
+            "http://127.0.0.1:9222",
+        ],
+    ],
+)
+def test_interactive_mode_and_cdp_url_require_each_other(argv: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        live_auth_matrix.parse_args(argv)
+
+
+def test_interactive_login_cells_use_isolated_profiles_and_verify_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    matrix = live_auth_matrix.Matrix(_interactive_args())
+    calls: list[tuple[Path, tuple[str, ...], str | None, int | None]] = []
+
+    def fake_cli(
+        home: Path,
+        *args: str,
+        profile: str | None = None,
+        timeout: int | None = None,
+        **extra: str,
+    ) -> subprocess.CompletedProcess[str]:
+        assert not extra
+        calls.append((home, args, profile, timeout))
+        assert profile is not None
+        if args[0] == "login":
+            profile_dir = home / "profiles" / profile
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            (profile_dir / "storage_state.json").write_text('{"cookies": []}', encoding="utf-8")
+            if "--master-token" in args:
+                (profile_dir / "master_token.json").write_text(
+                    '{"master_token": "test-only"}', encoding="utf-8"
+                )
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+        return subprocess.CompletedProcess(list(args), 0, '{"status": "ok"}', "")
+
+    probes: list[str] = []
+
+    def fake_cdp_probe(name: str) -> bool:
+        probes.append(name)
+        matrix.results.append({"name": name, "status": "pass", "reachable": True})
+        return True
+
+    monkeypatch.setattr(matrix, "cli", fake_cli)
+    monkeypatch.setattr(matrix, "_record_cdp_endpoint", fake_cdp_probe)
+    try:
+        matrix.phase_interactive_playwright_login()
+        matrix.phase_interactive_master_token_login()
+        matrix.phase_interactive_cdp_master_token_login()
+    finally:
+        live_auth_matrix.shutil.rmtree(matrix.temp, ignore_errors=True)
+
+    login_calls = [call for call in calls if call[1][0] == "login"]
+    assert [call[2] for call in login_calls] == [
+        "interactive-playwright",
+        "interactive-master-token",
+        "interactive-cdp-master-token",
+    ]
+    assert all(call[3] == 390 for call in login_calls)
+    assert login_calls[0][1] == (
+        "login",
+        "--browser-timeout",
+        "360",
+        "--browser",
+        "chromium",
+    )
+    assert all(call[1][1:3] == ("--browser-timeout", "360") for call in login_calls)
+    assert "--master-token" in login_calls[1][1]
+    assert "--cdp-url" in login_calls[2][1]
+    assert login_calls[2][1][-1] == "http://127.0.0.1:9222"
+    assert probes == ["interactive-cdp-endpoint-before", "interactive-cdp-endpoint-after"]
+    assert [result["name"] for result in matrix.results] == [
+        "interactive-playwright-login",
+        "interactive-playwright-live-check",
+        "interactive-master-token-login",
+        "interactive-master-token-live-check",
+        "interactive-cdp-endpoint-before",
+        "interactive-cdp-master-token-login",
+        "interactive-cdp-master-token-live-check",
+        "interactive-cdp-endpoint-after",
+    ]
+    master_results = [
+        result
+        for result in matrix.results
+        if result["name"]
+        in {"interactive-master-token-login", "interactive-cdp-master-token-login"}
+    ]
+    assert all(result["master_token_created"] is True for result in master_results)
+    assert all(result["storage_state_created"] is True for result in master_results)
+
+
+def test_cdp_endpoint_probe_reports_reachability_without_response_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matrix = live_auth_matrix.Matrix(_interactive_args())
+    observed: dict[str, object] = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"Browser": "private-detail"}'
+
+    def fake_urlopen(url: str, *, timeout: int) -> Response:
+        observed.update(url=url, timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr(live_auth_matrix.urllib.request, "urlopen", fake_urlopen)
+    try:
+        assert matrix._record_cdp_endpoint("cdp-probe") is True
+    finally:
+        live_auth_matrix.shutil.rmtree(matrix.temp, ignore_errors=True)
+
+    assert observed == {"url": "http://127.0.0.1:9222/json/version", "timeout": 5}
+    assert matrix.results == [{"name": "cdp-probe", "status": "pass", "reachable": True}]
+    assert "private-detail" not in json.dumps(matrix.results)
 
 
 def test_storage_mid_session_cell_disables_every_external_fallback(

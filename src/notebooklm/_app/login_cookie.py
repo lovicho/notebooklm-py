@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -108,17 +108,20 @@ class StorageStateFilter(Protocol):
 
 
 class LoginWriter(Protocol):
-    """Canonical full-replacement login writer."""
+    """Native path-shaped login/import profile writer."""
 
     def __call__(
         self,
         path: Path,
-        state: dict[str, Any],
+        state: Mapping[str, Any],
         *,
         include_domains: set[str] | None,
         include_optional: bool = False,
+        account_mode: Literal["keep", "clear", "set"] = "keep",
+        account_authuser: int | None = None,
+        account_email: str | None = None,
         backup: bool = False,
-    ) -> auth.LoginWriteOutcome: ...
+    ) -> auth.ReplaceResult: ...
 
 
 class ValidateWithRecovery(Protocol):
@@ -270,7 +273,7 @@ def import_cookie_payload(
     request: CookieImportRequest,
     *,
     filter_storage_state: StorageStateFilter,
-    replace_from_login: LoginWriter,
+    replace_profile_from_login: LoginWriter,
 ) -> CookieImportSuccess | CookieImportFailure:
     """Normalize, validate, filter, and persist a cookie payload."""
     payload = storage_path = include_domains = include_optional = None
@@ -351,11 +354,12 @@ def import_cookie_payload(
             )
             return result
 
-        outcome = replace_from_login(
+        outcome = replace_profile_from_login(
             storage_path,
             sanitized_state,
             include_domains=include_domains,
             include_optional=include_optional,
+            account_mode="keep",
             backup=True,
         )
         if outcome.required_cookies_dropped:
@@ -388,7 +392,7 @@ def import_cookie_payload(
         del normalized_state, filtered_state, shaped_entries, raw_entry, raw_names
         del empty_required, sanitized_state, cookie_names, secondary_present
         del raw_cookie, sanitized, sanitized_rows, outcome, result
-        del filter_storage_state, replace_from_login
+        del filter_storage_state, replace_profile_from_login
 
 
 def project_browser_account(

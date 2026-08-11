@@ -37,6 +37,12 @@
       "module": "browser_capture"
     },
     {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "patch.object",
+      "module": "browser_capture"
+    },
+    {
       "attribute": "time",
       "count": 1,
       "idiom": "patch.object",
@@ -398,7 +404,7 @@
     },
     {
       "attribute": "LegacyAccountMigrator",
-      "count": 3,
+      "count": 1,
       "idiom": "monkeypatch.setattr",
       "module": "storage"
     },
@@ -410,7 +416,7 @@
     },
     {
       "attribute": "ProfileStore",
-      "count": 9,
+      "count": 6,
       "idiom": "monkeypatch.setattr",
       "module": "storage"
     },
@@ -439,14 +445,8 @@
       "module": "storage"
     },
     {
-      "attribute": "replace_from_remint",
-      "count": 1,
-      "idiom": "patch.object",
-      "module": "storage"
-    },
-    {
-      "attribute": "save_cookies_to_storage",
-      "count": 3,
+      "attribute": "replace_profile_from_login",
+      "count": 2,
       "idiom": "monkeypatch.setattr",
       "module": "storage"
     },
@@ -478,8 +478,8 @@
   "summary": {
     "TOTAL": {
       "private": 156,
-      "public": 138,
-      "total": 294
+      "public": 132,
+      "total": 288
     },
     "account": {
       "private": 2,
@@ -493,8 +493,8 @@
     },
     "browser_capture": {
       "private": 0,
-      "public": 2,
-      "total": 2
+      "public": 3,
+      "total": 3
     },
     "cookie_policy": {
       "private": 6,
@@ -568,8 +568,8 @@
     },
     "storage": {
       "private": 2,
-      "public": 20,
-      "total": 22
+      "public": 13,
+      "total": 15
     },
     "storage_lock": {
       "private": 1,

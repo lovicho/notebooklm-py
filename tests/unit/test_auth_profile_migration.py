@@ -35,6 +35,7 @@ from notebooklm._auth.profile_migration import (
     NoLegacyRecord,
     Promoted,
     PromotionFailed,
+    replace_profile_from_login,
 )
 from notebooklm._auth.profile_store import LoginWriteRequest, ReplaceResult, ReplaceStatus
 
@@ -473,6 +474,85 @@ def test_scheduler_worker_contains_baseexception_and_deregisters(tmp_path, caplo
         scheduler.drain(10.0)
     assert not scheduler._workers_for_tests()
     assert "Background legacy account promotion crashed for" in caplog.text
+
+
+def _login_state() -> dict[str, Any]:
+    return {
+        "cookies": [
+            {"name": "SID", "value": "sid", "domain": ".google.com", "path": "/"},
+            {
+                "name": "__Secure-1PSIDTS",
+                "value": "psidts",
+                "domain": ".google.com",
+                "path": "/",
+            },
+        ],
+        "origins": [],
+        "notebooklm": {
+            "version": 1,
+            "account": {"authuser": 9, "email": "old@example.com"},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("mode", "authuser", "email", "expected"),
+    [
+        ("keep", None, None, {"account": {"authuser": 9, "email": "old@example.com"}}),
+        ("clear", None, None, {"account_route_cleared": True}),
+        ("set", 3, None, {"account": {"authuser": 3}}),
+        ("set", 3, "new@example.com", {"account": {"authuser": 3, "email": "new@example.com"}}),
+    ],
+)
+def test_native_login_replacement_translates_primitive_account_modes(
+    tmp_path: Path,
+    mode: str,
+    authuser: int | None,
+    email: str | None,
+    expected: dict[str, object],
+) -> None:
+    path = tmp_path / mode / "storage_state.json"
+    result = replace_profile_from_login(
+        path,
+        _login_state(),
+        include_domains={"mail"},
+        include_optional=True,
+        account_mode=mode,  # type: ignore[arg-type]
+        account_authuser=authuser,
+        account_email=email,
+    )
+
+    assert result.ok
+    namespace = json.loads(path.read_text(encoding="utf-8"))["notebooklm"]
+    assert {key: namespace[key] for key in expected} == expected
+    assert namespace["include_domains"] == ["mail"]
+    assert namespace["include_optional"] is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"account_mode": "unknown"},
+        {"account_mode": "keep", "account_authuser": 1},
+        {"account_mode": "keep", "account_email": "x@example.com"},
+        {"account_mode": "clear", "account_authuser": 0},
+        {"account_mode": "clear", "account_email": "x@example.com"},
+        {"account_mode": "set"},
+        {"account_mode": "set", "account_email": "x@example.com"},
+    ],
+)
+def test_native_login_replacement_rejects_invalid_account_combinations_before_io(
+    tmp_path: Path, kwargs: dict[str, object]
+) -> None:
+    path = tmp_path / "missing" / "storage_state.json"
+    with pytest.raises(ValueError):
+        replace_profile_from_login(  # type: ignore[arg-type]
+            path,
+            _login_state(),
+            include_domains=None,
+            **kwargs,
+        )
+    assert not path.parent.exists()
 
 
 @pytest.mark.parametrize(

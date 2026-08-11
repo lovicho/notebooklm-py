@@ -373,7 +373,7 @@ async def test_legacy_success_invalidates_ready_but_failed_remains_sticky(tmp_pa
         calls += 1
         return True
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _live("new"),
         path,
         save_cookies_to_storage=writer,
@@ -386,7 +386,7 @@ async def test_legacy_success_invalidates_ready_but_failed_remains_sticky(tmp_pa
     )
 
     persistence._states[store.ordering_key].baseline = persistence_module.FailedBaseline()
-    await persistence.save(
+    await persistence._save_v0_callback(
         _live("newer"),
         path,
         save_cookies_to_storage=writer,
@@ -410,7 +410,7 @@ async def test_nondefault_legacy_override_uses_own_retryable_snapshot(tmp_path: 
         calls.append(kwargs["original_snapshot"])
         return CookieSaveResult(True)
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _live("skipped"),
         override,
         save_cookies_to_storage=writer,
@@ -418,7 +418,7 @@ async def test_nondefault_legacy_override_uses_own_retryable_snapshot(tmp_path: 
     )
     assert calls == []
     _write(override, "disk")
-    await persistence.save(
+    await persistence._save_v0_callback(
         _live("saved"),
         override,
         save_cookies_to_storage=writer,
@@ -446,7 +446,7 @@ def test_runtime_factory_keeps_raw_auth_store_and_resolved_lifecycle_target(
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_default_patched_and_custom_saver_routes(
+async def test_lifecycle_default_canonical_and_explicit_saver_routes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def legacy_jar(sid: str) -> httpx.Cookies:
@@ -471,24 +471,6 @@ async def test_lifecycle_default_patched_and_custom_saver_routes(
     canonical = AsyncMock()
     monkeypatch.setattr(persistence, "_save_canonical", canonical)
     await lifecycle.save_cookies(persistence, _live())
-    canonical.assert_awaited_once()
-
-    patched_calls: list[tuple[httpx.Cookies, set[tuple[str, str, str, str | None]]]] = []
-
-    def patched(*args: Any, **kwargs: Any) -> bool:
-        received = args[0]
-        patched_calls.append((received, rows(received)))
-        mutate_writer_copy(received)
-        return True
-
-    monkeypatch.setattr(persistence_module._auth_storage, "save_cookies_to_storage", patched)
-    patched_input = legacy_jar("patched")
-    patched_expected = rows(patched_input)
-    await lifecycle.save_cookies(persistence, patched_input)
-    assert len(patched_calls) == 1
-    assert patched_calls[0][0] is not patched_input
-    assert patched_calls[0][1] == patched_expected
-    assert rows(patched_input) == patched_expected
     canonical.assert_awaited_once()
 
     custom_calls: list[tuple[httpx.Cookies, set[tuple[str, str, str, str | None]]]] = []
@@ -553,5 +535,6 @@ async def test_file_loaded_client_registers_pair_inline_does_not_and_subclass_sk
     assert not hasattr(bare, "_collaborators")
 
 
-def test_default_saver_remains_exact_lifecycle_alias() -> None:
-    assert lifecycle_module._default_cookie_saver is persistence_module._default_cookie_saver
+def test_deleted_default_saver_is_not_reexported() -> None:
+    assert not hasattr(lifecycle_module, "_default_cookie_saver")
+    assert not hasattr(persistence_module, "_default_cookie_saver")

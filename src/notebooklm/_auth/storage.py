@@ -1,60 +1,12 @@
-"""Profile persistence for authentication: storage state, its lock, and its writers.
+"""The v0.x profile-persistence compatibility facade.
 
-This v0.x compatibility facade originated by merging three cap-split files —
-``storage.py`` (snapshot/CAS merge math + the file-lock primitive),
-``storage_writer.py`` (the canonical writer, ADR-0029), and
-``storage_transaction.py`` (the write transaction template, ADR-0031 Stage 3) —
-under ADR-0033's sanctioned-merge policy. Later phases moved concrete storage
-and migration ownership behind the signatures retained here.
-ADR-0033 PR 4.2 then relocated ``_browser_cookie_filter.py``'s write-time
-cookie-domain filter in as well — misfiled under a ``browser_`` name, but write
-policy applied by three of the writers here — retiring three more lazy imports.
-ADR-0033 PR 5.2 initially relocated the account-record persistence helpers from
-``_auth/account.py``. Phase 8 extracts their concrete two-file resolution,
-sanitization, promotion, scheduler/exit lifecycle, and sibling scrub into
-``profile_migration.py``; section 7b below now contains only the literal v0.x
-adapters and projections.
-``account.py`` keeps the NETWORK identity half (``enumerate_accounts``,
-``_probe_authuser``, page-email extraction, the routing-value formatters) and
-imports this module at module scope; the edge is now one-way.
+Concrete profile transactions live in :mod:`notebooklm._auth.profile_store`;
+legacy account composition lives in :mod:`notebooklm._auth.profile_migration`;
+and sealed commits live in :mod:`notebooklm._auth.credential_io`. This module
+retains historical signatures, result identities, lock aliases, cookie CAS
+adapters, and direct-call shims without owning a second persistence path.
 
-The file is organised in labelled sections mirroring the former modules:
-
-1. **Lock compatibility wrappers** — :func:`_file_lock` and blocking
-   :func:`_file_lock_exclusive`, routed through the dependency-bottom
-   :class:`~notebooklm._auth.storage_lock.StorageLockManager`.
-2. **Transaction compatibility aliases** — secure-parent preparation,
-   :func:`in_storage_transaction`, and its three lock-unavailable policies now
-   have their real definitions in :mod:`notebooklm._auth.profile_store`.
-4. **Snapshot types** — the path-aware cookie identity/value tuples and
-   :class:`CookieSaveResult`.
-5. **CAS + merge math** — snapshotting, the legacy and snapshot/delta merges, and
-   :func:`save_cookies_to_storage`, the ADR-0029-pinned monkeypatchable delegate
-   seam (``_runtime/lifecycle.py`` late-binds it; ~20 test files patch it).
-6. **Writer outcome types** — the value-free enums/records the intent writers
-   return.
-7. **Write-time cookie-domain compatibility aliases** — the implementation and
-   value-free malformed-row diagnostics live in the dependency-bottom
-   :mod:`notebooklm._auth.cookie_filter` leaf.
-8. **Temporary policy writers and adapters** — profile intents and the
-   master-token intent, all routed through typed owners.
-9. **Account compatibility adapters** (labelled ``SECTION 7b``) — the v0.x raw
-   signatures and result projections. The adapters construct the path-owned
-   store and concrete services from :mod:`notebooklm._auth.profile_migration`;
-   they do not own the two-read algorithm, sanitization, promotion policy,
-   scheduler/``atexit`` lifecycle, or ``context.json`` I/O.
-
-This module remains the v0.x compatibility and policy façade. The sealed
-atomic capability now lives in :mod:`notebooklm._auth.credential_io`, and
-:class:`notebooklm._auth.profile_store.ProfileStore` owns profile reads and the
-cookie transactions. :mod:`notebooklm._auth.profile_migration` owns legacy
-account resolution, promotion, lifecycle, context I/O, and post-write
-composition. The compatibility adapters below reach only the appropriate typed
-owner.
-No context lock or promotion registry state remains in this facade.
-
-Intent-shaped API (all synchronous, all serialize on the canonical storage lock,
-all write through the typed credential commit spine):
+All synchronous intents serialize through the typed credential spine:
 
 * :func:`merge_cookie_delta` — the compatibility adapter behind
   :func:`save_cookies_to_storage`. It is a **CAS** intent and therefore **fails
@@ -65,14 +17,13 @@ all write through the typed credential commit spine):
   (raises :class:`LockUnavailableError`) because failing open could overwrite a
   concurrent CAS delta; :func:`clear_in_band_account` is best-effort cleanup and
   swallows lock unavailability, matching the pre-refactor semantics.
-* :func:`replace_from_remint` — the full cookie-replace re-mint persister for the
-  BROWSER-CAPTURE arms (L3 headless-launch + interactive + CDP), relocated from
-  the bare ``atomic_write_json`` sites in :mod:`notebooklm._auth.browser_capture`.
-  The thin adapter delegates filtering, namespace carry/drop, and the bounded
-  transaction to :class:`ProfileStore`. **Fails closed** (returns
-  :class:`WriteOutcome` with ``lock_unavailable``). Closes [capture-2].
-* :func:`replace_from_login` — the login/import full-replace, whose write-time
-  domain filter and required-cookie revalidation run inside the lock.
+* :func:`replace_from_remint` — the v0.x full cookie-replace compatibility
+  wrapper. Browser capture now consumes :class:`ProfileStore`'s native
+  ``ReplaceResult`` directly; this adapter preserves the old value-free
+  :class:`WriteOutcome`. **Fails closed.**
+* :func:`replace_from_login` — the v0.x login/import compatibility wrapper. It
+  translates account sentinels to primitive directives, invokes the native
+  operation, and projects its ``ReplaceResult`` to ``LoginWriteOutcome``.
   **Fails closed.**
 * :func:`persist_minted_jar` — the master-token L4 compatibility adapter; the
   path-owned store now owns its fail-closed replacement transaction.
@@ -80,21 +31,9 @@ all write through the typed credential commit spine):
   through ``_atomic_io`` **and** guarded by a bounded sibling lock (it was
   previously lockless). **Fails closed.**
 
-Lock unification (ADR-0029) gives full-file intents a platform-neutral bounded
-acquire (90 s) while cookie CAS retains its blocking fail-open acquire.
-``StorageLockManager`` serializes threads before the OS lock using the exact raw
-lock-path spelling; the distinct rotate sentinel is never collapsed into it.
-Fail-closed writers raise public ``LockUnavailableError``, whose
-``TimeoutError``/``OSError`` ancestry preserves existing catch behavior.
-
-Permission contract (POSIX): bounded writers ensure the parent directory is
-``0700`` and typed commits write ``0600`` files. Cookie saves intentionally keep
-the manager's raw blocking-lock parent creation without an additional chmod.
-On Windows we rely on ``%USERPROFILE%`` ACL inheritance.
-
-Outcome types are **value-free by contract**: :class:`WriteOutcome` may carry
-only an enum status — never cookie values, state dicts, jar objects, or caught
-exceptions.
+Compatibility outcome types are **value-free by contract**:
+:class:`WriteOutcome` may carry only an enum status — never cookie values,
+state dicts, jar objects, or caught exceptions.
 """
 
 from __future__ import annotations
@@ -103,11 +42,11 @@ import contextlib
 import logging
 import sys as sys
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, NamedTuple, TypeAlias, cast
+from typing import Any, Literal, NamedTuple, TypeAlias, cast
 
 import httpx
 
@@ -131,11 +70,8 @@ from .master_token_file import MasterTokenFile
 from .master_token_types import MasterToken, MasterTokenError
 from .paths import resolve_auth_json_env
 from .profile_account import (
-    ClearAccount,
     DomainSelection,
-    KeepAccount,
     ProfileAccount,
-    SetAccount,
 )
 from .profile_document import ProfileDocument
 from .profile_migration import (
@@ -143,18 +79,18 @@ from .profile_migration import (
     LegacyAccount,
     LegacyAccountMigrator,
     LegacyPromotionScheduler,
-    LoginProfileWriter,
     Promoted,
+    replace_profile_from_login,
 )
 from .profile_migration import (
     _drop_legacy_account_key as _drop_legacy_account_key,
 )
 from .profile_store import (
     CookieMergeDisposition,
-    LoginWriteRequest,
     MintedSessionWriteRequest,
     ProfileStore,
     RemintWriteRequest,
+    ReplaceResult,
     ReplaceStatus,
     in_storage_transaction,
     raise_on_lock_unavailable,
@@ -324,10 +260,19 @@ class CookieSaveResult:
     cas_rejected_keys: frozenset[CookieSnapshotKey] = frozenset()
 
 
+_COOKIE_MERGE_OK_BY_DISPOSITION: dict[CookieMergeDisposition, bool] = {
+    CookieMergeDisposition.APPLIED: True,
+    CookieMergeDisposition.NO_CHANGE: True,
+    CookieMergeDisposition.CONFLICT: False,
+    CookieMergeDisposition.HARD_FAILURE: False,
+}
+assert set(_COOKIE_MERGE_OK_BY_DISPOSITION) == set(CookieMergeDisposition)
+
+
 # ==========================================================================
-# SECTION 5 — CAS + MERGE MATH (and the pinned delegate seam)
+# SECTION 5 — CAS + MERGE MATH (and the v0.x facade)
 # Snapshotting, baseline advancement, the legacy and snapshot/delta merges, and
-# ``save_cookies_to_storage`` — the ADR-0029-pinned monkeypatchable delegate.
+# ``save_cookies_to_storage`` — the ADR-0029-pinned direct-call facade.
 # ==========================================================================
 
 
@@ -509,10 +454,11 @@ def save_cookies_to_storage(
             stacklevel=2,
         )
 
-    # Canonical patch seam: the CAS delta merge body lives in
+    # Compatibility facade: the CAS delta merge body lives in
     # :func:`merge_cookie_delta` (section 5 below). This module-level
-    # ``save_cookies_to_storage`` symbol stays here as the monkeypatchable
-    # delegate (~18 test files patch it; ``_runtime/lifecycle.py`` late-binds it).
+    # ``save_cookies_to_storage`` symbol stays directly importable and may be
+    # supplied explicitly as ``NotebookLMClient(cookie_saver=...)``; normal
+    # lifecycle persistence does not late-bind or inspect it.
     # Before ADR-0033's persistence merge the delegate reached the body through a
     # function-local ``from . import storage_writer``; it is now a same-module call.
     return merge_cookie_delta(
@@ -776,6 +722,34 @@ class LoginWriteOutcome:
         return self.status is LoginWriteStatus.REQUIRED_COOKIES_DROPPED
 
 
+def _remint_required_cookies_contract_violation(_result: ReplaceResult) -> WriteOutcome:
+    raise AssertionError("replace_from_remint returned an impossible required-cookie status")
+
+
+_REMINT_RESULT_PROJECTORS: dict[ReplaceStatus, Callable[[ReplaceResult], WriteOutcome]] = {
+    ReplaceStatus.APPLIED: lambda _result: WriteOutcome(WriteStatus.OK),
+    ReplaceStatus.LOCK_UNAVAILABLE: lambda _result: WriteOutcome(WriteStatus.LOCK_UNAVAILABLE),
+    ReplaceStatus.REQUIRED_COOKIES_DROPPED: _remint_required_cookies_contract_violation,
+}
+assert set(_REMINT_RESULT_PROJECTORS) == set(ReplaceStatus)
+
+
+_LOGIN_RESULT_PROJECTORS: dict[ReplaceStatus, Callable[[ReplaceResult], LoginWriteOutcome]] = {
+    ReplaceStatus.APPLIED: lambda result: LoginWriteOutcome(
+        LoginWriteStatus.OK, backup_path=result.backup_path
+    ),
+    ReplaceStatus.LOCK_UNAVAILABLE: lambda _result: LoginWriteOutcome(
+        LoginWriteStatus.LOCK_UNAVAILABLE
+    ),
+    ReplaceStatus.REQUIRED_COOKIES_DROPPED: lambda result: LoginWriteOutcome(
+        LoginWriteStatus.REQUIRED_COOKIES_DROPPED,
+        missing_required=result.missing_required,
+        present_names=result.present_names,
+    ),
+}
+assert set(_LOGIN_RESULT_PROJECTORS) == set(ReplaceStatus)
+
+
 # ==========================================================================
 # SECTION 7 — THE INTENT WRITERS
 # The temporary v0.x policy bodies for profile and sibling credential writes.
@@ -798,8 +772,8 @@ def merge_cookie_delta(
     """CAS snapshot/delta merge of ``cookie_jar`` into ``storage_state.json``.
 
     Relocated verbatim (behaviour-preserving) from
-    ``save_cookies_to_storage``; that function remains the public,
-    monkeypatchable delegate seam. The ``original_snapshot=None`` legacy-warning
+    ``save_cookies_to_storage``; that function remains the public direct-call
+    compatibility facade. The ``original_snapshot=None`` legacy-warning
     branch stays on the delegate so its ``stacklevel`` still points at the
     caller.
 
@@ -835,7 +809,7 @@ def merge_cookie_delta(
         for identity in result.rejected
     )
     projected = CookieSaveResult(
-        result.disposition in {CookieMergeDisposition.APPLIED, CookieMergeDisposition.NO_CHANGE},
+        _COOKIE_MERGE_OK_BY_DISPOSITION[result.disposition],
         rejected,
     )
     return _cookie_save_return(projected, return_result=return_result)
@@ -1011,11 +985,7 @@ def replace_from_remint(
             domain_selection=selection,
         )
     )
-    if result.status is ReplaceStatus.APPLIED:
-        return WriteOutcome(WriteStatus.OK)
-    if result.status is ReplaceStatus.LOCK_UNAVAILABLE:
-        return WriteOutcome(WriteStatus.LOCK_UNAVAILABLE)
-    raise AssertionError("unreachable replace status")
+    return _REMINT_RESULT_PROJECTORS[result.status](result)
 
 
 # --- Login / import full-replace -------------------------------------------
@@ -1034,37 +1004,30 @@ def replace_from_login(
     io_policy: object | None = None,
 ) -> LoginWriteOutcome:
     del io_policy
-    source = ProfileDocument.decode(dict(state))
-    selection = DomainSelection(
-        include_domains=frozenset(include_domains or ()),
-        include_optional=include_optional,
-    )
-    directive: KeepAccount | SetAccount | ClearAccount
+    account_mode: Literal["keep", "clear", "set"]
     if account is KEEP_ACCOUNT:
-        directive = KeepAccount()
+        account_mode = "keep"
+        account_authuser = None
+        account_email = None
     elif isinstance(account, AccountRecord):
-        directive = SetAccount(ProfileAccount(account.authuser, account.email))
+        account_mode = "set"
+        account_authuser = account.authuser
+        account_email = account.email
     else:
-        directive = ClearAccount()
-    request = LoginWriteRequest(
-        source=source,
-        domain_selection=selection,
-        account=directive,
+        account_mode = "clear"
+        account_authuser = None
+        account_email = None
+    result = replace_profile_from_login(
+        path,
+        state,
+        include_domains=include_domains,
+        include_optional=include_optional,
+        account_mode=account_mode,
+        account_authuser=account_authuser,
+        account_email=account_email,
         backup=backup,
     )
-    store = ProfileStore(path)
-    result = LoginProfileWriter(store, LegacyAccountMigrator()).write(request)
-
-    if result.status is ReplaceStatus.LOCK_UNAVAILABLE:
-        return LoginWriteOutcome(LoginWriteStatus.LOCK_UNAVAILABLE)
-    if result.status is ReplaceStatus.REQUIRED_COOKIES_DROPPED:
-        return LoginWriteOutcome(
-            LoginWriteStatus.REQUIRED_COOKIES_DROPPED,
-            missing_required=result.missing_required,
-            present_names=result.present_names,
-        )
-
-    return LoginWriteOutcome(LoginWriteStatus.OK, backup_path=result.backup_path)
+    return _LOGIN_RESULT_PROJECTORS[result.status](result)
 
 
 # --- Master-token writers (relocated from ``master_token.py``) --------------

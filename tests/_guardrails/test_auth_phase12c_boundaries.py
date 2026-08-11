@@ -31,7 +31,7 @@ AUTH_ROOT = REPO_ROOT / "src" / "notebooklm" / "_auth"
 
 _MODULE_HASHES = {
     "account.py": "077461a8ff59a6ca94280f9c2023a72d75bee205a2bb3cd65f724c82d24e36f9",
-    "account_email.py": "24832acdcddbd7bd8f9f07aabd142bbfb2a9f9483f58cf0c1716d9dddc3951bd",
+    "account_email.py": "ef1acba0e3abab00de5ea243ab4e3f21bb53a21947dc69ab0fabfcd773fcf715",
     "account_repair.py": "4d6cd6af598c26d04bbeed07970708f587f23a24358ccd0125e5883470e8d074",
     "account_types.py": "ae645b74c6d3f46ee9532179672c90d5b690877b900120889022d32d8efa372a",
     "profile_account.py": "899baf4cc0c748740247b68c3adfa2a3754bb565b143d4a1150329a05f456ce4",
@@ -40,13 +40,13 @@ _MODULE_HASHES = {
     "keepalive.py": "505cfcf1d093d7aea2f26c2b7745a27ed8f7b51698e1bebdc3fafe4d6f78f065",
     "master_token.py": "2e1bc5d80ace5cd0cc5eddac9df54a7a33db9f33fc7b182050f6d3d94e027bd0",
     "master_token_types.py": "7ff6d938d34c22351783ba23396f2dff5403f0cc1455dd96595f0e91f3b8c863",
-    "profile_migration.py": "4b3deaf06ba7f6604edaee269992e328ae570946cc0bb522b24f83d76232c4a4",
-    "profile_store.py": "a0da35b3173b879ed687baba494d59bbee010fe8822dc6e83bfb03df3884686e",
-    "psidts_recovery.py": "0f4d9cd767343e73ec05ddcfccb3f588a432c7b7acac425852b3796f3a7b5438",
+    "profile_migration.py": "e05ab27dc40378d75323f3ffbd234861c69adbc0bf3653c13fc463f922f33b99",
+    "profile_store.py": "26d63e626a6bf5333bb5e73f371177bff7c41baa6e11206ae8fbe5151a65b793",
+    "psidts_recovery.py": "cde36fed0fcdc319a3e1d3a165c33d2a05385141b318667d4ce8c2c54ff7e51f",
     "recovery.py": "b396b441096ef4a4a961cccec8bf846eeb5aa1e11848927d1e3de8118e55e1e1",
     "refresh.py": "ab411febaecc908a4d7c2ff3b338dcefb7d979e44d1b36987a09808563ae863a",
     "single_flight.py": "8e298fe515dd667a3dfc95449165ab45345d327381951e98474aafa67510f246",
-    "storage.py": "7221b933772bd84d2dd019419920db78454f67e96f7884a01457a5f4bc7ebe01",
+    "storage.py": "ddb7e5570b921d0cea87704202dca0f21ced7d78a824ff833193b9033e609a75",
 }
 
 _NODE_HASHES = {

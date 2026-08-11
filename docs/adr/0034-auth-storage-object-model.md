@@ -184,37 +184,35 @@ Its closed results are `InBandAccount | LegacyAccount | NoAccount` and
 two-second-per-snapshot-worker exit drain; per-RPC reads never wait for the 90-second writer.
 `LoginProfileWriter` reconciles only after `APPLIED` and lock release using the literal raw-key rule;
 `AccountMetadataWriter` preserves write/clear-specific post-operation scrub and exception ordering.
-`storage.py` remains the v0.x signature/result/patch facade. Exact pins are storage 1,127,
+At that stage, `storage.py` remained the v0.x signature/result facade. Exact pins were storage 1,127,
 migration 311, store 814, filter 96, and token file 89 lines (2,425 combined).
 
 Phase 9 lands the typed stored-auth boundary in `tokens.py`: raw-profile-bearing file and captured inline sources, `LoadPolicy(allow_headless)`, paired seeds/acquisitions, final-attempt route resolution, the closed `LoadedAuth` union, and concrete `SessionSeedLoader`, `AccountRouteResolver`, and `StoredAuthLoader` around the sole structural port, `TokenAcquirer`.
 Cookie load and every refresh/recovery replacement produce one live jar plus its exact SameSite-preserving typed baseline; the initial merge advances accepted final identities, retains rejected old identities, and keeps the acquisition baseline after hard failure.
 Phase 10 makes `CookiePersistence._from_store` the first-party runtime owner: `FileLoadedAuth` registers its exact store/baseline without a reread, while direct construction prepares one disk baseline before transport and a fileless client captures only a live compatibility projection.
-Per-path `Uninitialized | ReadyBaseline | FailedBaseline` state is isolated from `_LegacySnapshotAdapter`; canonical saves are ordered typed store merges, while a custom/patched default saver remains legacy and a non-default override lazily initializes its own retryable snapshot. `ClientLifecycle` alone mirrors the loaded projection into its client-owned `AuthTokens` after open and accepted saves; `_from_store` retains no `AuthTokens`.
+Per-path `Uninitialized | ReadyBaseline | FailedBaseline` state is isolated from `_LegacySnapshotAdapter`; canonical saves are ordered typed store merges. The default route is unconditional and never inspects the public storage wrapper's identity. Only an explicit `cookie_saver=` uses `_save_v0_callback`; a non-default override lazily initializes its own retryable snapshot. `ClientLifecycle` alone mirrors the loaded projection into its client-owned `AuthTokens` after open and accepted saves; `_from_store` retains no `AuthTokens`.
+Phase 10B makes native store results load-bearing. Browser capture uses `RemintWriteRequest` and
+`ReplaceResult`; app/CLI callers use `replace_profile_from_login` with primitive account modes.
+Legacy results survive only in compatibility owners and the explicit callback adapter; exhaustive
+maps and guardrails pin every projection, exception, native caller, and named behavior test.
+The resulting graph is 41 modules / 15,898 lines / 142 edges (130 module + 12 local), with no SCC.
 Phase 11B makes `MasterTokenFile` the one-read raw/typed file owner and sole token-commit caller; 11C moves exchange/mint and the raw RotateCookies wire into `MintService`; 11D moves bootstrap/re-mint/missing-storage policy into `MasterTokenBootstrapper`. Phase 12A introduces the one-shot cold coordinator; 12B gives refresh one paired live/SameSite baseline and one typed store merge. Phase 12C completes ownership: `SingleFlight`, `ColdRecoveryState`, and `RotationState` own process state; the coordinator owns the sole L2.5/L3/L4 bodies; PSIDTS recovery uses injected pure loaders, typed document/CAS, and `ProfileStore`; dependency-bottom values own `MasterTokenError`, `Account`, and the repair result; `AccountRepairService` owns one repair. The graph is 40 modules / 15,237 lines / 128 edges (117 module + 11 local), with both SCC sets empty. Public savers, facade values/errors, module adapters, raw keepalive views, logs, traceback/error identity, cancellation, and runtime injection seams remain compatible. Phase 13D preserves that v0.x behavior while announcing the v1 removal of the two `AuthTokens` entry points that independently own storage loading; immutable specs and an import-free checker keep their warning text, targets, and callsites synchronized.
 
 The compatibility inventory is explicit:
 
 - Profile writers: `merge_cookie_delta`, `update_account_metadata`, `clear_in_band_account`, `replace_from_remint`, `replace_from_login`, `persist_minted_jar`; arbitrary: `write_master_token`.
-- Cookie adapters: public `save_cookies_to_storage`, `snapshot_cookie_jar`,
-  `advance_cookie_snapshot_after_save`, `CookiePersistence.__init__`, `CookiePersistence.capture_open_snapshot`, and `CookiePersistence.save` remain; only the private `refresh.save_cookies_to_storage` alias is retired.
+- Cookie adapters: public `save_cookies_to_storage`, snapshot helpers, and compatibility
+  constructors remain; `_save_v0_callback` isolates explicit savers. Module-identity fallback is retired.
 - Client/token seams: `NotebookLMClient.__init__(cookie_saver=...)`, `AuthTokens.__init__`, `AuthTokens.from_storage`.
 - Ladder facade: `load_auth_from_storage`, `fetch_tokens`, `fetch_tokens_passive`, `fetch_tokens_with_domains`, `validate_with_recovery`, `recover_psidts_in_memory`.
-- Account facade: `assert_account_writable`, `read_account_metadata`, `write_account_metadata`,
-  `clear_account_metadata`, `read_account_metadata_from_storage_state`,
-  `get_authuser_for_storage`, `get_account_email_for_storage`, `drop_legacy_account_key`,
-  `repair_account_metadata_from_playwright_storage`, `resolve_account_identity`.
-- Mint/token facade: `exchange_master_token`, `generate_android_id`, `mint_cookies`, `persist_minted_jar`, `read_master_token`, `write_master_token`; coarse operations:
-  `master_token_bootstrap`, `master_token_remint`, `bootstrap_missing_storage_from_master_token`.
+- Account facade: account assertions, metadata read/write/clear, route/email lookup, legacy scrub,
+  Playwright repair, and identity resolution remain compatible.
+- Mint/token facade: exchange, mint, persist, read/write, bootstrap, and re-mint operations remain.
 
-The frozen read policy is per intent: cookie merge hard-fails non-raising on missing/read/format
-input; account update creates when absent but otherwise propagates I/O/decode and wraps JSON/root
-shape; account clear is best effort for absent/OSError/JSON/non-object but propagates Unicode;
-remint replaces absent/OSError/JSON/non-object without namespace but propagates Unicode; login never
-parses the destination and backs up exact bytes before writing; minted-session creation obeys its
-under-lock owner gate, with corrupt/unknown existing owner refused by default; master-token read
-returns `None` only when absent, wraps OSError/JSON with causes, propagates Unicode, and rejects malformed records. Executable tests pin returns, exceptions/messages, logs, backup bytes, post bytes,
-and write counts.
+The frozen read policy remains per intent: cookie merge hard-fails non-raising; account update is
+fail-closed while clear is best effort; remint replaces malformed destinations; login backs up exact
+bytes without parsing the destination; minted sessions enforce their owner gate; master-token reads
+wrap I/O/JSON failures and reject malformed records. Tests pin results, errors, logs, bytes, and writes.
 
 ## Consequences
 

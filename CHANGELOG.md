@@ -23,7 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before/after live-jar invalidation) through their adapter lifespans; and
   regression-tests the access-gate routing that caused
   [#2174](https://github.com/teng-lin/notebooklm-py/issues/2174) alongside
-  [#2175](https://github.com/teng-lin/notebooklm-py/issues/2175).
+  [#2175](https://github.com/teng-lin/notebooklm-py/issues/2175). Its new opt-in
+  `--include-interactive` lane also covers ordinary headed Playwright login,
+  initial headed master-token bootstrap, and loopback CDP-attached master-token
+  capture without changing the unattended default matrix. Its configurable
+  interaction deadline is forwarded into the actual Playwright/CDP wait rather
+  than acting only as an outer subprocess timeout.
 - **Long-lived MCP and REST servers now keep cookie sessions alive and recover
   from sibling profile refreshes.** Both server adapters enable the client's
   600-second background `RotateCookies` loop for their process-lifetime client.
@@ -46,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **First-party profile replacements now use native typed results.** Browser capture consumes
+  `ProfileStore.replace_from_remint()` directly, while cookie import/login/refresh use a narrow
+  path-shaped login operation with primitive account modes. Existing v0.x storage wrapper
+  signatures, results, facade identities, and explicit `cookie_saver=` behavior are unchanged;
+  native-to-legacy projections now live only in the compatibility owner.
 - **Reading a profile's account binding no longer writes to disk.** On a
   pre-v0.5.0 two-file profile (account metadata in a sibling `context.json`),
   every read of the account binding — including the one that runs on **every
@@ -263,6 +273,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Deprecated
 
+- **The `AuthTokens` cookie compatibility views now have an explicit v1
+  runway.** Direct `flat_cookies` access emits one caller-attributed
+  `DeprecationWarning`; use `jar` for bootstrap-cookie questions and managed
+  client APIs for requests. `cookies` and `cookie_jar` are docs-only deprecated
+  so construction, repr, equality, and `dataclasses.replace()` remain quiet.
+  `jar` is the transitional shape for v1's immutable `initial_cookies` field;
+  `cookie_header` and `cookie_header_for(url)` are scheduled for v1 deletion
+  and remain warning-free through v0.x. `CookieJar` stays an ordered sequence,
+  never a Mapping or live transport jar. Suppress the direct-access warning
+  temporarily with `NOTEBOOKLM_QUIET_DEPRECATIONS=1`.
 - **`AuthTokens.from_storage(...)` is deprecated in favor of the managed client
   lifecycle.** It remains available throughout v0.x, but now emits
   `DeprecationWarning` and is scheduled for removal in v1.0. Migrate to

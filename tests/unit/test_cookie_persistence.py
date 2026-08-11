@@ -130,7 +130,7 @@ async def test_client_core_save_cookies_routes_through_injected_seam_and_to_thre
     - ``asyncio.to_thread`` is patched on its canonical importing
       module :mod:`notebooklm._runtime.lifecycle` (where
       ``ClientLifecycle.save_cookies`` sources it via
-      ``cookie_persistence.save(to_thread=asyncio.to_thread)``).
+      ``cookie_persistence._save_v0_callback(to_thread=asyncio.to_thread)``).
     """
     calls: list[str] = []
 
@@ -207,7 +207,7 @@ async def test_cookie_persistence_snapshots_on_loop_and_writes_off_thread(
 
     monkeypatch.setattr(persistence_module, "snapshot_cookie_jar", snapshot_spy)
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _jar(psidts="rotated"),
         save_cookies_to_storage=fake_save,
         to_thread=worker_to_thread,
@@ -253,7 +253,7 @@ async def test_cookie_persistence_advances_baseline_only_on_accepted_saves(
         assert return_result is True
         return results.pop(0)
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _jar(sid="sid-silent", psidts="psidts-silent"),
         save_cookies_to_storage=fake_save,
         to_thread=inline_to_thread,
@@ -262,7 +262,7 @@ async def test_cookie_persistence_advances_baseline_only_on_accepted_saves(
     assert persistence.loaded_cookie_snapshot is baseline
     assert auth.cookie_snapshot is baseline
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _jar(sid="sid-accepted", psidts="psidts-rejected"),
         save_cookies_to_storage=fake_save,
         to_thread=inline_to_thread,
@@ -273,7 +273,7 @@ async def test_cookie_persistence_advances_baseline_only_on_accepted_saves(
     assert persistence.loaded_cookie_snapshot[sid_key].value == "sid-accepted"
     assert persistence.loaded_cookie_snapshot[psidts_key].value == "psidts-old"
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _jar(sid="sid-final", psidts="psidts-final"),
         save_cookies_to_storage=fake_save,
         to_thread=inline_to_thread,
@@ -351,7 +351,7 @@ async def test_alternating_default_and_override_saves_keep_independent_baselines
         calls.append((path, original_snapshot))
         return True
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _jar(sid="a1", psidts="a-psidts"),
         save_cookies_to_storage=fake_save,
         to_thread=_inline_to_thread,
@@ -359,7 +359,7 @@ async def test_alternating_default_and_override_saves_keep_independent_baselines
     baseline_a1 = persistence.loaded_cookie_snapshot
     assert baseline_a1 is not None and baseline_a1 is auth.cookie_snapshot
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _jar(sid="b1", psidts="b-psidts"),
         path_b,
         save_cookies_to_storage=fake_save,
@@ -370,7 +370,7 @@ async def test_alternating_default_and_override_saves_keep_independent_baselines
     assert persistence.loaded_cookie_snapshot is baseline_a1
     assert auth.cookie_snapshot is baseline_a1
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _jar(sid="a2", psidts="a-psidts"),
         save_cookies_to_storage=fake_save,
         to_thread=_inline_to_thread,
@@ -427,7 +427,7 @@ async def test_alias_spellings_share_baseline_but_writer_receives_each_raw_path(
         (resolved_path, "resolved"),
         (symlink_path, "symlink"),
     ):
-        await persistence.save(
+        await persistence._save_v0_callback(
             _jar(sid=sid),
             raw_path,
             save_cookies_to_storage=fake_save,
@@ -474,7 +474,7 @@ async def test_override_initialization_occurs_in_worker_under_save_lock(tmp_path
         observed.append(original_snapshot)
         return CookieSaveResult(True)
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _jar(sid="memory"),
         override_path,
         save_cookies_to_storage=fake_save,
@@ -566,7 +566,7 @@ async def test_override_initialization_failures_are_non_apply_and_retryable(
         return CookieSaveResult(True)
 
     with caplog.at_level("WARNING", logger="notebooklm.auth"):
-        await persistence.save(
+        await persistence._save_v0_callback(
             _jar(sid="memory"),
             override_path,
             save_cookies_to_storage=fake_save,
@@ -589,7 +589,7 @@ async def test_override_initialization_failures_are_non_apply_and_retryable(
             _stored_cookie("__Secure-1PSIDTS", "psidts"),
         ],
     )
-    await persistence.save(
+    await persistence._save_v0_callback(
         _jar(sid="after-repair"),
         override_path,
         save_cookies_to_storage=fake_save,
@@ -653,7 +653,7 @@ async def test_override_loader_skips_opaque_rows_and_real_writer_preserves_them(
         domain=".notebook.google.com",
         path="/",
     )
-    await persistence.save(
+    await persistence._save_v0_callback(
         jar,
         override_path,
         save_cookies_to_storage=recording_real_writer,

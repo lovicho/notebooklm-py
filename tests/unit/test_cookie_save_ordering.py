@@ -142,10 +142,10 @@ async def test_newer_first_run_drops_older_worker(tmp_path: Path) -> None:
     collector = _Collector()
 
     # Dispatch older (seq 0) then newer (seq 1) — dispatch order stamps the seq.
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("old"), path, save_cookies_to_storage=recorder, to_thread=collector
     )
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("new"), path, save_cookies_to_storage=recorder, to_thread=collector
     )
 
@@ -169,10 +169,10 @@ async def test_older_first_then_newer_both_apply(tmp_path: Path) -> None:
     recorder = _Recorder()
     collector = _Collector()
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("old"), path, save_cookies_to_storage=recorder, to_thread=collector
     )
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("new"), path, save_cookies_to_storage=recorder, to_thread=collector
     )
 
@@ -193,10 +193,10 @@ async def test_newer_hard_fail_lets_older_proceed(tmp_path: Path) -> None:
     recorder = _Recorder(results={"new": CookieSaveResult(False)})
     collector = _Collector()
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("old"), path, save_cookies_to_storage=recorder, to_thread=collector
     )
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("new"), path, save_cookies_to_storage=recorder, to_thread=collector
     )
 
@@ -217,10 +217,10 @@ async def test_newer_cas_partial_drops_older_worker(tmp_path: Path) -> None:
     recorder = _Recorder(results={"new": CookieSaveResult(False, rejected)})
     collector = _Collector()
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("old"), path, save_cookies_to_storage=recorder, to_thread=collector
     )
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("new"), path, save_cookies_to_storage=recorder, to_thread=collector
     )
 
@@ -242,10 +242,10 @@ async def test_ordering_is_keyed_per_effective_path(tmp_path: Path) -> None:
     collector = _Collector()
 
     # Older dispatch targets path A (seq 0); newer targets path B (seq 1).
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("A"), path_a, save_cookies_to_storage=recorder, to_thread=collector
     )
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("B"), path_b, save_cookies_to_storage=recorder, to_thread=collector
     )
 
@@ -283,7 +283,7 @@ async def test_bool_and_detailed_results_update_only_the_target_path(
     recorder = _Recorder(results={"next": result})
     collector = _Collector()
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("next"),
         target_path,
         save_cookies_to_storage=recorder,
@@ -335,7 +335,7 @@ async def test_override_cas_partial_advances_accepted_keys_without_touching_defa
         if cookie.name == "SID":
             cookie.value = "b1"
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         jar,
         path_b,
         save_cookies_to_storage=recorder,
@@ -367,13 +367,13 @@ async def test_alias_order_key_drops_stale_worker_and_preserves_raw_writer_path(
     recorder = _Recorder()
     collector = _Collector()
 
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("old"),
         relative_path,
         save_cookies_to_storage=recorder,
         to_thread=collector,
     )
-    await persistence.save(
+    await persistence._save_v0_callback(
         _tagged_jar("new"),
         symlink_path,
         save_cookies_to_storage=recorder,

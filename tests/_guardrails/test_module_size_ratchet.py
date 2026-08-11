@@ -269,7 +269,11 @@ ALLOWLISTED_CEILINGS: dict[str, int] = {
     # RATCHETED DOWN 1150 -> 1131 by ADR-0034 PR11B: token credential
     # encoding, secure-parent preparation, lock ownership, and commit moved to
     # the path-owned ``MasterTokenFile``.
-    "_auth/storage.py": 1127,
+    # RATCHETED DOWN 1127 -> 1090 by #2172 B3: first-party login/remint callers
+    # moved to native results, and the remaining projections were isolated as
+    # exhaustive v0.x compatibility maps while historical module prose moved to
+    # the architecture docs.
+    "_auth/storage.py": 1090,
     # sanctioned merge (ADR-0033) — the `_auth` load-composition merge:
     # ``_auth/browser_cookie_recovery.py`` (142) was absorbed in full and reduced
     # to a re-export shim in the same change. It held the captured-cookie
@@ -294,7 +298,9 @@ ALLOWLISTED_CEILINGS: dict[str, int] = {
     # needs an ADR-0033 amendment — the template-adoption class does not reach
     # new structure. A call-time ``heal`` seam already exists on
     # ``load_with_recovery`` / ``load_session_jar`` as the first step.
-    "_auth/psidts_recovery.py": 1222,
+    # RATCHETED DOWN 1222 -> 1214 by #2172 B3: stale compatibility-result prose
+    # now describes the native CookieMergeResult actually consumed here.
+    "_auth/psidts_recovery.py": 1214,
     # sanctioned merge (ADR-0033) — the `_auth` token-route fold: ``_auth/headers.py``
     # (68 lines, one function — ``_resolve_token_route_kwargs`` — whose only three
     # call sites are the token-fetch entry points here) was absorbed in full and
@@ -325,7 +331,10 @@ ALLOWLISTED_CEILINGS: dict[str, int] = {
     # Pinned at its MEASURED post-merge LOC (a sanctioned entry is a pin, not a
     # budget: shrink-locked from here on, and the plan schedules no further growth
     # of this module).
-    "_auth/browser_capture.py": 1251,
+    # RATCHETED DOWN 1251 -> 1225 by #2172 B3: capture now consumes native
+    # ReplaceResult directly and duplicated historical module prose was folded
+    # into the architecture documentation.
+    "_auth/browser_capture.py": 1225,
     # ``mcp/tools/sources.py`` was allowlisted at 1020 (over the 1000-line budget after
     # #1871's shared source-policy wiring + the await_upload era). #1890 folded
     # source_add_and_wait + source_upload_bytes BACK into source_add — removing the two
@@ -533,15 +542,15 @@ def test_credential_store_and_migration_modules_use_the_ordinary_budget() -> Non
     assert {path: measured[path] for path in leaves} == {
         "_auth/credential_io.py": 23,
         "_auth/master_token_file.py": 89,
-        "_auth/profile_migration.py": 375,
-        "_auth/profile_store.py": 864,
+        "_auth/profile_migration.py": 419,
+        "_auth/profile_store.py": 876,
     }
     assert (
         measured["_auth/storage.py"]
         + measured["_auth/profile_store.py"]
         + measured["_auth/cookie_filter.py"]
         + measured["_auth/profile_migration.py"]
-        == 2462
+        == 2481
     )
     synthetic = dict.fromkeys(leaves, MODULE_SIZE_BUDGET + 1)
     assert _over_budget_offenders(synthetic, {}, MODULE_SIZE_BUDGET) == synthetic
@@ -559,18 +568,18 @@ def test_phase_11d_bootstrap_extraction_modules_are_measured_exactly() -> None:
     } == {
         "_auth/master_token.py": 455,
         "_auth/master_token_bootstrap.py": 373,
-        "_auth/storage.py": 1127,
+        "_auth/storage.py": 1090,
     }
 
 
 def test_phase_13_caller_cleanup_modules_are_measured_exactly() -> None:
     measured = _measure_all()
     expected = {
-        "_app/login_cookie.py": 533,
-        "_app/master_token.py": 216,
+        "_app/login_cookie.py": 537,
+        "_app/master_token.py": 223,
         "_app/profile.py": 355,
         "cli/_cookie_import.py": 153,
-        "cli/master_token_login.py": 101,
+        "cli/master_token_login.py": 104,
         "cli/playwright_login_io.py": 254,
         "cli/profile_cmd.py": 436,
         "cli/services/auth_refresh.py": 21,
@@ -580,6 +589,6 @@ def test_phase_13_caller_cleanup_modules_are_measured_exactly() -> None:
         "cli/services/login/cookie_jar.py": 244,
         "cli/services/login/master_token.py": 152,
         "cli/services/login/profile_targets.py": 150,
-        "cli/services/playwright_login.py": 539,
+        "cli/services/playwright_login.py": 542,
     }
     assert {path: measured[path] for path in expected} == expected

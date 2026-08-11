@@ -32,7 +32,8 @@ tests/integration/concurrency/test_refresh_cancellation_propagation.py):
   ``auth.session_id`` under the snapshot lock. It does NOT touch the
   http client. The cookie-jar sync is a separate concern handled by
   :meth:`update_auth_headers` (sync, no await — it runs the
-  ``kernel.get_http_client().cookies`` read outside any auth lock).
+  ``kernel.cookies`` read outside any auth lock). That sync is public
+  compatibility-only; first-party decisions already read the kernel jar.
 * The ``_refresh_task`` slot is intentionally NOT cleared when a waiter is
   cancelled mid-shield — concurrency tests assert task identity across
   cancellation so siblings joined to the same single-flight refresh see the
@@ -341,7 +342,7 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
             lock.release()
 
     def update_auth_headers(self, *, auth: AuthTokens, kernel: Kernel) -> None:
-        """Sync ``auth.cookie_jar`` with the live HTTP client's jar.
+        """Update public AuthTokens cookie shadows from the kernel-owned jar.
 
         Compat-only (ADR-0032 Phase A): the kernel's jar is already the sole
         internal live-cookie authority — persistence reads ``kernel.cookies``
@@ -361,13 +362,14 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
         coordinator does not need an owner-shaped host.
 
         Raises:
-            RuntimeError: If the kernel's HTTP client is not initialised (the
-                error originates from :meth:`Kernel.get_http_client`).
+            RuntimeError: If a directly constructed kernel has neither an auth
+                bootstrap seed nor an initialized HTTP client.
         """
-        # Rebinds the derived ``auth.cookies`` map alongside the jar. Assigning
-        # ``auth.cookie_jar`` directly here left the public ``auth.cookies``
-        # describing the pre-refresh session (ADR-0031 Stage 4).
-        auth.replace_cookie_jar(kernel.get_http_client().cookies)
+        # Compatibility-only assignment (ADR-0032 Phase A). Rebind the derived
+        # public map alongside the public jar; no first-party request, routing,
+        # recovery, or persistence decision reads either shadow after the
+        # bootstrap hand-off to Kernel.
+        auth.replace_cookie_jar(kernel.cookies)
 
     # ------------------------------------------------------------------
     # Single-flight refresh task.

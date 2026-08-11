@@ -1,21 +1,8 @@
-"""Session and context management CLI commands.
+"""Session, login, context, and authentication-management CLI commands.
 
-Commands:
-    login   Log in to NotebookLM via browser
-    use     Set the current notebook context
-    status  Show current context
-    clear   Clear current notebook context
-    auth    Authentication management (logout / inspect / check / refresh)
-
-This module is split into thin Click handlers over service modules for
-Playwright login, browser-cookie login/refresh, session context,
-auth diagnostics, and auth-source precedence. Command-side wrappers in
-:mod:`notebooklm.cli.playwright_login_io` provide the concrete rendering,
-exit, and async-runner seams for the Playwright and browser-cookie login
-services.
-
-Body-used names that moved into services are re-imported here as command-layer
-bindings and legacy patch seams.
+Thin Click handlers delegate to service modules; command-side wrappers provide
+rendering, exit, and async-runner seams. Re-imported service names preserve the
+legacy command-layer patch surfaces.
 """
 
 from __future__ import annotations
@@ -136,6 +123,7 @@ def _run_playwright_login(
     browser_profile: Path,
     storage_path: Path,
     include_domains: set[str] | None = None,
+    browser_timeout: int = 300,
 ) -> None:
     """Backward-compat wrapper around :func:`run_login`."""
     plan = PlaywrightLoginPlan(
@@ -143,6 +131,7 @@ def _run_playwright_login(
         browser_profile=browser_profile,
         storage_path=storage_path,
         include_domains=include_domains,
+        login_timeout_s=browser_timeout,
     )
     run_login(plan)
 
@@ -181,6 +170,13 @@ def register_session_commands(cli):
             "Use 'chrome' for system Google Chrome (workaround when bundled "
             "Chromium crashes, e.g. macOS 15+), 'msedge' for Microsoft Edge."
         ),
+    )
+    @click.option(
+        "--browser-timeout",
+        type=click.IntRange(min=1),
+        default=300,
+        show_default=True,
+        help="Seconds to wait for a human to complete browser sign-in.",
     )
     @click.option(
         "--browser-cookies",
@@ -311,6 +307,7 @@ def register_session_commands(cli):
         ctx,
         storage,
         browser,
+        browser_timeout,
         browser_cookies,
         account_email,
         all_accounts,
@@ -359,6 +356,7 @@ def register_session_commands(cli):
                         ctx,
                         storage=storage,
                         browser=browser,
+                        browser_timeout=browser_timeout,
                         account_email=account_email,
                         oauth_token=oauth_token,
                         android_id=android_id,
@@ -417,13 +415,14 @@ def register_session_commands(cli):
                     browser_profile=browser_profile,
                     storage_path=storage_path,
                     include_domains=include_domains,
+                    browser_timeout=browser_timeout,
                 )
                 console.print(f"\n[green]Authentication saved to:[/green] {storage_path}")
 
                 # Keep the local language in sync with the server (fixes #121).
                 _sync_server_language_to_config(storage_path=storage_path, profile=profile)
         finally:
-            del ctx, storage, browser, browser_cookies, account_email
+            del ctx, storage, browser, browser_timeout, browser_cookies, account_email
             del all_accounts, update, profile_name, fresh, include_domains_raw
             del master_token, master_token_refresh, oauth_token, android_id, cdp_url, force
             del run_master_token_login, include_domains, active_profile, confirm_overwrite

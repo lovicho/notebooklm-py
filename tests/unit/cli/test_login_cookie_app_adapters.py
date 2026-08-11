@@ -9,7 +9,7 @@ import click
 import pytest
 
 import notebooklm.auth as auth
-from notebooklm._app.login_cookie import Account
+from notebooklm._app.login_cookie import Account, CookieImportSuccess
 from notebooklm.cli import _cookie_import
 from notebooklm.cli.services.login import (
     browser_accounts,
@@ -39,6 +39,25 @@ def test_import_adapter_maps_neutral_failure_without_context(tmp_path: Path) -> 
         )
     assert "Cookie JSON must be" in str(caught.value)
     assert caught.value.__cause__ is None
+
+
+def test_import_adapter_injects_native_login_operation(tmp_path: Path) -> None:
+    persisted = {"cookies": []}
+
+    def import_payload(request, **dependencies):
+        assert dependencies["replace_profile_from_login"] is auth.replace_profile_from_login
+        return CookieImportSuccess(persisted, None)
+
+    with patch.object(_cookie_import, "import_cookie_payload", side_effect=import_payload):
+        state, backup_path = _cookie_import._import_cookie_json(
+            payload=[],
+            storage_path=tmp_path / "state.json",
+            include_domains=set(),
+            include_optional=False,
+        )
+
+    assert state is persisted
+    assert backup_path is None
 
 
 def test_domain_adapters_preserve_mutable_and_frozen_shapes() -> None:
@@ -213,7 +232,7 @@ def test_import_callback_base_exception_scrubs_app_and_cli_frames(
                 "payload",
                 "normalized_state",
                 "filter_storage_state",
-                "replace_from_login",
+                "replace_profile_from_login",
                 "result",
             ):
                 assert name not in current.tb_frame.f_locals

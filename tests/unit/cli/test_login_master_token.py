@@ -192,7 +192,9 @@ def test_master_token_bootstrap_browser_capture_when_no_oauth(tmp_path, monkeypa
 
     def bootstrap(plan, **kwargs):
         token = kwargs["oauth_token"] or kwargs["capture_oauth_token"](
-            browser=kwargs["browser"], cdp_url=kwargs["cdp_url"]
+            browser=kwargs["browser"],
+            cdp_url=kwargs["cdp_url"],
+            timeout_s=kwargs["timeout_s"],
         )
         assert token == "CAPTOK"
         return MasterTokenLoginSuccess(3, plan.storage_path)
@@ -201,11 +203,23 @@ def test_master_token_bootstrap_browser_capture_when_no_oauth(tmp_path, monkeypa
         patch.object(mt_service, "capture_oauth_token", return_value="CAPTOK") as cap,
         patch.object(driver, "bootstrap_login", side_effect=bootstrap) as boot,
     ):
-        result = CliRunner().invoke(cli, ["login", "--master-token", "--account", "e@x.com"])
+        result = CliRunner().invoke(
+            cli,
+            [
+                "login",
+                "--master-token",
+                "--account",
+                "e@x.com",
+                "--browser-timeout",
+                "420",
+            ],
+        )
     assert result.exit_code == 0, result.output
     assert cap.called
     assert boot.call_args.kwargs["oauth_token"] is None
+    assert boot.call_args.kwargs["timeout_s"] == 420
     assert boot.call_args.kwargs["capture_oauth_token"] is cap
+    cap.assert_called_once_with(browser="chromium", cdp_url=None, timeout_s=420)
 
 
 @pytest.mark.parametrize(

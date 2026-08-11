@@ -61,14 +61,14 @@ intent-shaped, all-synchronous API: `merge_cookie_delta` (CAS delta merge),
 `update_account_metadata` / `clear_in_band_account` (in-band account), and
 `persist_minted_jar` / `write_master_token` (master-token).
 
-### Patch-seam continuity
+### Compatibility-facade continuity
 
-`_auth/storage.py` keeps `save_cookies_to_storage` as the importable,
-monkeypatchable delegate that forwards to `storage_writer.merge_cookie_delta`
-(the pattern of ADR-0017). `_runtime/lifecycle.py` late-binds it and ~18 test
-files patch it, so the seam does not move. The CAS math helpers
+`_auth/storage.py` keeps `save_cookies_to_storage` as the directly importable
+v0.x facade that forwards to the native cookie merge. Hosts that need the
+callback contract pass it explicitly through `NotebookLMClient(cookie_saver=...)`;
+the normal lifecycle route is an unconditional typed `ProfileStore` merge and
+does not late-bind or inspect the facade symbol. The CAS math helpers
 (`_merge_cookies_with_snapshot`, snapshot/baseline helpers, `CookieSaveResult`)
-and the `_file_lock` primitive stay in `storage.py`; the writer imports them.
 
 ### One lock, unified and bounded
 
@@ -107,12 +107,15 @@ gap.
 
 ### Value-free outcomes
 
-`WriteOutcome` carries only an enum status — never cookie values, jars, state
-dicts, or caught exceptions — so it is always safe to `repr`/log.
+The v0.x `WriteOutcome` carries only an enum status — never cookie values, jars,
+state dicts, or caught exceptions — so it is always safe to `repr`/log. First-party
+browser capture consumes the equally value-free native `ReplaceResult`; the legacy
+outcome is projected only inside the compatibility wrapper.
 
 ### Save-ordering ("close() must win", per client instance)
 
-`CookiePersistence.save()` stamps each dispatch from `itertools.count()`
+`CookiePersistence._save_v0_callback()` stamps each explicit callback dispatch from
+`itertools.count()`
 (`__next__` is GIL-atomic — the fix does not rest on the one-loop-per-client
 contract). Under the save lock a worker drops itself if its sequence is older
 than the newest sequence that already applied a merge to the same effective
@@ -151,14 +154,15 @@ during the migration window.
 
 ### Login / import full-replace intent (b-PR3)
 
-`replace_from_login` is the single sanctioned persist for the CLI
-`login --browser-cookies`, `auth refresh --browser-cookies`, and
-`auth import-cookies` flows. Under the storage lock it applies the write-time
+The native `profile_migration.replace_profile_from_login` operation is the sanctioned persist for
+the CLI `login --browser-cookies`, `auth refresh --browser-cookies`, and
+`auth import-cookies` flows. The v0.x `storage.replace_from_login` wrapper delegates to that
+operation and preserves its old signature and result. Under the storage lock the native path applies the write-time
 domain filter, re-validates `MINIMUM_REQUIRED_COOKIES` on the FILTERED state
-(returning a value-free `LoginWriteOutcome(required_cookies_dropped, …)` — mapping
-to #2086's `CookieValidationFailure(COOKIE_VALIDATION_FAILED)` / `io.fail(1)` /
-not-exists contract), embeds/clears the in-band `notebooklm.account` binding via
-an `account` sentinel (`KEEP_ACCOUNT` | `CLEAR_ACCOUNT` | `AccountRecord`),
+(returning a value-free `ReplaceResult`; the wrapper projects this to the historical
+`LoginWriteOutcome` and #2086 failure contract), embeds/clears the in-band
+`notebooklm.account` binding through a primitive keep/clear/set directive (the compatibility
+wrapper translates `KEEP_ACCOUNT` | `CLEAR_ACCOUNT` | `AccountRecord`),
 records the `include_domains` opt-in set in the namespace, and (import flavour)
 takes the pre-overwrite `.bak` backup INSIDE the lock.
 
@@ -182,9 +186,9 @@ requirement — the reader retries regardless). `drop_legacy_account_key` is
 consequently no longer imported by any
 first-party caller; it remains importable from `notebooklm.auth` for
 back-compat (de-blessed, not removed). `replace_from_login` / `LoginWriteOutcome`
-/ `AccountRecord` / `KEEP_ACCOUNT` / `CLEAR_ACCOUNT` are additive
-`notebooklm.auth` re-exports so the CLI reaches them without importing private
-`_auth` modules.
+/ `AccountRecord` / `KEEP_ACCOUNT` / `CLEAR_ACCOUNT` remain importable compatibility aliases.
+First-party CLI code instead reaches the internal-ledger aliases `replace_profile_from_login` and
+`ReplaceResult` through `notebooklm.auth`; neither is added to public `__all__`.
 
 *Amended again (auth-deepening PR 5.1, ADR-0033):* the anti-wrong-account
 contract above is unchanged, but it is no longer implemented by writing on a
@@ -262,7 +266,7 @@ path, scheduled from the read and joined by nobody
   writers are stateless and process-global (the lock lives on disk, the epoch in
   `single_flight`), so an instance adds lifecycle/wiring with no state to own; a
   module of intent functions matches the existing `_auth/` seam style and keeps
-  the delegate seam (`storage.save_cookies_to_storage`) monkeypatchable.
+  `storage.save_cookies_to_storage` available as a direct v0.x facade.
 - **Reuse `filelock` for the unified lock.** Rejected in favour of the
   project-internal `storage._file_lock` primitive (ADR-0029 lock unification): it
   shares one bounded-acquire deadline/backoff with the Windows `msvcrt` path and

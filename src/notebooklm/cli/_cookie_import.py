@@ -25,7 +25,7 @@ from .._app.login_cookie import (
     import_cookie_payload,
     normalize_cookie_payload,
 )
-from ..auth import replace_from_login
+from ..auth import replace_profile_from_login
 from .services.playwright_login import filter_storage_state_cookies_by_domain_policy
 
 __all__ = ["_import_cookie_json", "_read_auth_json_input"]
@@ -143,7 +143,7 @@ def _import_cookie_json(
         result = import_cookie_payload(
             request,
             filter_storage_state=filter_storage_state_cookies_by_domain_policy,
-            replace_from_login=replace_from_login,
+            replace_profile_from_login=replace_profile_from_login,
         )
         if isinstance(result, CookieImportFailure):
             raise click.ClickException(result.message) from None  # cli-input-validation: policy

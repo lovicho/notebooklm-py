@@ -456,12 +456,14 @@ class PlaywrightLoginPlan:
         storage_path: Destination for the captured ``storage_state.json``.
         include_domains: Optional ``--include-domains`` labels; ``None`` /
             empty means "only required Google cookies + regional ccTLDs."
+        login_timeout_s: Human-interaction window before headed login fails.
     """
 
     browser: str
     browser_profile: Path
     storage_path: Path
     include_domains: set[str] | None = None
+    login_timeout_s: int = 300
 
 
 def run_playwright_login(plan: PlaywrightLoginPlan, io: LoginIO) -> None:
@@ -503,6 +505,7 @@ def run_playwright_login(plan: PlaywrightLoginPlan, io: LoginIO) -> None:
             browser_profile=plan.browser_profile,
             storage_path=plan.storage_path,
             include_domains=plan.include_domains,
+            login_timeout_s=plan.login_timeout_s,
         ),
         io,
         headless=False,

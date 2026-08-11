@@ -669,19 +669,17 @@ def _is_psidts_routed_on_disk(storage_path: Path) -> bool:
 def _psidts_save_succeeded(result: CookieMergeResult, storage_path: Path) -> bool:
     """Did a fresh ``__Secure-1PSIDTS`` actually land on disk after the save?
 
-    The coarse ``CookieSaveResult.ok`` bool from
-    :func:`~notebooklm._auth.storage.save_cookies_to_storage` is *not* a reliable
-    proxy for "PSIDTS healed", in either direction:
+    The native :class:`CookieMergeResult` disposition is *not* a reliable proxy
+    for "PSIDTS healed", in either direction:
 
-    - ``ok`` is ``False`` whenever *any* key is CAS-rejected, even when a fresh
-      PSIDTS is on disk — both the benign "an unrelated sibling cookie lost the
-      race, our PSIDTS wrote through" case (issue #1273) and the "our PSIDTS
-      delta was rejected because a sibling already persisted a fresh PSIDTS
-      first" case leave disk healthy.
-    - ``ok`` is ``True`` even when the save was a no-op that left a *stale*
-      PSIDTS untouched: if ``RotateCookies`` 200s without minting a new cookie,
-      the expired on-disk row lingers in the request jar, the delta is empty,
-      and the save reports success while disk is still unhealed.
+    - ``CONFLICT`` covers any CAS-rejected key, even when a fresh PSIDTS is on
+      disk — both the benign "an unrelated sibling cookie lost the race, our
+      PSIDTS wrote through" case (issue #1273) and the "our PSIDTS delta was
+      rejected because a sibling already persisted a fresh PSIDTS first" case
+      leave disk healthy.
+    - ``NO_CHANGE`` can still leave a *stale* PSIDTS untouched: if
+      ``RotateCookies`` 200s without minting a new cookie, the expired on-disk
+      row lingers in the request jar, the delta is empty, and disk is unhealed.
 
     So disk — not the save bool — is the sole arbiter. Re-read it via
     :func:`_is_psidts_persisted` (the domain-blind "did it land?" question, NOT
@@ -780,18 +778,12 @@ def _attempt_rotation(storage_path: Path, cookie_entries: list[dict]) -> bool:
         )
         return False
 
-    # ``save_cookies_to_storage`` returns a falsy result (not raises) on every
-    # persist-failure path: missing file, invalid payload, CAS conflict,
-    # atomic-write failure (see ``_auth/storage.py:380-429``). The bare
-    # ``except`` below catches the *unexpected* raises only (future refactor
-    # could change the contract).
-    #
-    # We ask for the detailed ``CookieSaveResult`` (``return_result=True``) for
-    # the diagnostic log only — the coarse bool is an unreliable heal signal in
-    # both directions (a sibling-cookie CAS rejection falsely reads ``ok=False``
-    # while PSIDTS healed; a no-op save over a stale PSIDTS falsely reads
-    # ``ok=True``). Whether PSIDTS actually healed is decided by re-reading disk
-    # in :func:`_psidts_save_succeeded` (issue #1273).
+    # The native merge result is used for diagnostics only: a sibling-cookie
+    # conflict may coexist with a successful PSIDTS heal, while a no-change
+    # disposition may leave a stale PSIDTS untouched. Whether recovery actually
+    # healed the profile is decided by re-reading disk in
+    # :func:`_psidts_save_succeeded` (issue #1273). The broad catch keeps this
+    # opportunistic recovery non-fatal if the typed store unexpectedly raises.
     try:
         result = ProfileStore(storage_path).merge_cookie_observation(
             rotated,

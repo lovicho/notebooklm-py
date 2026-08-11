@@ -127,15 +127,34 @@ class AuthTokens:                    # a BOOTSTRAP credential, not a live-state 
 ```
 
 This is reachable, and the runway is short, because **the kernel is already the sole internal
-live-cookie authority** — an audit found that persistence reads `kernel.cookies`
-(`_runtime/lifecycle.py:519`), the only post-open touch of `auth.cookie_jar` is the sync-back
-*writing* it (`_runtime/auth.py:316`), and no internal code *reads* it as live. `auth.cookie_jar` is
-already a vestigial public shadow.
+live-cookie authority**. The Phase-A audit is equality-pinned by
+`tests/_guardrails/test_authtokens_jar_sync.py`; its current inventory is:
 
-- **Phase A — now, non-breaking (no public change).** Repoint post-open readers to `kernel.cookies`;
-  `.jar` is a read projection of the `cookies` map and is read only at the bootstrap seed
-  (`_kernel.py:88`), which is exactly the `initial_cookies` role. Label the line-316 sync-back
-  compat-only. After this,
+| Owner | Shadow access | Role |
+|---|---|---|
+| `_kernel.py:Kernel._bootstrap_cookies` | reads `cookie_jar`, falling back to `cookies` | the one bootstrap hand-off; copied into kernel ownership during client composition |
+| `_auth/tokens.py:AuthTokens.__post_init__` | reads/writes `cookies` and `cookie_jar` | public construction compatibility and normalization |
+| `_auth/tokens.py:AuthTokens.replace_cookie_jar` | writes `cookies` and `cookie_jar` | public v0.x sync-back only |
+| `_auth/tokens.py:AuthTokens._replace_profile_session` | calls `replace_cookie_jar` | syncs public shadows after an atomic stored-profile install |
+| `_auth/session.py:_try_storage_cookie_reload` | calls `replace_cookie_jar` in `finally` | syncs public shadows even when cancellation interrupts baseline adoption |
+| `_runtime/auth.py:AuthRefreshCoordinator.update_auth_headers` | calls `replace_cookie_jar` | syncs public shadows after refresh |
+| `_auth/tokens.py:AuthTokens.__repr__` | reads both fields | redacted public representation only |
+| `_auth/tokens.py:AuthTokens.jar` | reads `cookie_jar` | public question/bootstrap migration projection only |
+| `_auth/tokens.py:AuthTokens._flat_cookie_projection` | reads `cookies` | warning-free implementation shared by lossy public compatibility projections |
+| `_auth/tokens.py:AuthTokens.flat_cookies` | calls the private projection after warning | directly deprecated public compatibility access only |
+| `_auth/tokens.py:AuthTokens.cookie_header` | calls the private projection without warning | distinct domain-blind public compatibility projection only |
+| `_auth/tokens.py:AuthTokens.cookie_header_for` | reads `cookie_jar` | public compatibility query; no first-party request path calls it |
+
+The three `replace_cookie_jar` callsites above write only to keep the two public shadows coherent;
+none reads a shadow to select recovery or persistence behavior. Persistence reads `kernel.cookies`;
+account-email routing now reads the kernel jar before open, while open, and after close. No
+first-party post-bootstrap transport, routing, recovery, or persistence decision reads a cookie
+shadow. The kernel retains the exact transport jar across close/reopen—it does not construct a
+detached generation snapshot.
+
+- **Phase A — now, non-breaking (no public change).** Repoint post-bootstrap readers to
+  `kernel.cookies`; `.jar` remains a public projection whose migration role is the future
+  `initial_cookies` shape. Label the runtime sync-back compatibility-only. After this,
   `AuthTokens` is *behaviorally* the frozen bootstrap credential above, wearing a mutable-dataclass
   costume for the public surface.
 - **Next minor — deprecate, non-breaking.** Runtime `DeprecationWarning` on `flat_cookies` (a plain

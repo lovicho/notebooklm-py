@@ -30,6 +30,7 @@ def run_master_token_login(
     *,
     storage,
     browser,
+    browser_timeout=300,
     account_email,
     oauth_token,
     android_id,
@@ -73,6 +74,7 @@ def run_master_token_login(
                 oauth_token=oauth_token,
                 browser=browser,
                 cdp_url=cdp_url,
+                timeout_s=browser_timeout,
                 capture_oauth_token=capture_oauth_token,
                 run_async=run_async,
             )
@@ -93,6 +95,7 @@ def run_master_token_login(
         del remint_result
         del storage
         del browser
+        del browser_timeout
         del account_email
         del oauth_token
         del android_id

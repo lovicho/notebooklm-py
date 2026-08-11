@@ -1,64 +1,20 @@
-"""Transport-neutral browser launch -> capture -> filter -> persist core.
+"""Transport-neutral browser launch, capture, heal, and persistence core.
 
-This module owns the *neutral* heart of the Playwright login flow: it launches a
-persistent-context browser against a profile dir, navigates to the configured
-NotebookLM base URL, waits for the session to land on that host, forces the
-``.google.com`` cookies for regional users, captures
-``BrowserContext.storage_state()``, applies the cookie-domain allowlist, and
-atomically persists ``storage_state.json``. It carries no Click / Rich / CLI
-coupling — presentation, interactive prompting, account-selection, exit-code
-policy, and human-readable error hints stay in the CLI adapter
-(:mod:`notebooklm.cli.services.playwright_login`) per ADR-0021. The few moments
-the core must surface a line or abort are inverted behind the
-:class:`BrowserCaptureIO` Protocol (the same shape as the CLI's ``LoginIO``),
-so a headless caller can inject a silent / raising sink.
+The shared interactive and headless arms launch a persistent Playwright
+context, navigate to the configured app host, capture storage state, apply the
+cookie-domain policy, heal PSIDTS when possible, and persist through the native
+``ProfileStore`` replacement. The alternative CDP arm uses the same landing,
+filter, heal, and persistence rules against an operator-provided browser.
 
-**Shared core for two callers.** This is the single launch/capture/persist
-primitive used by BOTH:
+Presentation and exit policy stay behind :class:`BrowserCaptureIO`; Playwright
+is imported lazily so the module remains importable without the browser extra.
+Only ``interactive=True, headless=False`` and ``interactive=False,
+headless=True`` are supported. Automatic headless recovery remains opt-in via
+``NOTEBOOKLM_HEADLESS_REAUTH=1``.
 
-1. the interactive ``notebooklm login`` Playwright flow
-   (``interactive=True, headless=False`` - a human completes Google SSO in a
-   visible browser); and
-2. the layer-3 headless re-auth flow
-   (``interactive=False, headless=True``): when NotebookLM cookies are dead but
-   a persistent browser profile still holds a live Google session, drive a
-   headless browser to silently re-mint cookies.
-
-Headless re-auth is explicit by default via
-``client.refresh_auth(allow_headless=True)``; a mid-RPC auto-fire happens only
-when ``NOTEBOOKLM_HEADLESS_REAUTH=1`` is set in the environment. The
-``headless`` / ``interactive`` parameters and their branch points are live for
-those two supported modes; any other combination is rejected by
-:func:`_reject_unsupported_mode`.
-
-``playwright`` is imported lazily (function-local) so importing this module
-without the ``browser`` extra never fails — mirroring the deferral the CLI flow
-has always used.
-
-**Absorbed satellites (ADR-0033 PR 4.1).** Two modules that existed only to keep
-this file under the ADR-0008 line cap now live here as labelled sections, each
-with a single consumer that was always inside this file:
-
-* the **login-wait DEBUG tracing** (from ``login_wait_trace.py``) —
-  :func:`trace_url`, :func:`safe_page_url`, :func:`log_observed_navigations`;
-* the **captured-state heal bridge** (from ``browser_state_validation.py``) —
-  :func:`heal_captured_state`.
-
-``browser_launch_errors.py`` stays a separate leaf — but NOT for the reason the
-consolidation plan gave. The plan claimed a second independent consumer, on the
-strength of ``cli/services/login/master_token.py`` using
-``classify_launch_failure``. That import comes through THIS module's re-export,
-not from the leaf: the CLI-boundary guardrail sanctions exactly one ``_auth``
-path (``_auth/browser_capture``), so a CLI module cannot import the leaf
-directly even in principle. It therefore has a single consumer and would pass
-the deletion test the same way its two absorbed siblings did.
-
-It is kept because it is genuinely cohesive and self-contained — a channel
-registry plus a pure string-in/string-out classifier, with no Playwright import,
-no I/O and no CLI dependency — so folding it buys nothing beyond a smaller file
-count, and its independence is what lets the launch-failure triage be tested
-without a browser. A future fold is defensible; an inherited false justification
-is not.
+ADR-0033 folded the login-wait trace and captured-state heal bridge into this
+module. ``browser_launch_errors.py`` remains a cohesive pure classifier leaf and
+is re-exported here for the CLI boundary.
 """
 
 from __future__ import annotations
@@ -82,7 +38,7 @@ from urllib.parse import urlparse
 # friends do the same).
 from .._env import PERSONAL_APP_HOSTS
 from ..config import get_base_host, get_base_url
-from ..exceptions import HeadlessLoginRequiredError
+from ..exceptions import HeadlessLoginRequiredError, LockUnavailableError
 
 # Collaborators of :func:`heal_captured_state` (absorbed from
 # ``browser_state_validation.py``, ADR-0033 PR 4.1): the sanitiser that shapes
@@ -91,12 +47,6 @@ from ..exceptions import HeadlessLoginRequiredError
 # via the leaf that used to hold the bridge.
 from . import cookies as _auth_cookies
 from . import psidts_recovery as _psidts_recovery
-
-# The canonical writer both capture arms persist through. Deferred until
-# ADR-0033 PR 4.2 put the write-time cookie filter in ``storage`` too, making
-# the module-level edge unavoidable (still no cycle: ``storage`` imports nothing
-# from here). Bound as the MODULE, so the writers stay late-bound (patch seam).
-from . import storage
 
 # ``CHANNEL_BROWSERS`` and the launch-failure triage live in the
 # ``browser_launch_errors`` leaf (ADR-0008). ``CHANNEL_BROWSERS`` is re-exported
@@ -112,6 +62,9 @@ from .browser_launch_errors import CHANNEL_BROWSERS, classify_launch_failure
 # cookie-refresh advice (``cli/services/login/cookie_jar.py``) must not grow a
 # second, drifting copy of that caveat.
 from .cookie_policy import app_host_scope_note
+from .profile_account import DomainSelection
+from .profile_document import ProfileDocument
+from .profile_store import ProfileStore, RemintWriteRequest, ReplaceResult
 
 # The storage-state cookie filter is WRITE-time policy and lives beside the
 # writers applying it (ADR-0033 PR 4.2); re-exported here, the CLI's import site.
@@ -153,6 +106,27 @@ GOOGLE_ACCOUNTS_URL = "https://accounts.google.com/"
 # because Playwright surfaces them in the error message rather than via
 # typed exceptions.
 RETRYABLE_CONNECTION_ERRORS = ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET")
+
+
+def replace_captured_profile(
+    path: Path,
+    state: dict[str, Any],
+    *,
+    carry_account: bool,
+    include_domains: set[str] | None,
+) -> ReplaceResult:
+    """Persist browser capture through the native profile-store result."""
+    request = RemintWriteRequest(
+        source=ProfileDocument.decode(dict(state)),
+        carry_account=carry_account,
+        domain_selection=DomainSelection(
+            include_domains=frozenset(include_domains or ()),
+            include_optional=False,
+        ),
+    )
+    return ProfileStore(path).replace_from_remint(request)
+
+
 LOGIN_MAX_RETRIES = 3
 # Playwright TargetClosedError substring — matches the default message from
 # Playwright's TargetClosedError class (introduced in v1.41). If a future
@@ -558,21 +532,20 @@ def heal_captured_state(state: dict[str, Any]) -> tuple[dict[str, Any], ValueErr
 @dataclass(frozen=True)
 class BrowserCapturePlan:
     """Frozen description of one browser-capture attempt.
-
-    Fields:
-        browser: Channel; ``"chromium"`` or any :data:`CHANNEL_BROWSERS` key
-            (``"chrome"``, ``"msedge"``).
-        browser_profile: Persistent-context dir Playwright launches against
-            (survives across attempts so the session persists).
-        storage_path: Destination for the captured ``storage_state.json``.
-        include_domains: Optional ``--include-domains`` labels; ``None`` /
-            empty means "only required Google cookies + regional ccTLDs."
+    browser: Channel; ``"chromium"`` or any :data:`CHANNEL_BROWSERS` key
+        (``"chrome"``, ``"msedge"``).
+    browser_profile: Persistent-context dir Playwright launches against
+        (survives across attempts so the session persists).
+    storage_path: Destination for the captured ``storage_state.json``.
+    include_domains: Optional ``--include-domains`` labels; ``None`` /
+        empty means "only required Google cookies + regional ccTLDs."
     """
 
     browser: str
     browser_profile: Path
     storage_path: Path
     include_domains: set[str] | None = None
+    login_timeout_s: int = 300
 
 
 @dataclass(frozen=True)
@@ -806,36 +779,37 @@ def run_browser_capture(
                 io.emit("\n[bold green]Instructions:[/bold green]")
                 io.emit("1. Complete the Google login in the browser window")
                 io.emit("2. Authentication will be saved automatically once login is detected\n")
-                io.emit("[dim]Waiting for login (up to 5 minutes)...[/dim]")
-                # Name the accept set and the starting point BEFORE blocking:
-                # with these two lines plus the per-navigation trace below, a
-                # ``-vv`` paste from a stuck login is self-diagnosing (#2046).
-                # Explicitly level-gated: ``logger.debug``'s %-args are built
-                # eagerly, and this diagnostic must do NO work when logging is
-                # off — the wait has to stay byte-for-byte what it was.
+                timeout_s = plan.login_timeout_s
+                timeout_label = "5 minutes" if timeout_s == 300 else f"{timeout_s} seconds"
+                io.emit(f"[dim]Waiting for login (up to {timeout_label})...[/dim]")
+                # Name the accept set/start before blocking so a ``-vv`` paste
+                # diagnoses a stuck login (#2046). Keep all diagnostic work
+                # inside the explicit level gate.
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
-                        "Login wait: accepting any of %s (currently on %s); timeout 300s",
+                        "Login wait: accepting any of %s (currently on %s); timeout %ss",
                         ", ".join(accepted_login_hosts()),
                         safe_page_url(page),
+                        timeout_s,
                     )
                 try:
-                    # wait_until="commit", not the default "load": the SPA never
-                    # fires "load", so a load-gated wait hangs the full 5 min even
-                    # though sign-in already succeeded and the URL already matches
-                    # (the #1697 symptom). "commit" returns as soon as we reach the
-                    # host. Cookies are read later at storage_state() (after the
-                    # cookie-forcing round-trips), so resolving early is safe;
-                    # page.content() at capture time is best-effort/None-tolerant.
+                    # The SPA never fires "load"; "commit" resolves as soon as
+                    # the accepted host is reached (#1697). Cookies are read later.
                     with log_observed_navigations(page):
                         page.wait_for_url(
-                            url_matches_base_host, wait_until="commit", timeout=300_000
+                            url_matches_base_host,
+                            wait_until="commit",
+                            timeout=timeout_s * 1000,
                         )
                 except PlaywrightTimeout:
                     if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug("Login wait: timed out after 300s on %s", safe_page_url(page))
+                        logger.debug(
+                            "Login wait: timed out after %ss on %s",
+                            timeout_s,
+                            safe_page_url(page),
+                        )
                     io.emit(
-                        "[red]Login not detected within 5 minutes.[/red]\n"
+                        f"[red]Login not detected within {timeout_label}.[/red]\n"
                         "Try again with: notebooklm login\n"
                         "Already signed in to Google in Chrome? Retry with "
                         "[cyan]notebooklm login --browser chrome[/cyan] to reuse that "
@@ -932,14 +906,14 @@ def run_browser_capture(
             # sign-in the user just completed — the cookies are still the best
             # material available, and the disk-based cold-start recovery retries
             # from them on the next command.
-            outcome = storage.replace_from_remint(
+            outcome = replace_captured_profile(
                 storage_path,
                 filtered_state,
                 carry_account=headless,
                 include_domains=include_domains,
             )
             if outcome.lock_unavailable:
-                raise storage.LockUnavailableError(
+                raise LockUnavailableError(
                     f"browser capture: storage lock unavailable at {storage_path}"
                 )
             if heal_error is not None:
@@ -1169,14 +1143,14 @@ def run_cdp_capture(
             # from them on the next command. And as in the launch arm, the
             # writer's own pass under the lock is ADR-0029's entry-path-
             # independent guarantee, not a repeat of the pre-heal pass above.
-            outcome = storage.replace_from_remint(
+            outcome = replace_captured_profile(
                 storage_path,
                 filtered_state,
                 carry_account=False,
                 include_domains=include_domains,
             )
             if outcome.lock_unavailable:
-                raise storage.LockUnavailableError(
+                raise LockUnavailableError(
                     f"CDP capture: storage lock unavailable at {storage_path}"
                 )
             if heal_error is not None:

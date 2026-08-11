@@ -93,6 +93,21 @@
     {
       "scope": "module",
       "source": "browser_capture",
+      "target": "profile_account"
+    },
+    {
+      "scope": "module",
+      "source": "browser_capture",
+      "target": "profile_document"
+    },
+    {
+      "scope": "module",
+      "source": "browser_capture",
+      "target": "profile_store"
+    },
+    {
+      "scope": "module",
+      "source": "browser_capture",
       "target": "psidts_recovery"
     },
     {
@@ -314,6 +329,11 @@
       "scope": "module",
       "source": "profile_migration",
       "target": "profile_account"
+    },
+    {
+      "scope": "module",
+      "source": "profile_migration",
+      "target": "profile_document"
     },
     {
       "scope": "module",
@@ -708,7 +728,7 @@
       "path": "src/notebooklm/_auth/account.py"
     },
     {
-      "lines": 174,
+      "lines": 176,
       "name": "account_email",
       "path": "src/notebooklm/_auth/account_email.py"
     },
@@ -723,7 +743,7 @@
       "path": "src/notebooklm/_auth/account_types.py"
     },
     {
-      "lines": 1251,
+      "lines": 1225,
       "name": "browser_capture",
       "path": "src/notebooklm/_auth/browser_capture.py"
     },
@@ -838,17 +858,17 @@
       "path": "src/notebooklm/_auth/profile_document.py"
     },
     {
-      "lines": 375,
+      "lines": 419,
       "name": "profile_migration",
       "path": "src/notebooklm/_auth/profile_migration.py"
     },
     {
-      "lines": 864,
+      "lines": 876,
       "name": "profile_store",
       "path": "src/notebooklm/_auth/profile_store.py"
     },
     {
-      "lines": 1222,
+      "lines": 1214,
       "name": "psidts_recovery",
       "path": "src/notebooklm/_auth/psidts_recovery.py"
     },
@@ -873,7 +893,7 @@
       "path": "src/notebooklm/_auth/single_flight.py"
     },
     {
-      "lines": 1127,
+      "lines": 1090,
       "name": "storage",
       "path": "src/notebooklm/_auth/storage.py"
     },
@@ -893,7 +913,7 @@
       "path": "src/notebooklm/_auth/storage_writer.py"
     },
     {
-      "lines": 860,
+      "lines": 889,
       "name": "tokens",
       "path": "src/notebooklm/_auth/tokens.py"
     }
@@ -904,10 +924,10 @@
   },
   "summary": {
     "function_local_edges": 12,
-    "module_edges": 126,
+    "module_edges": 130,
     "modules": 41,
-    "total_lines": 15882,
-    "unique_edges": 138
+    "total_lines": 15898,
+    "unique_edges": 142
   },
   "version": 1
 }

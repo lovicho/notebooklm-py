@@ -7,10 +7,10 @@ import copy
 import json
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, TypeAlias
+from typing import Any, ClassVar, Literal, TypeAlias
 
 from filelock import FileLock
 
@@ -23,11 +23,15 @@ from .cookies import (
 from .profile_account import (
     ACCOUNT_ROUTE_CLEARED_KEY,
     AccountView,
+    ClearAccount,
+    DomainSelection,
     KeepAccount,
     ProfileAccount,
+    SetAccount,
     parse_profile_account,
 )
-from .profile_store import LoginWriteRequest, ProfileStore, ReplaceResult, ReplaceStatus
+from .profile_document import ProfileDocument
+from .profile_store import LoginWriteRequest, ProfileStore, ReplaceResult
 
 logger = logging.getLogger("notebooklm.auth")
 
@@ -330,6 +334,46 @@ def _drain_promotions_at_exit() -> None:
     LegacyPromotionScheduler.process_default().drain(_PROMOTION_EXIT_JOIN_SECONDS)
 
 
+def replace_profile_from_login(
+    path: Path,
+    state: Mapping[str, Any],
+    *,
+    include_domains: set[str] | None,
+    include_optional: bool = False,
+    account_mode: Literal["keep", "clear", "set"] = "keep",
+    account_authuser: int | None = None,
+    account_email: str | None = None,
+    backup: bool = False,
+) -> ReplaceResult:
+    """Perform one native path-shaped login/import profile replacement."""
+    if account_mode not in {"keep", "clear", "set"}:
+        raise ValueError("account_mode must be 'keep', 'clear', or 'set'")
+    account: KeepAccount | ClearAccount | SetAccount
+    if account_mode == "set":
+        if account_authuser is None:
+            raise ValueError("account_mode='set' requires account_authuser")
+        account = SetAccount(ProfileAccount(account_authuser, account_email))
+    else:
+        if account_authuser is not None or account_email is not None:
+            raise ValueError(f"account_mode='{account_mode}' does not accept account values")
+        account = KeepAccount() if account_mode == "keep" else ClearAccount()
+
+    source = ProfileDocument.decode(dict(state))
+    selection = DomainSelection(
+        include_domains=frozenset(include_domains or ()),
+        include_optional=include_optional,
+    )
+    store = ProfileStore(path)
+    request = LoginWriteRequest(
+        source=source,
+        domain_selection=selection,
+        account=account,
+        backup=backup,
+    )
+    writer = LoginProfileWriter(store, LegacyAccountMigrator())
+    return writer.write(request)
+
+
 class LoginProfileWriter:
     """Compose one login replacement with post-commit legacy reconciliation."""
 
@@ -345,7 +389,7 @@ class LoginProfileWriter:
         )
 
         result = self._store.replace_from_login(request)
-        if result.status is not ReplaceStatus.APPLIED:
+        if not result.ok:
             return result
         if promote:
             self._migrator.promote(self._store)

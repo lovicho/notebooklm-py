@@ -81,13 +81,12 @@ from ._auth.master_token import (  # noqa: F401
 )
 from ._auth.master_token import bootstrap_from_oauth_token as master_token_bootstrap  # noqa: F401
 from ._auth.master_token import remint_from_stored_token as master_token_remint  # noqa: F401
+from ._auth.profile_migration import replace_profile_from_login  # noqa: F401
+from ._auth.profile_store import ReplaceResult  # noqa: F401
 
-# Canonical login/import storage writer (refactor (b), b-PR3). Re-exported here
-# as the public boundary the CLI login/import writers consume — ``cli/`` may not
-# import private ``_auth.*`` modules (tests/_guardrails/test_cli_boundary.py), so
-# the three CLI writers reach ``replace_from_login`` (and its ``account`` sentinel
-# / value-free outcome) ONLY through this facade, exactly like
-# ``save_cookies_to_storage`` / ``write_account_metadata`` / ``persist_minted_jar``.
+# v0.x login/import compatibility values remain importable through this facade.
+# First-party app/CLI callers use the native ``replace_profile_from_login`` and
+# ``ReplaceResult`` aliases above; neither alias is part of ``__all__``.
 from ._auth.storage import (  # noqa: F401
     CLEAR_ACCOUNT,
     KEEP_ACCOUNT,

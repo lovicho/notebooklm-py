@@ -276,9 +276,9 @@ def _assemble_client(
         max_concurrent_uploads=max_concurrent_uploads,
         max_concurrent_rpcs=max_concurrent_rpcs,
         on_rpc_event=on_rpc_event,
-        # Injectable seams — pass-through to the lifecycle. ``None``
-        # (default) preserves the late-binding contract via
-        # ``_default_cookie_saver`` / ``_default_cookie_rotator``.
+        # Injectable seams — pass-through to the lifecycle. A ``None`` cookie
+        # saver selects the canonical typed store path; a ``None`` rotator
+        # preserves its historical late-bound default.
         cookie_saver=cookie_saver,
         cookie_rotator=cookie_rotator,
         async_client_factory=async_client_factory,

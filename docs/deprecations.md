@@ -22,9 +22,21 @@ the broader stability policy (semver promise, supported Python versions, the
 |------------|-------------|-------|---------|-------|
 | `AuthTokens.from_storage(...)` | `async with NotebookLMClient.from_storage(...) as client:` then use `client.auth` inside the managed lifecycle | v0.9.0 | v1.0 | The compatibility loader keeps its signature, return, error, and cancellation behavior through v0.x but now emits `DeprecationWarning` when awaited. |
 | `AuthTokens(..., storage_path=..., cookie_jar=None)` synchronous storage fallback | Use `NotebookLMClient.from_storage(...)`, or supply `cookie_jar=` when constructing tokens directly | v0.9.0 | v1.0 | Only the implicit synchronous-I/O branch warns; construction without `storage_path`, with a supplied jar, or failing cookie normalization stays silent. |
+| `AuthTokens.flat_cookies` | `AuthTokens.jar` for bootstrap-cookie questions; managed `NotebookLMClient` request APIs for HTTP | v0.9.0 | v1.0 | Direct property access emits one caller-attributed `DeprecationWarning`. It is a lossy name-only projection and cannot preserve domain/path siblings. `NOTEBOOKLM_QUIET_DEPRECATIONS=1` suppresses the warning. |
+| `AuthTokens.cookies` / `AuthTokens.cookie_jar` | Use `AuthTokens.jar` as the v0.x migration shape; adopt the immutable `initial_cookies: CookieJar` bootstrap field in v1 | v0.9.0 | v1.0 | **Docs-only deprecation:** these remain dataclass fields through v0.x, so runtime warnings would leak through construction, repr, equality, and `dataclasses.replace()`. They are public compatibility shadows, not the managed client's live jar. |
+| `AuthTokens.jar` | The v1 `AuthTokens.initial_cookies` bootstrap field | v0.9.0 | v1.0 | Warning-free v0.x migration shape. It is an immutable question/input projection, not a second live-cookie authority. |
+| `AuthTokens.cookie_header` | Managed `NotebookLMClient` request APIs | v0.9.0 | v1.0 | Docs-only deprecation. Its name-only, domain-blind join is unsafe for request construction; it remains warning-free through v0.x so it does not indirectly trigger the `flat_cookies` warning. |
+| `AuthTokens.cookie_header_for(url)` | Managed `NotebookLMClient` request APIs | v0.9.0 | v1.0 | Docs-only deprecation. Domain-aware selection remains compatible for standalone callers, but first-party request paths already use the kernel-owned jar. |
 | Awaiting `NotebookLMClient.from_storage(...)` | `async with NotebookLMClient.from_storage(...) as client:` | v0.5.0 | v1.0 | The `__await__` form still works. Warning emitted via `src/notebooklm/_deprecation.py::warn_deprecated`; suppress with `NOTEBOOKLM_QUIET_DEPRECATIONS=1` ([#1369](https://github.com/teng-lin/notebooklm-py/issues/1369)) |
 | MCP `research_status(task_id=…)` / `research_import(task_id=…)` / `research_cancel(run_id=…)` | The same value under `poll_task_id=…` on all three | v0.8.0 | v0.9.0 | The three tools each accept the id that `research_start` / `research_status` surface as `poll_task_id` — renamed so the value copies verbatim between tools. The old `task_id` / `run_id` param names still work as aliases but emit a `DeprecationWarning` (via `warn_deprecated`) and add a `deprecation` note to the tool result; passing both names with different values is a validation error. ([#1789](https://github.com/teng-lin/notebooklm-py/issues/1789)) |
 | Pre-profiles home-root layout (`~/.notebooklm/storage_state.json`, `context.json`, `browser_profile/` read directly at the home root, outside `profiles/<name>/`) | `profiles/<name>/…` — run any `notebooklm` command once to migrate automatically | v0.9.0 | v1.0 | Only reached when the profile-dir path doesn't exist AND the resolved profile is `"default"` (`paths.py::_legacy_fallback`); one `notebooklm` invocation triggers `migrate_to_profiles()` and the fallback is never hit again. Emits a `DeprecationWarning` (via `warn_deprecated`) on each read; suppress with `NOTEBOOKLM_QUIET_DEPRECATIONS=1`. ([#2103](https://github.com/teng-lin/notebooklm-py/issues/2103)) |
+
+`CookieJar` remains an immutable, ordered sequence of `Cookie` rows. It preserves
+full-fidelity rows when constructed from authoritative row data;
+`CookieJar.from_httpx()` is SameSite-lossy and is only a transient live
+observation. It is never a `Mapping[str, str]` and never the managed client's
+live mutable jar. Iteration yields rows, `len()` counts rows, and domain/path
+siblings remain distinct; the deprecation runway does not change those semantics.
 
 > The v0.8.0 error-contract runways (`get()`-returns-`None`, the
 > `wait_for_completion(interval=...)` alias, the dict-subscript bridge,
@@ -123,7 +135,7 @@ migration for each is in
 * Default-shape calls remain silent. A deprecation only fires when the
   caller actually passes the deprecated argument or surface.
 * `NOTEBOOKLM_QUIET_DEPRECATIONS=1` suppresses **every** deprecation warning
-  this project emits. The two auth-storage runways are immutable
+  this project emits. The three registered auth runways are immutable
   `DeprecationSpec` entries routed through `warn_registered_deprecation`; other
   one-off warnings use `warn_deprecated`. All mechanics live in
   `src/notebooklm/_deprecation.py`; ADR-0018 forbids inline

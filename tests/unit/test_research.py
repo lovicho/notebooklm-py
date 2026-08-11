@@ -106,6 +106,9 @@ class TestCitedSourceSelection:
 
         assert urls == {"https://example.com/a"}
 
+    def test_extract_report_urls_empty_report_returns_empty_set(self):
+        assert extract_report_urls("") == set()
+
     def test_select_cited_sources_filters_urls_and_preserves_report_entry(self):
         sources = [
             {

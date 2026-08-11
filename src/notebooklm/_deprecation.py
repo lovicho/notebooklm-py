@@ -86,6 +86,20 @@ DEPRECATION_SPECS: Mapping[str, DeprecationSpec] = MappingProxyType(
             removal="1.0",
             stacklevel=4,
         ),
+        "auth_tokens_flat_cookies": DeprecationSpec(
+            key="auth_tokens_flat_cookies",
+            message=(
+                "AuthTokens.flat_cookies is deprecated because its name-only projection "
+                "discards domain/path siblings; use AuthTokens.jar for bootstrap cookie "
+                "questions and managed NotebookLMClient request APIs for HTTP. It will be "
+                "removed in v1.0."
+            ),
+            category=DeprecationWarning,
+            replacement="notebooklm.AuthTokens.jar",
+            since="0.9.0",
+            removal="1.0",
+            stacklevel=3,
+        ),
     }
 )
 

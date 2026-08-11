@@ -1,15 +1,12 @@
-"""``AuthTokens.cookies`` must not go stale when the live jar is rebound.
+"""Keep AuthTokens' public cookie compatibility shadows coherent.
 
-ADR-0031 Stage 4. ``cookies`` (a ``(name, domain, path) -> value`` map) and
-``cookie_jar`` (a live ``httpx.Cookies``) hold the same information in two
-shapes, synced once in ``__post_init__``. The mid-session refresh rebinds only
-the jar, which left ``cookies`` describing the *previous* session.
+ADR-0032 Phase A makes the kernel's ``httpx.Cookies`` the sole first-party live
+authority. ``cookies`` (a ``(name, domain, path) -> value`` map) and
+``cookie_jar`` remain public v0.x projections in two shapes.
 
-That was invisible internally — the one reader, ``_kernel.py``, prefers
-``cookie_jar`` and only falls back to ``cookies`` when the jar is ``None``,
-which construction makes impossible. But ``AuthTokens`` is documented public
-API, so a caller reading ``auth.cookies`` after a refresh got stale values with
-nothing to signal it.
+The runtime compatibility sync must update both projections so a public caller
+never observes two different sessions. Internal transport, routing, recovery,
+and persistence behavior does not read either projection after bootstrap.
 """
 
 from __future__ import annotations
@@ -105,9 +102,9 @@ def test_rebind_handles_edge_case_values(value: str) -> None:
 
 
 class TestJarProjection:
-    """ADR-0032 Phase A: AuthTokens.jar is a fresh, never-stale question view."""
+    """ADR-0032 Phase A: ``jar`` projects the synchronized public shadow."""
 
-    def test_jar_reflects_the_current_live_jar(self) -> None:
+    def test_jar_reflects_the_current_compatibility_jar(self) -> None:
         auth = _auth(SID="old")
         assert auth.jar.names() == {"SID"}
         auth.replace_cookie_jar(_jar(SID="new", HSID="h"))

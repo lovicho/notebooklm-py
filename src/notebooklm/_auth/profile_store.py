@@ -177,6 +177,18 @@ class ReplaceResult:
     present_names: tuple[str, ...] = ()
     backup_path: Path | None = None
 
+    @property
+    def ok(self) -> bool:
+        return self.status is ReplaceStatus.APPLIED
+
+    @property
+    def lock_unavailable(self) -> bool:
+        return self.status is ReplaceStatus.LOCK_UNAVAILABLE
+
+    @property
+    def required_cookies_dropped(self) -> bool:
+        return self.status is ReplaceStatus.REQUIRED_COOKIES_DROPPED
+
     def __post_init__(self) -> None:
         if not isinstance(self.status, ReplaceStatus):
             raise TypeError("status must be a ReplaceStatus")

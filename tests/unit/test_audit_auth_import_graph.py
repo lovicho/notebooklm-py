@@ -92,9 +92,9 @@ def test_live_projection_is_the_frozen_scorecard(audit):
     result = audit.build_projection()
     assert result["summary"] == {
         "modules": 41,
-        "total_lines": 15882,
-        "unique_edges": 138,
-        "module_edges": 126,
+        "total_lines": 15898,
+        "unique_edges": 142,
+        "module_edges": 130,
         "function_local_edges": 12,
     }
     assert result["sccs"] == {
@@ -125,6 +125,7 @@ def test_live_projection_is_the_frozen_scorecard(audit):
     assert {edge for edge in edges if "profile_account" in edge[:2]} == {
         ("account_email", "profile_account", "module"),
         ("account_repair", "profile_account", "module"),
+        ("browser_capture", "profile_account", "module"),
         ("profile_account", "cookie_types", "module"),
         ("profile_document", "profile_account", "module"),
         ("profile_migration", "profile_account", "module"),
@@ -134,7 +135,9 @@ def test_live_projection_is_the_frozen_scorecard(audit):
     }
     assert {edge for edge in edges if "profile_document" in edge[:2]} == {
         ("account_email", "profile_document", "module"),
+        ("browser_capture", "profile_document", "module"),
         ("cookie_merge", "profile_document", "module"),
+        ("profile_migration", "profile_document", "module"),
         ("psidts_recovery", "profile_document", "module"),
         ("profile_document", "cookie_types", "module"),
         ("profile_document", "profile_account", "module"),
@@ -198,6 +201,7 @@ def test_live_projection_is_the_frozen_scorecard(audit):
     assert {edge for edge in edges if "profile_store" in edge[:2]} == {
         ("account_email", "profile_store", "module"),
         ("account_repair", "profile_store", "module"),
+        ("browser_capture", "profile_store", "module"),
         ("master_token", "profile_store", "module"),
         ("master_token_bootstrap", "profile_store", "module"),
         ("profile_migration", "profile_store", "module"),
@@ -230,6 +234,7 @@ def test_live_projection_is_the_frozen_scorecard(audit):
         ("account_repair", "profile_migration", "module"),
         ("profile_migration", "cookies", "module"),
         ("profile_migration", "profile_account", "module"),
+        ("profile_migration", "profile_document", "module"),
         ("profile_migration", "profile_store", "module"),
         ("recovery", "profile_migration", "function"),
         ("recovery", "profile_migration", "module"),

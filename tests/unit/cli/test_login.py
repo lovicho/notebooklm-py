@@ -511,6 +511,23 @@ class TestLoginCommand:
         }
         assert "Login detected" in result.output
 
+    def test_login_forwards_custom_browser_timeout(self, runner, mock_login_browser_with_storage):
+        """The public timeout controls Playwright's human sign-in wait."""
+        mock_page = mock_login_browser_with_storage
+        mock_page.url = "https://accounts.google.com/signin"
+
+        def succeed(predicate, **kwargs):
+            assert predicate("https://notebooklm.google.com/")
+            mock_page.url = "https://notebooklm.google.com/"
+
+        mock_page.wait_for_url.side_effect = succeed
+
+        result = runner.invoke(cli, ["login", "--browser-timeout", "420"])
+
+        assert result.exit_code == 0
+        assert mock_page.wait_for_url.call_args.kwargs["timeout"] == 420_000
+        assert "Waiting for login (up to 420 seconds)" in result.output
+
     @pytest.mark.requires_playwright
     def test_login_auto_detect_timeout_exits_with_helpful_message(
         self, runner, mock_login_browser_with_storage

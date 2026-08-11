@@ -11,11 +11,10 @@ import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, TypeAlias, TypeVar
+from typing import Protocol, TypeAlias, TypeVar
 
 import httpx
 
-from ._auth import storage as _auth_storage
 from ._auth.cookie_policy import RequiredCookieValidationError
 from ._auth.cookie_types import Cookie, CookieJar
 from ._auth.cookies import StorageStateValidationError, _load_cookie_pair_pure
@@ -34,15 +33,16 @@ logger = logging.getLogger("notebooklm.auth")
 
 
 class SaveCookiesToStorage(Protocol):
-    """Callable shape for the v0.x storage writer adapter."""
+    """Callable shape for the exact v0.x callback invocation."""
 
     def __call__(
         self,
         cookie_jar: httpx.Cookies,
-        path: Path | None = None,
+        path: Path,
+        /,
         *,
-        original_snapshot: CookieSnapshot | None = None,
-        return_result: bool = False,
+        original_snapshot: CookieSnapshot | None,
+        return_result: bool,
     ) -> bool | CookieSaveResult: ...
 
 
@@ -166,38 +166,9 @@ class _LegacySnapshotAdapter:
     def advance(
         self,
         key: Path,
-        original: CookieSnapshot | None,
-        post: CookieSnapshot,
-        result: bool | CookieSaveResult,
-    ) -> bool:
-        advanced: CookieSnapshot | None = None
-        if isinstance(result, CookieSaveResult):
-            if result.ok:
-                advanced = post
-            elif result.cas_rejected_keys:
-                advanced = advance_cookie_snapshot_after_save(
-                    original,
-                    post,
-                    result.cas_rejected_keys,
-                )
-        elif result:
-            advanced = post
-        if advanced is None:
-            return False
-        self.set(key, advanced)
-        return True
-
-
-_CANONICAL_COOKIE_SAVER = _auth_storage.save_cookies_to_storage
-
-
-def _default_cookie_saver(*args: Any, **kwargs: Any) -> bool | CookieSaveResult:
-    """Late-bind the historical, monkeypatchable storage writer seam."""
-    return _auth_storage.save_cookies_to_storage(*args, **kwargs)
-
-
-def _canonical_cookie_saver_is_current() -> bool:
-    return _auth_storage.save_cookies_to_storage is _CANONICAL_COOKIE_SAVER
+        snapshot: CookieSnapshot,
+    ) -> None:
+        self.set(key, snapshot)
 
 
 _BASELINE_ERRORS = (
@@ -468,7 +439,7 @@ class CookiePersistence:
 
         await to_thread(_save)
 
-    async def save(
+    async def _save_v0_callback(
         self,
         jar: httpx.Cookies,
         path: Path | None = None,
@@ -476,7 +447,7 @@ class CookiePersistence:
         save_cookies_to_storage: SaveCookiesToStorage,
         to_thread: ToThread,
     ) -> None:
-        """Persist through the exact v0.x writer adapter."""
+        """Persist through an explicitly injected v0.x writer callback."""
         store = self._resolve_store(path)
         if store is None:
             return
@@ -508,14 +479,26 @@ class CookiePersistence:
                     original_snapshot=original,
                     return_result=True,
                 )
-                advances = (
-                    result.ok or bool(result.cas_rejected_keys)
-                    if isinstance(result, CookieSaveResult)
-                    else bool(result)
-                )
-                if not advances:
+                advanced: CookieSnapshot | None = None
+                advances_ordering = False
+                if isinstance(result, CookieSaveResult):
+                    if result.ok:
+                        advanced = post
+                        advances_ordering = True
+                    elif result.cas_rejected_keys:
+                        advanced = advance_cookie_snapshot_after_save(
+                            original,
+                            post,
+                            result.cas_rejected_keys,
+                        )
+                        advances_ordering = True
+                elif result:
+                    advanced = post
+                    advances_ordering = True
+                if not advances_ordering:
                     return
-                self._legacy.advance(key, original, post, result)
+                if advanced is not None:
+                    self._legacy.advance(key, advanced)
                 state.last_applied_sequence = seq
                 if isinstance(state.baseline, ReadyBaseline):
                     state.baseline = UninitializedBaseline()

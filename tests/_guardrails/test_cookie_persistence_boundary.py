@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import inspect
+from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -36,6 +37,7 @@ _PRIVATE_MEMBERS = frozenset(
         "register_open_baseline",
         "_prepare_open_baseline",
         "_save_canonical",
+        "_save_v0_callback",
     }
 )
 _PERSISTENCE_FIELDS = {
@@ -52,6 +54,8 @@ _FORBIDDEN_DYNAMIC_MEMBERS = _PRIVATE_MEMBERS | {
 }
 _PERSISTENCE_MODULE = "notebooklm._cookie_persistence"
 
+CookieSaveResultUse = tuple[str, str, str]
+
 
 def _tree(path: Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -64,6 +68,161 @@ def _label(path: Path) -> str:
 def _owner(classes: list[str], functions: list[str]) -> str:
     names = [*classes, *functions[:1]]
     return ".".join(names) if names else "<module>"
+
+
+def _static_cookie_save_result_names(statements: Iterable[ast.stmt]) -> set[str]:
+    """Resolve same-scope names assigned the exact legacy result string."""
+    names: set[str] = set()
+
+    class Visitor(ast.NodeVisitor):
+        def visit_Assign(self, node: ast.Assign) -> None:
+            if isinstance(node.value, ast.Constant) and node.value.value == "CookieSaveResult":
+                for target in node.targets:
+                    names.update(_target_names(target))
+            self.visit(node.value)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if (
+                node.value is not None
+                and isinstance(node.value, ast.Constant)
+                and node.value.value == "CookieSaveResult"
+            ):
+                names.update(_target_names(node.target))
+            if node.value is not None:
+                self.visit(node.value)
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            return
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return
+
+    visitor = Visitor()
+    for statement in statements:
+        visitor.visit(statement)
+    return names
+
+
+def _cookie_save_result_inventory(path: Path, tree: ast.Module) -> Counter[CookieSaveResultUse]:
+    """Conservatively inventory every direct or qualified legacy-result spelling.
+
+    Attribute receivers are intentionally not narrowed to known storage-module
+    aliases: treating every ``*.CookieSaveResult`` as a candidate makes module
+    aliases, facade aliases, and future indirect import spellings fail closed.
+    """
+    inventory: Counter[CookieSaveResultUse] = Counter()
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.classes: list[str] = []
+            self.functions: list[str] = []
+            self.static_string_names = [_static_cookie_save_result_names(tree.body)]
+
+        @property
+        def owner(self) -> str:
+            return _owner(self.classes, self.functions)
+
+        def record(self, kind: str) -> None:
+            inventory[(_label(path), self.owner, kind)] += 1
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            if node.name == "CookieSaveResult":
+                self.record("definition")
+            self.classes.append(node.name)
+            self.static_string_names.append(_static_cookie_save_result_names(node.body))
+            self.generic_visit(node)
+            self.static_string_names.pop()
+            self.classes.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self.functions.append(node.name)
+            self.static_string_names.append(_static_cookie_save_result_names(node.body))
+            self.generic_visit(node)
+            self.static_string_names.pop()
+            self.functions.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            for alias in node.names:
+                if alias.name == "CookieSaveResult":
+                    self.record(f"import:{alias.asname or 'direct'}")
+
+        def visit_Name(self, node: ast.Name) -> None:
+            if node.id == "CookieSaveResult":
+                self.record(f"name:{type(node.ctx).__name__.lower()}")
+
+        def visit_Attribute(self, node: ast.Attribute) -> None:
+            if node.attr == "CookieSaveResult":
+                self.record(f"attribute:{type(node.ctx).__name__.lower()}")
+            self.generic_visit(node)
+
+        def is_cookie_save_result_key(self, node: ast.AST) -> bool:
+            if isinstance(node, ast.Constant):
+                return node.value == "CookieSaveResult"
+            return isinstance(node, ast.Name) and any(
+                node.id in names for names in reversed(self.static_string_names)
+            )
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id in {"getattr", "hasattr"}
+                and len(node.args) >= 2
+                and self.is_cookie_save_result_key(node.args[1])
+            ):
+                self.record(f"dynamic:{node.func.id}")
+            self.generic_visit(node)
+
+        def visit_Subscript(self, node: ast.Subscript) -> None:
+            if self.is_cookie_save_result_key(node.slice):
+                self.record("dynamic:subscript")
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    return inventory
+
+
+def _cookie_save_result_branch_owners(path: Path, tree: ast.Module) -> set[tuple[str, str]]:
+    owners: set[tuple[str, str]] = set()
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.classes: list[str] = []
+            self.functions: list[str] = []
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self.classes.append(node.name)
+            self.generic_visit(node)
+            self.classes.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self.functions.append(node.name)
+            self.generic_visit(node)
+            self.functions.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "isinstance"
+                and any(
+                    (isinstance(argument, ast.Name) and argument.id == "CookieSaveResult")
+                    or (isinstance(argument, ast.Attribute) and argument.attr == "CookieSaveResult")
+                    for argument in node.args[1:]
+                )
+            ):
+                owners.add((_label(path), _owner(self.classes, self.functions)))
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    return owners
 
 
 def _target_names(node: ast.AST | None) -> set[str]:
@@ -840,7 +999,6 @@ def test_persistence_and_legacy_adapter_own_exact_state() -> None:
         "logger",
         "T",
         "BaselineState",
-        "_CANONICAL_COOKIE_SAVER",
         "_BASELINE_ERRORS",
     }
 
@@ -912,15 +1070,15 @@ def test_typed_merge_and_pair_parser_ownership_is_exact() -> None:
         "_adopt_reloaded_baseline",
         "_prepare_open_baseline",
         "_save_canonical",
-        "save",
+        "_save_v0_callback",
     }
 
 
-def test_canonical_and_legacy_routes_keep_capabilities_separate() -> None:
+def test_canonical_and_explicit_v0_routes_keep_capabilities_separate() -> None:
     tree = _tree(PERSISTENCE_PATH)
     methods = _methods(_class(tree, "CookiePersistence"))
     canonical = ast.unparse(methods["_save_canonical"])
-    legacy = ast.unparse(methods["save"])
+    legacy = ast.unparse(methods["_save_v0_callback"])
     assert "merge_cookie_observation" in canonical
     assert "save_cookies_to_storage" not in canonical
     assert "merge_cookie_observation" not in legacy
@@ -928,12 +1086,108 @@ def test_canonical_and_legacy_routes_keep_capabilities_separate() -> None:
     lifecycle = ast.unparse(
         _methods(_class(_tree(LIFECYCLE_PATH), "ClientLifecycle"))["save_cookies"]
     )
-    assert "self._uses_default_cookie_saver and _canonical_cookie_saver_is_current()" in lifecycle
-    assert lifecycle.index("_canonical_cookie_saver_is_current") < lifecycle.index(
-        "_save_canonical"
-    )
+    assert "if self._cookie_saver is None" in lifecycle
+    assert lifecycle.index("self._cookie_saver is None") < lifecycle.index("_save_canonical")
+    assert "_save_v0_callback" in lifecycle
     init = ast.unparse(_methods(_class(_tree(LIFECYCLE_PATH), "ClientLifecycle"))["__init__"])
-    assert "self._uses_default_cookie_saver = cookie_saver is None" in init
+    assert "self._cookie_saver: CookieSaver | None = cookie_saver" in init
+    assert "_uses_default_cookie_saver" not in init
+
+
+def test_cookie_save_result_imports_and_consumers_are_exact() -> None:
+    inventory = sum(
+        (
+            _cookie_save_result_inventory(path, _tree(path))
+            for path in sorted(SRC_ROOT.rglob("*.py"))
+        ),
+        Counter(),
+    )
+    assert inventory == Counter(
+        {
+            ("_auth/storage.py", "<module>", "definition"): 1,
+            ("_auth/storage.py", "_cookie_save_return", "name:load"): 2,
+            ("_auth/storage.py", "save_cookies_to_storage", "name:load"): 1,
+            ("_auth/storage.py", "merge_cookie_delta", "name:load"): 4,
+            ("_cookie_persistence.py", "<module>", "import:direct"): 1,
+            ("_cookie_persistence.py", "SaveCookiesToStorage.__call__", "name:load"): 1,
+            (
+                "_cookie_persistence.py",
+                "CookiePersistence._save_v0_callback",
+                "name:load",
+            ): 1,
+            ("auth.py", "<module>", "name:store"): 1,
+            ("auth.py", "<module>", "attribute:load"): 1,
+        }
+    )
+
+    branch_owners = set().union(
+        *(
+            _cookie_save_result_branch_owners(path, _tree(path))
+            for path in sorted(SRC_ROOT.rglob("*.py"))
+        )
+    )
+    assert branch_owners == {("_cookie_persistence.py", "CookiePersistence._save_v0_callback")}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import notebooklm._auth.storage as s\ndef bad(value):\n return isinstance(value, s.CookieSaveResult)",
+        "from notebooklm._auth import storage as s\ndef bad(value):\n return s.CookieSaveResult(False)",
+        "from notebooklm._auth.storage import CookieSaveResult as CSR\ndef bad(value):\n return CSR(False)",
+        "def bad(storage, value):\n return isinstance(value, getattr(storage, 'CookieSaveResult'))",
+        "import notebooklm._auth.storage as s\ndef bad(value):\n return isinstance(value, s.__dict__['CookieSaveResult'])",
+        "import notebooklm._auth.storage as s\nRESULT = 'CookieSaveResult'\ndef bad(value):\n return isinstance(value, getattr(s, RESULT))",
+    ],
+    ids=[
+        "import-alias",
+        "from-module-alias",
+        "direct-type-alias",
+        "dynamic",
+        "module-dict-subscript",
+        "constant-backed-dynamic",
+    ],
+)
+def test_cookie_save_result_inventory_catches_qualified_bypasses(source: str) -> None:
+    inventory = _cookie_save_result_inventory(SRC_ROOT / "synthetic.py", ast.parse(source))
+    assert inventory
+
+
+def test_persistence_route_debug_events_are_exact_and_value_free() -> None:
+    method = _methods(_class(_tree(LIFECYCLE_PATH), "ClientLifecycle"))["save_cookies"]
+    route = next(
+        statement
+        for statement in method.body
+        if isinstance(statement, ast.If)
+        and ast.unparse(statement.test) == "self._cookie_saver is None"
+    )
+
+    def debug_projection(statements: list[ast.stmt]) -> tuple[str, str]:
+        calls = [
+            node
+            for statement in statements
+            for node in ast.walk(statement)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "logger"
+            and node.func.attr == "debug"
+        ]
+        assert len(calls) == 1
+        assert not calls[0].keywords
+        assert len(calls[0].args) == 2
+        message = calls[0].args[0]
+        assert isinstance(message, ast.Constant) and isinstance(message.value, str)
+        return message.value, ast.unparse(calls[0].args[1])
+
+    assert debug_projection(route.body) == (
+        "Cookie persistence route: type=canonical_store status=dispatch path=%s",
+        "effective_path",
+    )
+    assert debug_projection(route.orelse) == (
+        "Cookie persistence route: type=explicit_v0_callback status=dispatch path=%s",
+        "effective_path",
+    )
 
 
 def test_runtime_factory_has_no_auth_tokens_persistence_handoff() -> None:
@@ -1212,11 +1466,16 @@ def test_public_exports_and_compatibility_signatures_remain_narrow() -> None:
     from notebooklm._runtime.lifecycle import ClientLifecycle
 
     assert module.__all__ == ["CookiePersistence", "SaveCookiesToStorage"]
-    assert str(inspect.signature(module.CookiePersistence.save)) == (
+    assert str(inspect.signature(module.SaveCookiesToStorage.__call__)) == (
+        "(self, cookie_jar: 'httpx.Cookies', path: 'Path', /, *, "
+        "original_snapshot: 'CookieSnapshot | None', return_result: 'bool') -> "
+        "'bool | CookieSaveResult'"
+    )
+    assert str(inspect.signature(module.CookiePersistence._save_v0_callback)) == (
         "(self, jar: 'httpx.Cookies', path: 'Path | None' = None, *, "
         "save_cookies_to_storage: 'SaveCookiesToStorage', to_thread: 'ToThread') -> 'None'"
     )
-    assert "store" not in inspect.signature(module.CookiePersistence.save).parameters
+    assert "store" not in inspect.signature(module.CookiePersistence._save_v0_callback).parameters
     assert str(inspect.signature(module.CookiePersistence._save_canonical)) == (
         "(self, jar: 'httpx.Cookies', path: 'Path | None', *, to_thread: 'ToThread') -> 'None'"
     )

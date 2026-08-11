@@ -189,7 +189,9 @@ def test_production_consumers_are_exactly_the_approved_set() -> None:
             consumers.append(path.relative_to(REPO_ROOT).as_posix())
     assert consumers == [
         "src/notebooklm/_auth/account_email.py",
+        "src/notebooklm/_auth/browser_capture.py",
         "src/notebooklm/_auth/cookie_merge.py",
+        "src/notebooklm/_auth/profile_migration.py",
         "src/notebooklm/_auth/profile_store.py",
         "src/notebooklm/_auth/psidts_recovery.py",
         "src/notebooklm/_auth/storage.py",
@@ -200,6 +202,6 @@ def test_production_consumers_are_exactly_the_approved_set() -> None:
 def test_profile_document_size_and_documentation_pins_hold() -> None:
     # Kept equal to the ordinary module-size ratchet so this consumer boundary
     # cannot retain stale pre-extraction prose or bank facade slack.
-    assert len((AUTH_ROOT / "storage.py").read_text(encoding="utf-8").splitlines()) == 1127
+    assert len((AUTH_ROOT / "storage.py").read_text(encoding="utf-8").splitlines()) == 1090
     assert len((AUTH_ROOT / "cookies.py").read_text(encoding="utf-8").splitlines()) == 961
     assert len(ADR_PATH.read_text(encoding="utf-8").splitlines()) < 250

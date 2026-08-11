@@ -53,12 +53,11 @@ EVENT_TIMEOUT_S = 5.0
 
 
 class _KernelStub:
-    """Minimal kernel-shaped stub exposing only :meth:`get_http_client`.
+    """Minimal kernel-shaped stub exposing the kernel-owned cookie jar.
 
-    The coordinator's :meth:`update_auth_headers` reads
-    ``kernel.get_http_client().cookies`` and nothing else; an
-    ``httpx.AsyncClient``-backed shim satisfies that surface without
-    pulling in the full :class:`Kernel`.
+    The coordinator's compatibility sync reads ``kernel.cookies``. An
+    ``httpx.AsyncClient``-backed shim satisfies that surface without pulling
+    in the full :class:`Kernel`.
     """
 
     def __init__(self, http_client: httpx.AsyncClient | None = None) -> None:
@@ -67,6 +66,10 @@ class _KernelStub:
     def get_http_client(self) -> httpx.AsyncClient:
         assert self.http_client is not None, "Test forgot to wire an http client."
         return self.http_client
+
+    @property
+    def cookies(self) -> httpx.Cookies:
+        return self.get_http_client().cookies
 
 
 def _fresh_auth() -> AuthTokens:
@@ -374,19 +377,18 @@ async def test_await_refresh_releases_lock_when_metric_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# update_auth_headers — syncs auth.cookie_jar from get_http_client().cookies
+# update_auth_headers — compatibility-syncs shadows from kernel.cookies
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_update_auth_headers_syncs_cookie_jar_from_get_http_client(
+async def test_update_auth_headers_syncs_cookie_jar_from_kernel(
     auth_with_kernel: tuple[AuthTokens, _KernelStub],
 ) -> None:
-    """``update_auth_headers`` copies ``kernel.get_http_client().cookies`` onto auth.
+    """``update_auth_headers`` copies ``kernel.cookies`` onto auth.
 
     Pins:
-    * the read is via the ``kernel.get_http_client()`` METHOD on the
-      explicit ``kernel`` collaborator (not a host-shaped attribute);
+    * the read is via ``kernel.cookies`` on the explicit kernel collaborator;
     * the destination is ``auth.cookie_jar`` (the cookie jar reference,
       not a dict copy).
     """
@@ -395,10 +397,8 @@ async def test_update_auth_headers_syncs_cookie_jar_from_get_http_client(
     # Sanity: pre-call, auth.cookie_jar is whatever AuthTokens initialised.
     live_jar = kernel.get_http_client().cookies
 
-    # _KernelStub structurally satisfies the surface that
-    # ``update_auth_headers`` actually reads (``get_http_client()``) but is
-    # not the nominal :class:`Kernel`; ``cast`` is cheaper than introducing
-    # a Protocol just for one test seam.
+    # _KernelStub structurally satisfies the surface but is not the nominal
+    # Kernel; ``cast`` is cheaper than introducing a Protocol for one seam.
     coord.update_auth_headers(auth=auth, kernel=cast(Kernel, kernel))
 
     # The auth.cookie_jar attribute is now identically the live jar.

@@ -26,6 +26,7 @@ _LOGIN_PARAMETERS = {
     "ctx",
     "storage",
     "browser",
+    "browser_timeout",
     "browser_cookies",
     "account_email",
     "all_accounts",

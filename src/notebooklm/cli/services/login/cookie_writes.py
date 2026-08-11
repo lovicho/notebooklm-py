@@ -34,11 +34,10 @@ import httpx
 # facade — ``cli/`` may not import private ``_auth.*`` modules
 # (tests/_guardrails/test_cli_boundary.py).
 from ....auth import (
-    AccountRecord,
     cookie_names_from_storage,
     fetch_tokens_with_domains,
     missing_cookies_hint,
-    replace_from_login,
+    replace_profile_from_login,
     validate_with_recovery,
 )
 from .outcomes import (
@@ -228,11 +227,13 @@ def _write_extracted_cookies(
     # ``validate_with_recovery`` above still runs FIRST (recovery must see the
     # full jar); the writer then filters + revalidates on the filtered state.
     try:
-        outcome = replace_from_login(
+        outcome = replace_profile_from_login(
             storage_path,
             storage_state,
             include_domains=include_domains,
-            account=AccountRecord(authuser=authuser, email=email),
+            account_mode="set",
+            account_authuser=authuser,
+            account_email=email,
         )
     except OSError as e:
         # G6: redact the bound exception in the log line (use the type
@@ -269,8 +270,8 @@ def _write_extracted_cookies(
             ),
         )
 
-    # replace_from_login already scrubbed the legacy sibling context.json[account]
-    # key as part of its own atomic write (_auth/storage.py).
+    # replace_profile_from_login already scrubbed the legacy sibling context.json[account]
+    # key after its native profile write (_auth/profile_migration.py).
 
     # Success-path confirmation print is the caller's job. We log a
     # debug breadcrumb so operators can correlate the write without

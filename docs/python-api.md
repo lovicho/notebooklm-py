@@ -130,7 +130,7 @@ from notebooklm import AuthTokens
 auth = AuthTokens(
     cookies={"SID": "...", "HSID": "..."},  # (other cookies elided for brevity)
     csrf_token="...",
-    session_id="..."
+    session_id="...",
 )
 client = NotebookLMClient(auth)
 
@@ -145,6 +145,20 @@ Constructing `AuthTokens(..., storage_path=..., cookie_jar=None)` also remains
 compatible through v0.x, but its implicit synchronous storage/recovery I/O is
 deprecated on the same schedule. Prefer the managed client; low-level callers
 that already own a live jar should pass `cookie_jar=` explicitly.
+
+The v0.9 cookie-view runway preserves the `AuthTokens` constructor and dataclass
+behavior while moving managed clients toward one live authority:
+
+| Surface | v0.9 behavior and migration |
+|---|---|
+| `flat_cookies` | Direct access warns because the name-only map loses domain/path siblings. Use `jar` for bootstrap-cookie questions and managed client APIs for requests. |
+| `cookies`, `cookie_jar` | Docs-only deprecated compatibility fields. They cannot warn without making construction, repr, equality, and `dataclasses.replace()` noisy. |
+| `jar` | Warning-free transitional shape for the v1 immutable `initial_cookies: CookieJar` bootstrap field. |
+| `cookie_header`, `cookie_header_for(url)` | Scheduled for v1 deletion; use managed client request APIs. Both remain warning-free in v0.x. |
+
+`CookieJar` is an immutable, ordered sequence of `Cookie` rows—not a mapping and
+not a live transport jar. Iteration yields rows, `len()` counts rows, and
+duplicate names on different domain/path routes remain distinct.
 
 **Building a storage state from existing browser cookies (`[cookies]` extra):**
 
@@ -908,6 +922,15 @@ class NotebookLMClient:
 `typing.Any`. The default-shape call (`client.rpc_call(method, params)`)
 forwards to the underlying `RpcExecutor.rpc_call` with its canonical
 defaults.
+
+**Cookie persistence override:** `cookie_saver=None` (the default) uses the
+canonical typed `ProfileStore` merge for close, refresh, and keepalive saves.
+Supplying `cookie_saver=` retains the v0.x callback compatibility seam; the
+callback receives a defensive copy and runs in a worker thread. It is invoked
+as `saver(jar, path, original_snapshot=..., return_result=True)` and may return
+`bool` or `CookieSaveResult`. Rebinding
+`notebooklm._auth.storage.save_cookies_to_storage` does not change a live
+client's normal persistence route.
 
 > **Removed in v0.6.0.** The three previously-deprecated kwargs
 > (`source_path`, `_is_retry`, `operation_variant`) were removed after

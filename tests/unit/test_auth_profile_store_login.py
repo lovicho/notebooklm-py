@@ -140,6 +140,26 @@ def test_request_result_and_method_shapes_are_exact_redacted_and_closed() -> Non
     assert applied.backup_path == Path("A.json.bak")
     assert locked.missing_required == locked.present_names == ()
     assert rejected.missing_required == ("B", "SID")
+    assert (applied.ok, applied.lock_unavailable, applied.required_cookies_dropped) == (
+        True,
+        False,
+        False,
+    )
+    assert (locked.ok, locked.lock_unavailable, locked.required_cookies_dropped) == (
+        False,
+        True,
+        False,
+    )
+    assert (rejected.ok, rejected.lock_unavailable, rejected.required_cookies_dropped) == (
+        False,
+        False,
+        True,
+    )
+    assert {name for name, value in vars(ReplaceResult).items() if isinstance(value, property)} == {
+        "ok",
+        "lock_unavailable",
+        "required_cookies_dropped",
+    }
     with pytest.raises(FrozenInstanceError):
         applied.status = ReplaceStatus.LOCK_UNAVAILABLE  # type: ignore[misc]
 

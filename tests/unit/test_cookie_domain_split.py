@@ -100,31 +100,27 @@ class TestWriteTimeFilterParity:
 
     Before b-PR3 each rookiepy/Firefox writer imported its own module-level
     ``filter_storage_state_cookies_by_domain_policy`` binding and the pin asserted
-    those bindings were identical. Since b-PR3 the write-time filter + the
-    post-filter required-cookie revalidation are owned by
-    ``ProfileStore.replace_from_login`` behind the unchanged
-    ``storage.replace_from_login`` adapter; the three CLI writers
+    those bindings were identical. The write-time filter and post-filter
+    required-cookie revalidation are now owned by ``ProfileStore.replace_from_login``;
+    the three CLI writers
     (``cookie_writes._write_extracted_cookies``,
     ``refresh._login_with_browser_cookies``, ``_cookie_import._import_cookie_json``)
-    all call that ONE function via the ``notebooklm.auth`` facade. On-disk parity
+    all call the native path-shaped operation through the ``notebooklm.auth`` ledger. On-disk parity
     with the Playwright capture arms now follows from **writer-routing identity**
     (one writer, one filter) rather than from each module binding the same filter.
     """
 
     def test_all_login_paths_route_through_one_writer(self):
-        """Routing identity: every login/import writer calls the SAME
-        ``replace_from_login`` (the single auth-facade export)."""
+        """Routing identity: every login/import flow uses the native operation."""
         import notebooklm.auth as auth_module
-        from notebooklm._auth import storage
         from notebooklm.cli import _cookie_import
         from notebooklm.cli.services.login import cookie_writes, refresh
 
-        canonical = storage.replace_from_login
-        assert auth_module.replace_from_login is canonical
-        assert cookie_writes.replace_from_login is canonical
-        assert _cookie_import.replace_from_login is canonical
+        canonical = auth_module.replace_profile_from_login
+        assert cookie_writes.replace_profile_from_login is canonical
+        assert _cookie_import.replace_profile_from_login is canonical
         # The refresh driver reaches it through its injectable deps seam.
-        assert refresh.default_refresh_deps().replace_from_login is canonical
+        assert refresh.default_refresh_deps().replace_profile_from_login is canonical
 
     def test_writer_binds_the_playwright_filter(self):
         """Identity pin: the filter the writer applies IS the filter the

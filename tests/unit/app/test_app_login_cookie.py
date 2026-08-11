@@ -10,7 +10,6 @@ import traceback
 import warnings
 import weakref
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -39,6 +38,7 @@ from notebooklm._app.login_cookie import (
     project_browser_account,
     resolve_cookie_domains,
 )
+from notebooklm._auth.profile_store import ReplaceResult, ReplaceStatus
 from notebooklm.cli import _cookie_import as cookie_import_module
 from tests._guardrails._ast_semantics import semantic_hash as _portable_semantic_hash
 
@@ -64,16 +64,14 @@ def _release_exception_traceback(error: BaseException) -> None:
     error.__traceback__ = None
 
 
-def _writer_outcome(**changes: object) -> SimpleNamespace:
-    values: dict[str, object] = {
-        "required_cookies_dropped": False,
-        "lock_unavailable": False,
-        "missing_required": (),
-        "present_names": (),
-        "backup_path": None,
-    }
-    values.update(changes)
-    return SimpleNamespace(**values)
+def _writer_result(
+    status: ReplaceStatus = ReplaceStatus.APPLIED,
+    *,
+    missing_required: tuple[str, ...] = (),
+    present_names: tuple[str, ...] = (),
+    backup_path: Path | None = None,
+) -> ReplaceResult:
+    return ReplaceResult(status, missing_required, present_names, backup_path)
 
 
 def test_request_and_result_repr_redact_cookie_values(tmp_path: Path) -> None:
@@ -176,14 +174,16 @@ def test_import_preserves_callback_order_identity_and_backup(tmp_path: Path) -> 
         *,
         include_domains: set[str] | None,
         include_optional: bool,
+        account_mode: str,
         backup: bool,
     ) -> Any:
         events.append(("writer", state, include_domains))
         assert path == tmp_path / "state.json"
         assert include_domains is domains
         assert include_optional is True
+        assert account_mode == "keep"
         assert backup is True
-        return _writer_outcome(backup_path=backup_path)
+        return _writer_result(backup_path=backup_path)
 
     request = CookieImportRequest(
         payload=_valid_rows(),
@@ -192,7 +192,9 @@ def test_import_preserves_callback_order_identity_and_backup(tmp_path: Path) -> 
         include_optional=True,
     )
     result = import_cookie_payload(
-        request, filter_storage_state=filter_state, replace_from_login=writer
+        request,
+        filter_storage_state=filter_state,
+        replace_profile_from_login=writer,
     )
 
     assert isinstance(result, CookieImportSuccess)
@@ -213,7 +215,7 @@ def test_import_failure_precedence_and_no_extra_write(tmp_path: Path) -> None:
     result = import_cookie_payload(
         request,
         filter_storage_state=lambda state, **_: state,
-        replace_from_login=writer,
+        replace_profile_from_login=writer,
     )
     assert isinstance(result, CookieImportFailure)
     assert result.code == "EMPTY_REQUIRED"
@@ -229,9 +231,8 @@ def test_import_writer_required_drop_precedes_lock(tmp_path: Path) -> None:
             include_optional=False,
         ),
         filter_storage_state=lambda state, **_: state,
-        replace_from_login=lambda *_, **__: _writer_outcome(
-            required_cookies_dropped=True,
-            lock_unavailable=True,
+        replace_profile_from_login=lambda *_, **__: _writer_result(
+            ReplaceStatus.REQUIRED_COOKIES_DROPPED,
             missing_required=("SID",),
         ),
     )
@@ -249,7 +250,7 @@ def test_import_unexpected_filter_error_is_same_object(tmp_path: Path) -> None:
         import_cookie_payload(
             CookieImportRequest(_valid_rows(), tmp_path / "state.json", set(), False),
             filter_storage_state=fail,
-            replace_from_login=MagicMock(),
+            replace_profile_from_login=MagicMock(),
         )
     assert caught.value is error
     assert caught.value.__cause__ is None
@@ -275,7 +276,7 @@ def test_payload_and_raw_cookie_canaries_collect_after_licensed_traceback_releas
         import_cookie_payload(
             CookieImportRequest(payload, tmp_path / "state.json", set(), False),
             filter_storage_state=fail_filter,
-            replace_from_login=MagicMock(),
+            replace_profile_from_login=MagicMock(),
         )
     _release_exception_traceback(filter_failure)
     payload = None
@@ -463,8 +464,8 @@ def test_quiet_network_error_is_reraised_same_object(monkeypatch: pytest.MonkeyP
 
 
 _SEMANTIC_HASHES = {
-    "login_cookie": "c6433e3b9441ed49935715179c213c199b1d8003b29203e1085962e9ca6d787d",
-    "cookie_import": "d79cba286f232b5c809877c8b94b672d2ff05c81fdb464ff5e566744aa158130",
+    "login_cookie": "ba59ebbc0bec733f33a8e8239fc747a8da391b5293a52a94a0a2f7c039daed2c",
+    "cookie_import": "5a50d08f573f05bf6eba1879014d9c6736a152a37456009da8306a9f6f49281f",
     "browser_accounts": "2ffaac1f3017e82ad9aca92337b6906e19a29ec11b14e76cad83b6418e598603",
     "chromium_accounts": "7cd41ed186d67d604ffb30b43a0b0160cd80e1749cb124cb6d4d5ed0379d5486",
     "cookie_domains": "9874aab5c760feab5cc772bf0792f3775c1377896db7bf4ba22542432c31b534",

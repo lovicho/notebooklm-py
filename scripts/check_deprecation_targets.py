@@ -74,8 +74,12 @@ _DEPRECATION_CALL_NAMES = frozenset({"warnings.warn", "warn", "DeprecationWarnin
 _REGISTERED_EMITTER = "warn_registered_deprecation"
 _SPEC_TABLE = "DEPRECATION_SPECS"
 _SPEC_FIELDS = ("key", "message", "category", "replacement", "since", "removal", "stacklevel")
-_AUTH_STORAGE_SPEC_KEYS = frozenset(
-    {"auth_tokens_from_storage", "auth_tokens_sync_storage_construction"}
+_REGISTERED_SPEC_KEYS = frozenset(
+    {
+        "auth_tokens_flat_cookies",
+        "auth_tokens_from_storage",
+        "auth_tokens_sync_storage_construction",
+    }
 )
 _SEMVER = re.compile(r"^[0-9]+\.[0-9]+(?:\.[0-9]+)?$")
 
@@ -208,7 +212,9 @@ def _spec_arguments(node: ast.Call, problems: list[str]) -> dict[str, ast.AST]:
     return values
 
 
-def _find_public_symbol(module: ast.Module, name: str) -> ast.AST | tuple[str, str] | None:
+def _find_public_symbol(
+    module: ast.Module, name: str
+) -> ast.AST | tuple[int, str | None, str] | None:
     for statement in module.body:
         if isinstance(statement, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             if statement.name == name:
@@ -216,10 +222,44 @@ def _find_public_symbol(module: ast.Module, name: str) -> ast.AST | tuple[str, s
         if isinstance(statement, ast.ImportFrom):
             for alias in statement.names:
                 if (alias.asname or alias.name) == name:
-                    if statement.level != 1 or not statement.module:
-                        return None
-                    return statement.module, alias.name
+                    return statement.level, statement.module, alias.name
     return None
+
+
+def _module_source(module_parts: tuple[str, ...]) -> tuple[Path, bool] | None:
+    """Return one unambiguous in-package module source and whether it is a package."""
+    module_path = SRC_ROOT.joinpath(*module_parts)
+    module_file = module_path.with_suffix(".py") if module_parts else SRC_ROOT / "__init__.py"
+    package_file = module_path / "__init__.py" if module_parts else None
+    candidates = [(module_file, False)]
+    if package_file is not None:
+        candidates.append((package_file, True))
+    existing = [candidate for candidate in candidates if candidate[0].is_file()]
+    if len(existing) != 1:
+        return None
+    return existing[0]
+
+
+def _imported_module_parts(
+    current_parts: tuple[str, ...],
+    current_is_package: bool,
+    level: int,
+    imported_module: str | None,
+) -> tuple[str, ...] | None:
+    """Resolve an ``ImportFrom`` module relative to its containing package."""
+    imported_parts = tuple(imported_module.split(".")) if imported_module else ()
+    if level == 0:
+        if not imported_parts or imported_parts[0] != "notebooklm":
+            return None
+        return imported_parts[1:]
+
+    package_parts = current_parts if current_is_package else current_parts[:-1]
+    parents_to_drop = level - 1
+    if parents_to_drop > len(package_parts):
+        return None
+    if parents_to_drop:
+        package_parts = package_parts[:-parents_to_drop]
+    return package_parts + imported_parts
 
 
 def _replacement_resolves(replacement: str) -> bool:
@@ -227,22 +267,37 @@ def _replacement_resolves(replacement: str) -> bool:
     parts = replacement.split(".")
     if len(parts) < 2 or parts[0] != "notebooklm" or any(not part for part in parts):
         return False
-    init_path = SRC_ROOT / "__init__.py"
-    if not init_path.is_file():
-        return False
-    module = ast.parse(init_path.read_text(encoding="utf-8"), filename=str(init_path))
-    target = _find_public_symbol(module, parts[1])
-    if isinstance(target, tuple):
-        module_name, imported_name = target
-        source = SRC_ROOT.joinpath(*module_name.split(".")).with_suffix(".py")
-        if not source.is_file():
-            source = SRC_ROOT.joinpath(*module_name.split("."), "__init__.py")
-        if not source.is_file():
+
+    module_parts: tuple[str, ...] = ()
+    symbol_name = parts[1]
+    visited_reexports: set[tuple[tuple[str, ...], str]] = set()
+    while True:
+        visit = (module_parts, symbol_name)
+        if visit in visited_reexports:
             return False
+        visited_reexports.add(visit)
+
+        source_info = _module_source(module_parts)
+        if source_info is None:
+            return False
+        source, is_package = source_info
         module = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-        target = _find_public_symbol(module, imported_name)
-    if target is None or isinstance(target, tuple):
-        return False
+        target = _find_public_symbol(module, symbol_name)
+        if not isinstance(target, tuple):
+            if target is None:
+                return False
+            break
+        level, imported_module, symbol_name = target
+        resolved_parts = _imported_module_parts(
+            module_parts,
+            is_package,
+            level,
+            imported_module,
+        )
+        if resolved_parts is None:
+            return False
+        module_parts = resolved_parts
+
     for attribute in parts[2:]:
         if not isinstance(target, ast.ClassDef):
             return False
@@ -346,9 +401,9 @@ def _registered_deprecation_problems(version: str) -> list[str]:
         specs[table_key] = parsed
 
     actual_keys = frozenset(specs)
-    if actual_keys != _AUTH_STORAGE_SPEC_KEYS:
+    if actual_keys != _REGISTERED_SPEC_KEYS:
         problems.append(
-            f"{_SPEC_TABLE} keys differ: expected {sorted(_AUTH_STORAGE_SPEC_KEYS)!r}, "
+            f"{_SPEC_TABLE} keys differ: expected {sorted(_REGISTERED_SPEC_KEYS)!r}, "
             f"got {sorted(actual_keys)!r}"
         )
 
@@ -367,10 +422,17 @@ def _registered_deprecation_problems(version: str) -> list[str]:
             field_value = spec.get(field)
             if not isinstance(field_value, str) or not _SEMVER.fullmatch(field_value):
                 problems.append(f"{table_key}.{field} must be a literal semantic version")
+        since = spec.get("since")
         removal = spec.get("removal")
-        if isinstance(removal, str) and _SEMVER.fullmatch(removal):
-            if _version_key(removal) == _version_key(version):
-                problems.append(f"{table_key}.removal equals shipping version {version}")
+        valid_since = isinstance(since, str) and _SEMVER.fullmatch(since)
+        valid_removal = isinstance(removal, str) and _SEMVER.fullmatch(removal)
+        if valid_since and valid_removal and _version_key(since) >= _version_key(removal):
+            problems.append(f"{table_key}.since must precede removal")
+        if valid_removal and _SEMVER.fullmatch(version):
+            if _version_key(removal) <= _version_key(version):
+                problems.append(
+                    f"{table_key}.removal {removal} is not after shipping version {version}"
+                )
         stacklevel = spec.get("stacklevel")
         if not isinstance(stacklevel, int) or isinstance(stacklevel, bool) or stacklevel < 1:
             problems.append(f"{table_key}.stacklevel must be a positive integer literal")

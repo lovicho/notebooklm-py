@@ -43,11 +43,10 @@ Design constraints (load-bearing — see ``tests/unit/test_client_keepalive.py``
   short-circuits before the chain leaf reaches httpx, so the httpx-layer
   transport stays a real, unwrapped transport at all times.
 
-* :meth:`save_cookies` forwards the lifecycle's ``_cookie_saver`` wrapper
-  (``_default_cookie_saver`` by default) to ``CookiePersistence._save``;
-  the wrapper late-binds ``save_cookies_to_storage`` from
-  ``notebooklm._auth.storage`` at call time so a ``monkeypatch.setattr``
-  on the canonical seam keeps affecting the live save path.
+* :meth:`save_cookies` always uses the typed ``ProfileStore`` path when no
+  callback was injected. An explicit ``cookie_saver=`` is isolated behind the
+  named v0.x callback adapter; normal runtime behavior never inspects a mutable
+  module attribute to choose its route.
 
 * ``_bound_loop`` is bound exactly once per :meth:`open` call; :meth:`close`
   does NOT unbind so an accidental cross-loop call after close still raises
@@ -73,16 +72,12 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from .._cookie_persistence import (
-    _canonical_cookie_saver_is_current,
-    _default_cookie_saver,
-)
+from .._cookie_persistence import SaveCookiesToStorage
 from .._kernel import Kernel
 from ..auth import AuthTokens
 from .config import CORE_LOGGER_NAME
 
 if TYPE_CHECKING:
-    from .._auth.storage import CookieSaveResult
     from .._chat import ChatAPI
     from .._client_composed import ClientComposed
     from .._cookie_persistence import CookiePersistence
@@ -97,13 +92,10 @@ if TYPE_CHECKING:
 # Injectable seams
 # ---------------------------------------------------------------------------
 #
-# These two callable seams let host integrations swap the on-disk cookie
-# writer and the identity-surface poke without monkeypatching the
-# canonical seams directly. The defaults preserve the late-binding
-# contract: tests patch ``notebooklm._auth.storage.save_cookies_to_storage``
-# or ``notebooklm._auth.keepalive._rotate_cookies`` and the wrapper body
-# observes the swap because it resolves the target inside its body — see
-# ``_default_cookie_saver`` / ``_default_cookie_rotator`` below.
+# These two callable seams let host integrations supply an explicit v0.x
+# on-disk cookie callback or swap the identity-surface poke. A missing cookie
+# callback selects the canonical typed store path; the rotator keeps its
+# historical late-bound default.
 #
 # Concrete return types (not ``Callable[..., Any]``) are deliberate so mypy
 # rejects an ``async def`` mistakenly passed for ``cookie_saver`` (the
@@ -111,10 +103,8 @@ if TYPE_CHECKING:
 # plain ``def`` mistakenly passed for ``cookie_rotator`` (the rotator is
 # awaited from the keepalive loop and must return an ``Awaitable``).
 
-#: Callable shape for the on-disk cookie writer. ``CookieSaveResult`` is
-#: imported under ``TYPE_CHECKING``; the inner forward-string keeps the
-#: alias evaluable at runtime without a circular auth import.
-CookieSaver = Callable[..., "bool | CookieSaveResult"]
+#: Callable shape for the explicitly injected v0.x writer adapter.
+CookieSaver = SaveCookiesToStorage
 
 #: Callable shape for the keepalive-loop cookie rotator. ``Awaitable[None]``
 #: pins the async-callable contract so mypy rejects sync ``def`` callables
@@ -191,15 +181,9 @@ class ClientLifecycle:
         # attribute for tests and private callers that probe it directly.
         self._bound_loop: asyncio.AbstractEventLoop | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
-        # Injectable seams. ``None`` resolves to the module-
-        # level late-binding default — the default wraps the canonical
-        # ``_auth.storage`` / ``_auth.keepalive`` lookup inside its body.
-        # Custom callables skip the late-bind hop entirely and run directly
-        # (host integrations that want to bypass the monkeypatch surface).
-        # ``or`` (not ``if x is not None else``) is fine here: ``None`` is
-        # the only documented sentinel and any other callable is truthy.
-        self._uses_default_cookie_saver = cookie_saver is None
-        self._cookie_saver: CookieSaver = cookie_saver or _default_cookie_saver
+        # ``None`` means the unconditional typed ProfileStore route. Only an
+        # explicit callback reaches the isolated v0.x result adapter.
+        self._cookie_saver: CookieSaver | None = cookie_saver
         self._cookie_rotator: CookieRotator = cookie_rotator or _default_cookie_rotator
 
     @property
@@ -413,13 +397,10 @@ class ClientLifecycle:
         """Persist a cookie jar through the shared cookie-persistence collaborator.
 
         Single chokepoint used by :meth:`close`, :meth:`_keepalive_loop`, and
-        ``NotebookLMClient.refresh_auth``. The storage writer is delegated
-        to ``self._cookie_saver`` (injectable seam). The
-        default :func:`_default_cookie_saver` wrapper performs a late-bound
-        ``from notebooklm._auth.storage import save_cookies_to_storage`` lookup inside
-        its body so a ``monkeypatch.setattr`` on the canonical seam keeps
-        affecting the live save path through the wrapper. Custom callables
-        bypass the late-bind hop entirely.
+        ``NotebookLMClient.refresh_auth``. ``None`` selects the canonical typed
+        store path unconditionally; an explicitly supplied ``cookie_saver=``
+        selects the v0.x callback adapter. Neither branch inspects or imports
+        the public storage wrapper to decide normal runtime behavior.
 
         The first positional argument is the :class:`CookiePersistence`
         collaborator directly rather than the legacy ``host`` Protocol. Callers
@@ -428,14 +409,22 @@ class ClientLifecycle:
         wrapper.
         """
         effective_path = path if path is not None else self._cookie_persistence_path
-        if self._uses_default_cookie_saver and _canonical_cookie_saver_is_current():
+        if self._cookie_saver is None:
+            logger.debug(
+                "Cookie persistence route: type=canonical_store status=dispatch path=%s",
+                effective_path,
+            )
             await cookie_persistence._save_canonical(
                 jar,
                 effective_path,
                 to_thread=asyncio.to_thread,
             )
         else:
-            await cookie_persistence.save(
+            logger.debug(
+                "Cookie persistence route: type=explicit_v0_callback status=dispatch path=%s",
+                effective_path,
+            )
+            await cookie_persistence._save_v0_callback(
                 jar,
                 effective_path,
                 save_cookies_to_storage=self._cookie_saver,
@@ -626,5 +615,4 @@ __all__ = [
     "CookieRotator",
     "CookieSaver",
     "_default_cookie_rotator",
-    "_default_cookie_saver",
 ]

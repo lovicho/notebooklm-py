@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repeatable live authentication matrix for maintainer/release validation.
+r"""Repeatable live authentication matrix for maintainer/release validation.
 
 This runner deliberately uses disposable ``NOTEBOOKLM_HOME`` directories for
 every write.  It never logs cookie or token values.  The source profile and
@@ -9,11 +9,25 @@ Example::
 
     uv run --extra browser --extra cookies --extra headless --extra mcp --extra server \
       python scripts/live_auth_matrix.py \
-      --profile teng-lin-9420 \
+      --profile source-profile \
       --browser 'chromium::Profile 3' \
-      --account teng.lin.9420@gmail.com \
+      --account maintainer@example.com \
       --base-url https://notebooklm.google.com \
       --output live-matrix.json
+
+Opt-in human-interaction cells (start a loopback CDP browser first)::
+
+    DISPLAY=:10 google-chrome \
+      --remote-debugging-port=9222 \
+      --remote-debugging-address=127.0.0.1 \
+      --user-data-dir=/tmp/notebooklm-live-cdp
+    DISPLAY=:10 uv run --extra browser --extra cookies --extra headless --extra mcp --extra server \
+      python scripts/live_auth_matrix.py \
+      --profile source-profile \
+      --browser 'chromium::Profile 3' \
+      --account maintainer@example.com \
+      --include-interactive \
+      --cdp-url http://127.0.0.1:9222
 
 The JSON report is suitable for attaching to a release checklist. All writes
 go to a disposable ``NOTEBOOKLM_HOME`` and the temporary credential copies are
@@ -27,18 +41,24 @@ optional browser-backed mid-session recovery, access-gate classification
 and crash-safe canonical writes.
 
 The browser cookie extractor is host-sensitive: use the host where the browser
-profile currently has its NotebookLM binding. Interactive Playwright login,
-initial master-token bootstrap, CDP capture, Workspace/SSO, regional-account,
-long-duration expiry, and remote MCP HTTP/bearer/file-side-channel checks remain
-separate/manual cells. The matrix's MCP auth-recovery cell uses FastMCP's real
-in-memory protocol transport; deployed file-route coverage is available from
-``scripts/mcp_live_smoke.py``.
+profile currently has its NotebookLM binding. Generic human-interaction coverage
+is available with ``--include-interactive``: ordinary headed Playwright login,
+initial headed master-token bootstrap, and master-token capture through an
+operator-owned loopback CDP browser. Those cells are off by default and require
+``--cdp-url`` plus a visible desktop (for example ``DISPLAY=:10`` on X11). The
+matrix never closes the operator-owned CDP browser and verifies that its endpoint
+survives the attached login. Workspace/SSO, regional-account, long-duration
+expiry, and remote MCP HTTP/bearer/file-side-channel checks remain account- or
+deployment-specific manual cells. The matrix's MCP auth-recovery cell uses
+FastMCP's real in-memory protocol transport; deployed file-route coverage is
+available from ``scripts/mcp_live_smoke.py``.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import shlex
@@ -49,8 +69,10 @@ import sys
 import tempfile
 import textwrap
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HOME = Path(os.environ.get("NOTEBOOKLM_HOME", Path.home() / ".notebooklm"))
@@ -61,6 +83,39 @@ def _timeout_text(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return value or ""
+
+
+def _loopback_cdp_url(value: str) -> str:
+    """Validate the HTTP root of an operator-owned loopback CDP browser."""
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("CDP URL is malformed") from exc
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None or port is None:
+        raise argparse.ArgumentTypeError(
+            "CDP URL must be an explicit http(s) loopback endpoint with a port"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise argparse.ArgumentTypeError("CDP URL must not contain credentials")
+    if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        raise argparse.ArgumentTypeError("CDP URL must be a credential-free endpoint root")
+    host = parsed.hostname.casefold()
+    try:
+        is_loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_loopback = host == "localhost"
+    if not is_loopback:
+        raise argparse.ArgumentTypeError("CDP URL must use localhost or a loopback IP address")
+    return value
+
+
+def _positive_int(value: str) -> int:
+    """Parse a strictly positive timeout for an interactive cell."""
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("timeout must be greater than zero")
+    return parsed
 
 
 class Matrix:
@@ -155,13 +210,18 @@ class Matrix:
             process.kill()
 
     def cli(
-        self, home: Path, *args: str, profile: str | None = None, **extra: str
+        self,
+        home: Path,
+        *args: str,
+        profile: str | None = None,
+        timeout: int | None = None,
+        **extra: str,
     ) -> subprocess.CompletedProcess[str]:
         command = [sys.executable, "-m", "notebooklm.notebooklm_cli"]
         if profile:
             command.extend(["--profile", profile])
         command.extend(args)
-        return self._run(command, home, env_overrides=extra)
+        return self._run(command, home, timeout=timeout, env_overrides=extra)
 
     def record(
         self,
@@ -229,6 +289,10 @@ class Matrix:
             self.phase_rpc_access_gate_contract()
             self.phase_fault_injection()
             self.phase_crash_safety()
+            if self.args.include_interactive:
+                self.phase_interactive_playwright_login()
+                self.phase_interactive_master_token_login()
+                self.phase_interactive_cdp_master_token_login()
         finally:
             try:
                 report = {
@@ -240,6 +304,10 @@ class Matrix:
                     "browser_cells": "skipped" if self.args.skip_browser else "executed",
                     "rest_cells": "skipped" if self.args.skip_rest else "executed",
                     "mcp_cells": "skipped" if self.args.skip_mcp else "executed",
+                    "interactive_cells": (
+                        "executed" if self.args.include_interactive else "skipped"
+                    ),
+                    "interactive_cdp": "configured" if self.args.cdp_url else "not-configured",
                     "rpc_health_mode": "full" if self.args.rpc_health_full else "quick",
                     **self.worktree_info(),
                     "results": self.results,
@@ -331,6 +399,138 @@ class Matrix:
             home, "auth", "check", "--test", "--passive", "--json", profile="browser-test"
         )
         self.record("browser-cookie-live-check", proc, expect_json=True)
+
+    def _interactive_login(
+        self,
+        *,
+        home_name: str,
+        profile: str,
+        result_prefix: str,
+        login_args: tuple[str, ...],
+        require_master_token: bool,
+    ) -> None:
+        """Run one human login in isolation and verify its credential artifacts live."""
+        home = self.temp / home_name
+        proc = self.cli(
+            home,
+            "login",
+            "--browser-timeout",
+            str(self.args.interactive_timeout),
+            *login_args,
+            profile=profile,
+            timeout=self.args.interactive_timeout + 30,
+        )
+        self.record(f"{result_prefix}-login", proc)
+        profile_dir = home / "profiles" / profile
+        result = self.results[-1]
+        storage_exists = (profile_dir / "storage_state.json").is_file()
+        result["storage_state_created"] = storage_exists
+        required_artifacts_exist = storage_exists
+        if require_master_token:
+            master_exists = (profile_dir / "master_token.json").is_file()
+            result["master_token_created"] = master_exists
+            required_artifacts_exist = required_artifacts_exist and master_exists
+        if proc.returncode == 0 and not required_artifacts_exist:
+            result["status"] = "fail"
+            result["error"] = "successful login did not create required credential files"
+        if result["status"] != "pass":
+            return
+        proc = self.cli(
+            home,
+            "auth",
+            "check",
+            "--test",
+            "--passive",
+            "--json",
+            profile=profile,
+            timeout=self.args.timeout,
+        )
+        self.record(f"{result_prefix}-live-check", proc, expect_json=True)
+
+    def phase_interactive_playwright_login(self) -> None:
+        """Exercise ordinary headed Playwright login and its saved live session."""
+        print(
+            "Interactive cell 1/3: complete ordinary login in the headed browser.",
+            file=sys.stderr,
+            flush=True,
+        )
+        self._interactive_login(
+            home_name="interactive-playwright",
+            profile="interactive-playwright",
+            result_prefix="interactive-playwright",
+            login_args=("--browser", self.args.interactive_browser),
+            require_master_token=False,
+        )
+
+    def phase_interactive_master_token_login(self) -> None:
+        """Exercise initial master-token bootstrap through a headed browser."""
+        print(
+            "Interactive cell 2/3: complete the headed master-token bootstrap.",
+            file=sys.stderr,
+            flush=True,
+        )
+        self._interactive_login(
+            home_name="interactive-master-token",
+            profile="interactive-master-token",
+            result_prefix="interactive-master-token",
+            login_args=(
+                "--master-token",
+                "--account",
+                self.args.account,
+                "--browser",
+                self.args.interactive_browser,
+            ),
+            require_master_token=True,
+        )
+
+    def _record_cdp_endpoint(self, name: str) -> bool:
+        """Record whether the validated local CDP browser remains reachable."""
+        endpoint = f"{self.args.cdp_url.rstrip('/')}/json/version"
+        try:
+            with urllib.request.urlopen(endpoint, timeout=5) as response:
+                payload = json.loads(response.read())
+                reachable = response.status == 200 and isinstance(payload, dict)
+        except Exception as exc:  # noqa: BLE001 - report only the value-free exception type
+            self.results.append(
+                {
+                    "name": name,
+                    "status": "fail",
+                    "error": f"CDP endpoint probe raised {type(exc).__name__}",
+                }
+            )
+            return False
+        self.results.append(
+            {
+                "name": name,
+                "status": "pass" if reachable else "fail",
+                "reachable": reachable,
+            }
+        )
+        return reachable
+
+    def phase_interactive_cdp_master_token_login(self) -> None:
+        """Exercise master-token capture through an operator-owned CDP browser."""
+        print(
+            "Interactive cell 3/3: complete EmbeddedSetup in the CDP browser.",
+            file=sys.stderr,
+            flush=True,
+        )
+        if not self._record_cdp_endpoint("interactive-cdp-endpoint-before"):
+            return
+        self._interactive_login(
+            home_name="interactive-cdp-master-token",
+            profile="interactive-cdp-master-token",
+            result_prefix="interactive-cdp-master-token",
+            login_args=(
+                "--master-token",
+                "--account",
+                self.args.account,
+                "--cdp-url",
+                self.args.cdp_url,
+            ),
+            require_master_token=True,
+        )
+        self._record_cdp_endpoint("interactive-cdp-endpoint-after")
 
     def phase_master_refresh(self) -> None:
         home = self.temp / "master"
@@ -1147,13 +1347,46 @@ class Matrix:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--profile", default=os.environ.get("NOTEBOOKLM_PROFILE", "default"))
     parser.add_argument("--account", required=True)
     parser.add_argument("--browser", default="chromium::Profile 3")
     parser.add_argument("--base-url", default="https://notebook.google.com")
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--include-interactive",
+        action="store_true",
+        help=(
+            "Run ordinary headed Playwright login, headed master-token bootstrap, and "
+            "CDP-attached master-token bootstrap. Off by default; requires --cdp-url."
+        ),
+    )
+    parser.add_argument(
+        "--interactive-browser",
+        choices=("chromium", "chrome", "msedge"),
+        default="chromium",
+        help="Browser channel for the two locally launched interactive cells.",
+    )
+    parser.add_argument(
+        "--interactive-timeout",
+        type=_positive_int,
+        default=360,
+        help=(
+            "Per-login human interaction timeout in seconds (default: 360); "
+            "the child process gets 30 additional seconds for teardown."
+        ),
+    )
+    parser.add_argument(
+        "--cdp-url",
+        type=_loopback_cdp_url,
+        help=(
+            "Operator-owned loopback CDP HTTP root for the interactive attach cell, "
+            "for example http://127.0.0.1:9222."
+        ),
+    )
     parser.add_argument(
         "--rpc-health-full",
         action="store_true",
@@ -1187,7 +1420,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Storage-only mid-session recovery and RPC access-gate cells still run."
         ),
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.include_interactive and args.cdp_url is None:
+        parser.error("--include-interactive requires --cdp-url")
+    if args.cdp_url is not None and not args.include_interactive:
+        parser.error("--cdp-url requires --include-interactive")
+    return args
 
 
 if __name__ == "__main__":

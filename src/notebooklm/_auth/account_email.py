@@ -95,6 +95,7 @@ async def resolve_account_email(
     cached_email: str | None,
     cached_key: AccountEmailCacheKey | None,
     live_fallback: bool,
+    get_cookies: Callable[[], httpx.Cookies],
     get_http_client: Callable[[], httpx.AsyncClient],
     probe: AccountEmailProbe,
     to_thread: ToThread = asyncio.to_thread,
@@ -117,13 +118,14 @@ async def resolve_account_email(
         email = auth.account_email
         storage_path = auth.storage_path
         expected_document = None
-        live_cookies = auth.cookie_jar
         try:
-            live_cookies = get_http_client().cookies
+            live_cookies = get_cookies()
         except RuntimeError:
-            # Preserve the documented network-free, outside-context lookup.
-            # The live-fallback probe below still surfaces a closed client.
-            pass
+            # A directly constructed Kernel may have no bootstrap seed. A
+            # composed NotebookLMClient always supplies one, but keep this
+            # helper total for narrow callers without consulting AuthTokens'
+            # compatibility cookie shadows.
+            live_cookies = None
         if not email and storage_path is not None and live_cookies is not None:
             try:
                 matched = _read_matching_account_heal_document(

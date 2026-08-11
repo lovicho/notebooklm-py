@@ -42,7 +42,6 @@ from .lifecycle import (
     CookieRotator,
     CookieSaver,
     _default_cookie_rotator,
-    _default_cookie_saver,
 )
 from .transport import RuntimeTransport
 
@@ -84,6 +83,5 @@ __all__ = [
     "CookieRotator",
     "CookieSaver",
     "_default_cookie_rotator",
-    "_default_cookie_saver",
     "RuntimeTransport",
 ]

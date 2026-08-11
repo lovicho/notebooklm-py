@@ -7647,6 +7647,27 @@
           }
         },
         {
+          "default": 300,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Seconds to wait for a human to complete browser sign-in.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "browser_timeout",
+          "opts": [
+            "--browser-timeout"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "clamp": false,
+            "max": null,
+            "min": 1,
+            "name": "integer range"
+          }
+        },
+        {
           "default": null,
           "envvar": null,
           "has_custom_shell_complete": false,

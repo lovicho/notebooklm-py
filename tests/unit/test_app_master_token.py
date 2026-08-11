@@ -20,7 +20,7 @@ import notebooklm.cli.services.login.master_token as capture_service
 from notebooklm.auth import MasterTokenError
 from tests._guardrails._ast_semantics import semantic_hash as _portable_semantic_hash
 
-_MODULE_SEMANTIC_HASH = "e0eb708a49eb0112764ad05d95e25d8808df7da9bfae3393a8349c9017dfc31b"
+_MODULE_SEMANTIC_HASH = "144a59913c9ae44daa8e71478d8cc417cfa0714e1d22a2a3af986ec2dfd98eec"
 
 
 class _DirectBaseException(BaseException):
@@ -125,6 +125,7 @@ def test_bootstrap_login_preserves_order_arguments_and_secret_free_result(monkey
         oauth_token=None,
         browser="chrome",
         cdp_url="http://localhost:9222/devtools/browser/id",
+        timeout_s=420,
         capture_oauth_token=capture,
         run_async=_runner,
     )
@@ -144,7 +145,9 @@ def test_bootstrap_login_preserves_order_arguments_and_secret_free_result(monkey
         "force": False,
     }
     capture.assert_called_once_with(
-        browser="chrome", cdp_url="http://localhost:9222/devtools/browser/id"
+        browser="chrome",
+        cdp_url="http://localhost:9222/devtools/browser/id",
+        timeout_s=420,
     )
 
 
@@ -167,7 +170,7 @@ def test_bootstrap_login_preserves_explicit_token_truthiness(monkeypatch, tmp_pa
     if explicit:
         capture.assert_not_called()
     else:
-        capture.assert_called_once_with(browser="chromium", cdp_url=None)
+        capture.assert_called_once_with(browser="chromium", cdp_url=None, timeout_s=300.0)
 
 
 @pytest.mark.parametrize("stage", ["writable", "read"])
