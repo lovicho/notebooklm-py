@@ -80,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Deep-research sources expose the backend's per-task source ordinal.**
+  `ResearchSource.source_ordinal` and its serializers preserve an integer
+  `src[8]` when the row carries one — in the captures a 1-based bijection over
+  a task's discovered sources, which the client previously decoded and threw
+  away. It is **not** established to resolve the report's own citation
+  markers; see the field docs before using it that way
+  ([#2141](https://github.com/teng-lin/notebooklm-py/issues/2141)).
 - **Mid-session `NOTEBOOKLM_REFRESH_CMD` (opt-in for one release).** The external
   refresh command (the L2.5 rung of the unified recovery ladder) previously fired
   only at cold start; it can now also run **mid-session** — e.g. inside a
@@ -278,6 +285,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Unknown source status codes no longer masquerade as ready.** Missing,
+  malformed, and unmapped wire statuses now resolve to `SourceStatus.UNKNOWN`
+  with `is_ready=False`; unmapped integers also emit a drift warning (#2124).
 - **An empty notebook no longer logs `schema drift?` on every
   `get_source_ids` call.** A genuinely empty notebook returns a healthy
   envelope whose sources slot is present but explicitly null — the backend
@@ -303,6 +313,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while using the same server count for their ordinal, and stale local cache
   entries no longer control the result
   ([#1976](https://github.com/teng-lin/notebooklm-py/issues/1976)).
+- **Deep-research reports are identified by their typed content block instead
+  of row order.** Report markdown is extracted only from a kind-`3` content
+  block, so reordered web snippets can no longer be mistaken for the report
+  ([#2140](https://github.com/teng-lin/notebooklm-py/issues/2140)).
 - **Research that finds nothing is no longer an undifferentiated `failed`.** A
   Google Drive research run whose query matched no file came back as
   `status: failed` with no sources, no code, no message and no remediation —

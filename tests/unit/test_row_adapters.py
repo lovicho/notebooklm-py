@@ -37,6 +37,7 @@ from notebooklm._row_adapters.notes import NoteRow
 from notebooklm._row_adapters.sources import (
     SourceRow,
     SourceRowShape,
+    _warned_status_codes,
     interpret_source_freshness,
 )
 from notebooklm._types.common import _datetime_from_timestamp
@@ -1700,11 +1701,25 @@ class TestSourceRowTimestamp:
 
 
 class TestSourceRowStatus:
-    """:attr:`SourceRow.status` mirrors legacy ``SourceLister._extract_status``."""
+    """Source status decoding fails closed for missing or unknown wire values."""
 
-    def test_status_ready_when_status_block_absent(self) -> None:
+    @pytest.fixture(autouse=True)
+    def _reset_warned_status_codes(self):
+        """Clear the warn-once set so drift assertions do not depend on test order.
+
+        ``_warned_status_codes`` is module-level (it has to outlive a row), so any
+        earlier test that decoded the same unmapped code would otherwise consume
+        this code's single warning. Mirrors how the sibling
+        ``_warned_source_types`` set is handled in ``tests/unit/test_types.py``.
+        """
+        _warned_status_codes.clear()
+        yield
+        _warned_status_codes.clear()
+
+    def test_status_unknown_when_status_block_absent(self, caplog) -> None:
         row = SourceRow.from_entry(_entry(status_code=None))
-        assert row.status == SourceStatus.READY
+        assert row.status == SourceStatus.UNKNOWN
+        assert not caplog.records
 
     def test_status_processing(self) -> None:
         row = SourceRow.from_entry(_entry(status_code=SourceStatus.PROCESSING))
@@ -1718,33 +1733,45 @@ class TestSourceRowStatus:
         row = SourceRow.from_entry(_entry(status_code=SourceStatus.PREPARING))
         assert row.status == SourceStatus.PREPARING
 
-    def test_unknown_status_falls_back_to_ready(self) -> None:
-        """Status codes outside the known enum coerce to READY."""
-        row = SourceRow.from_entry(_entry(status_code=999))
-        assert row.status == SourceStatus.READY
+    @pytest.mark.parametrize("status_code", [0, 4, 999])
+    def test_unknown_status_falls_back_to_unknown_and_warns(self, status_code: int, caplog) -> None:
+        """An unmapped integer is non-ready and observable as enum drift."""
+        row = SourceRow.from_entry(_entry(status_code=status_code))
+        assert row.status is SourceStatus.UNKNOWN
+        assert f"Unknown source status code {status_code}" in caplog.text
 
-    def test_non_list_status_block_falls_back_to_ready(self) -> None:
+    def test_unknown_status_warns_once_per_code(self, caplog) -> None:
+        """A polled source re-decodes every interval; the drift line fires once."""
+        for _ in range(3):
+            assert SourceRow.from_entry(_entry(status_code=999)).status is SourceStatus.UNKNOWN
+        assert caplog.text.count("Unknown source status code 999") == 1
+
+        # A *different* unmapped code is still reported.
+        assert SourceRow.from_entry(_entry(status_code=998)).status is SourceStatus.UNKNOWN
+        assert caplog.text.count("Unknown source status code 998") == 1
+
+    def test_non_list_status_block_falls_back_to_unknown(self, caplog) -> None:
         entry = _entry()
         entry.append("not_a_list")  # status block at position 3
         row = SourceRow.from_entry(entry)
-        assert row.status == SourceStatus.READY
+        assert row.status is SourceStatus.UNKNOWN
+        assert not caplog.records
 
-    def test_short_status_block_falls_back_to_ready(self) -> None:
+    def test_short_status_block_falls_back_to_unknown(self, caplog) -> None:
         entry = _entry()
         entry.append([None])  # status block too short — no [1]
         row = SourceRow.from_entry(entry)
-        assert row.status == SourceStatus.READY
+        assert row.status is SourceStatus.UNKNOWN
+        assert not caplog.records
 
-    def test_non_int_status_code_falls_back_to_ready(self) -> None:
-        """Non-int status codes (None, str, etc.) fall back via the
-        ``SourceStatus(...)`` ValueError path (claude review feedback on
-        #1029 — switching from explicit membership tuple to try/except
-        retains this behavior for any non-enum value)."""
-        for bad_code in (None, "not_a_status", []):
+    def test_non_int_status_code_falls_back_to_unknown_without_warning(self, caplog) -> None:
+        """Malformed status blocks fail closed without noisy enum-drift warnings."""
+        for bad_code in (None, "not_a_status", [], True, 2.0):
             entry = _entry()
             entry.append([None, bad_code])  # whatever-type status code at [3][1]
             row = SourceRow.from_entry(entry)
-            assert row.status == SourceStatus.READY, f"failed for {bad_code!r}"
+            assert row.status is SourceStatus.UNKNOWN, f"failed for {bad_code!r}"
+        assert "Unknown source status code" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1763,7 +1790,7 @@ class TestSourceRowSchemaDrift:
         assert row.type_code is None
         assert row.url is None
         assert row.created_at_raw is None
-        assert row.status == SourceStatus.READY
+        assert row.status == SourceStatus.UNKNOWN
 
     def test_id_only_row(self) -> None:
         row = SourceRow(_raw=[["only_id"]])

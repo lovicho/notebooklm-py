@@ -93,8 +93,8 @@ def source_view(source: Source) -> dict[str, Any]:
 
     ``status_label`` comes from :func:`~notebooklm.rpc.types.source_status_to_str`
     — the repo's single source of truth for status→string — so every adapter's
-    label stays in lock-step. It is one of ``ready``/``processing``/``error``/
-    ``preparing`` (``unknown`` for an unrecognized code).
+    label stays in lock-step. It is one of ``unknown``/``processing``/``ready``/
+    ``error``/``preparing``.
     """
     view = to_jsonable(source)
     view["kind"] = source.kind.value

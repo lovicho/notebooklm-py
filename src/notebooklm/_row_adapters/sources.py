@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -11,6 +12,13 @@ from .._types.common import _datetime_from_timestamp
 from ..exceptions import DecodingError
 from ..rpc import RPCMethod, safe_index
 from ..rpc.types import SourceStatus
+
+logger = logging.getLogger(__name__)
+
+#: Unmapped status codes already warned about, so a polled source does not
+#: re-emit the same drift line on every decode. Mirrors
+#: ``_types/sources.py::_warned_source_types``.
+_warned_status_codes: set[int] = set()
 
 __all__ = [
     "SourceFulltextRow",
@@ -646,31 +654,41 @@ class SourceRow:
         """Processing status from ``self._raw[3][1]``.
 
         Used by ``GET_NOTEBOOK`` source-list rows where every entry
-        carries a status block. Defaults to
-        :data:`SourceStatus.READY` when:
+        carries a status block. Returns :data:`SourceStatus.UNKNOWN` when:
 
         * position 3 is absent / non-list / too short, or
         * the status code is not one of the known enum values.
 
-        This mirrors the legacy ``SourceLister._extract_status``
-        contract — same fallback to :data:`SourceStatus.READY` on any
-        unrecognised code. The membership check uses ``SourceStatus(...)``
-        directly (catching :class:`ValueError`) rather than an explicit
-        member tuple so the adapter automatically accepts any new values
-        added to :class:`SourceStatus` without a parallel update here.
+        Unknown numeric codes emit a warning — once per code — so backend enum
+        drift is visible without repeating on every poll of the same source.
+        Structurally malformed status blocks fail closed without warning because
+        several valid non-listing response shapes omit the block entirely.
         """
         if (
             len(self._raw) <= self._STATUS_BLOCK_POS
             or not isinstance(self._raw[self._STATUS_BLOCK_POS], list)
             or len(self._raw[self._STATUS_BLOCK_POS]) <= self._STATUS_INNER_POS
         ):
-            return SourceStatus.READY
+            return SourceStatus.UNKNOWN
 
         status_code = self._raw[self._STATUS_BLOCK_POS][self._STATUS_INNER_POS]
+        if not isinstance(status_code, int) or isinstance(status_code, bool):
+            return SourceStatus.UNKNOWN
         try:
             return SourceStatus(status_code)
         except ValueError:
-            return SourceStatus.READY
+            # Warn once per code, like the sibling unmapped-enum path
+            # (``_types/sources.py::_warned_source_types``): ``SourceRow.status``
+            # is re-decoded on every poll, so an unmapped code on a source being
+            # waited on would otherwise repeat the same line ~17 times per wait.
+            if status_code not in _warned_status_codes:
+                _warned_status_codes.add(status_code)
+                logger.warning(
+                    "Unknown source status code %r from RPC %s; treating as UNKNOWN",
+                    status_code,
+                    self.method_id,
+                )
+            return SourceStatus.UNKNOWN
 
 
 @dataclass(frozen=True)

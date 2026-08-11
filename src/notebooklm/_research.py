@@ -397,7 +397,8 @@ class ResearchAPI:
               ``NOT_FOUND``); equals the historical strings
             - ``task.query``: original research query text
             - ``task.sources``: tuple of ``ResearchSource`` (each exposes ``url``,
-              ``title``, ``result_type``, ``research_task_id``, ``report_markdown``)
+              ``title``, ``result_type``, ``research_task_id``, ``report_markdown``,
+              ``source_ordinal``)
             - ``task.summary``: summary text when present
             - ``task.report``: extracted deep-research report markdown, if present
             - ``task.tasks``: all parsed research tasks visible at this poll

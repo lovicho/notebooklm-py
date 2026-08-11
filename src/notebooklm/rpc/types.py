@@ -523,6 +523,7 @@ class SourceStatus(int, Enum):
     Values discovered from GET_NOTEBOOK API response at source[3][1].
     """
 
+    UNKNOWN = -1  # Status is absent, malformed, or not yet mapped
     PROCESSING = 1  # Source is being processed (indexing content)
     READY = 2  # Source is ready for use
     ERROR = 3  # Source processing failed
@@ -531,6 +532,7 @@ class SourceStatus(int, Enum):
 
 # Source status code to string mapping (uses int keys for mypy compatibility)
 _SOURCE_STATUS_MAP: dict[int, str] = {
+    SourceStatus.UNKNOWN: "unknown",
     SourceStatus.PROCESSING: "processing",
     SourceStatus.READY: "ready",
     SourceStatus.ERROR: "error",
@@ -548,7 +550,7 @@ def source_status_to_str(status_code: int | SourceStatus) -> str:
         status_code: Status code as int or SourceStatus enum.
 
     Returns:
-        String status: "processing", "ready", "error", "preparing", or "unknown".
+        String status: "unknown", "processing", "ready", "error", or "preparing".
         Returns "unknown" for unrecognized codes (future-proofing).
     """
     return _SOURCE_STATUS_MAP.get(status_code, "unknown")

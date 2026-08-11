@@ -55,9 +55,18 @@ class TestResearchResultRowPositionContract:
             ResearchResultRow._URL_POS,
             ResearchResultRow._TITLE_POS,
             ResearchResultRow._RESULT_TYPE_POS,
-            ResearchResultRow._LEGACY_CHUNKS_POS,
+            ResearchResultRow._CONTENT_BLOCK_POS,
+            ResearchResultRow._SOURCE_ORDINAL_POS,
             ResearchResultRow._MIN_LEN,
-        ) == (0, 1, 3, 6, 2)
+        ) == (0, 1, 3, 6, 8, 2)
+
+    def test_content_block_positions_pinned(self) -> None:
+        assert (
+            ResearchResultRow._CONTENT_TEXT_POS,
+            ResearchResultRow._CONTENT_KIND_POS,
+            ResearchResultRow._CONTENT_MIN_LEN,
+            ResearchResultRow._REPORT_CONTENT_KIND,
+        ) == (0, 1, 2, 3)
 
     def test_deep_payload_positions_pinned(self) -> None:
         assert (
@@ -152,6 +161,7 @@ class TestResearchResultRow:
         assert row.title_slot == "Example"
         assert row.has_result_type is True
         assert row.result_type_slot == "web"
+        assert row.source_ordinal is None
 
     def test_short_row_not_well_formed(self) -> None:
         row = ResearchResultRow(["only_one"])
@@ -165,7 +175,8 @@ class TestResearchResultRow:
         assert row.title_slot is None
         assert row.result_type_slot is None
         assert row.has_result_type is False
-        assert row.legacy_report_chunks == []
+        assert row.content_block == []
+        assert row.report_markdown == ""
 
     def test_result_type_absent_short_circuits(self) -> None:
         row = ResearchResultRow([None, "title"])
@@ -177,17 +188,44 @@ class TestResearchResultRow:
         assert row.url_slot is None
         assert row.title_slot == ["Deep Report", "# Report"]
 
-    def test_legacy_chunks_present(self) -> None:
-        row = ResearchResultRow([None, "Legacy", None, "report", None, None, ["a", "b"]])
-        assert row.legacy_report_chunks == ["a", "b"]
+    def test_report_content_block_present(self) -> None:
+        block = ["# Report", 3, None, None, None, ["document"]]
+        row = ResearchResultRow([None, "Report", None, 5, None, None, block])
+        assert row.content_block is block
+        assert row.report_markdown == "# Report"
 
-    def test_legacy_chunks_non_list_returns_empty(self) -> None:
+    def test_content_block_non_list_returns_empty(self) -> None:
         row = ResearchResultRow([None, "t", None, 5, None, None, "str"])
-        assert row.legacy_report_chunks == []
+        assert row.content_block == []
+        assert row.report_markdown == ""
 
-    def test_legacy_chunks_absent_returns_empty(self) -> None:
+    def test_content_block_absent_returns_empty(self) -> None:
         row = ResearchResultRow([None, "t", None, 5, None, None])
-        assert row.legacy_report_chunks == []
+        assert row.content_block == []
+        assert row.report_markdown == ""
+
+    def test_source_ordinal_reads_captured_ordinal(self) -> None:
+        row = ResearchResultRow(
+            ["https://example.com", "t", None, 1, None, None, [None, 1], None, 17]
+        )
+        assert row.source_ordinal == 17
+
+    @pytest.mark.parametrize("value", [None, True, 3.0, "3", []])
+    def test_source_ordinal_absent_or_non_integer_returns_none(self, value) -> None:
+        row = ResearchResultRow(
+            ["https://example.com", "t", None, 1, None, None, [None, 1], None, value]
+        )
+        assert row.source_ordinal is None
+
+    @pytest.mark.parametrize("block", [[], ["# Report"], [None, 3], [42, 3]])
+    def test_malformed_report_content_block_returns_empty(self, block) -> None:
+        row = ResearchResultRow([None, "t", None, 5, None, None, block])
+        assert row.report_markdown == ""
+
+    @pytest.mark.parametrize("kind", [1, 2, 3.0, True])
+    def test_non_report_content_kind_is_not_report(self, kind) -> None:
+        row = ResearchResultRow(["https://example.com", "t", None, 1, None, None, ["# Fake", kind]])
+        assert row.report_markdown == ""
 
 
 class TestResearchResultRowDeepPayload:

@@ -258,7 +258,8 @@ async def test_status_and_type_code_parsing() -> None:
 
     assert sources[0].status == SourceStatus.PROCESSING
     assert sources[0]._type_code == 5
-    assert sources[1].status == SourceStatus.READY
+    assert sources[1].status == SourceStatus.UNKNOWN
+    assert sources[1].is_ready is False
     assert sources[2]._type_code is None
 
 

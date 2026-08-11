@@ -104,7 +104,13 @@ _RPC_ENUM_SNAPSHOT: dict[str, dict[str, int]] = {
     "ShareViewLevel": {"FULL_NOTEBOOK": 0, "CHAT_ONLY": 1},
     "SlideDeckFormat": {"DETAILED_DECK": 1, "PRESENTER_SLIDES": 2},
     "SlideDeckLength": {"DEFAULT": 1, "SHORT": 2},
-    "SourceStatus": {"PROCESSING": 1, "READY": 2, "ERROR": 3, "PREPARING": 5},
+    "SourceStatus": {
+        "UNKNOWN": -1,
+        "PROCESSING": 1,
+        "READY": 2,
+        "ERROR": 3,
+        "PREPARING": 5,
+    },
     "VideoFormat": {"EXPLAINER": 1, "BRIEF": 2, "CINEMATIC": 3, "SHORT": 4},
     "VideoStyle": {
         "AUTO_SELECT": 1,

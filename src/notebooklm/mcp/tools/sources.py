@@ -191,7 +191,7 @@ def register(mcp: Any) -> None:
     async def source_list(
         ctx: Context,
         notebook: str,
-        status: Literal["ready", "processing", "error", "preparing"] | None = None,
+        status: Literal["unknown", "processing", "ready", "error", "preparing"] | None = None,
         label: str | None = None,
         detail: Literal["compact", "full"] = "full",
         limit: int = DEFAULT_LIMIT,

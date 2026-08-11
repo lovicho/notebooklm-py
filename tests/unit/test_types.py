@@ -884,19 +884,21 @@ class TestSource:
         assert source.status == SourceStatus.ERROR
         assert source.is_error is True
 
-    def test_from_api_response_status_defaults_ready_without_block(self):
-        """A row without a status block keeps the historical READY default."""
+    def test_from_api_response_status_is_unknown_without_block(self):
+        """A row without a status block must not assert that the source is ready."""
         from notebooklm.rpc.types import SourceStatus
 
         # Medium-nested entry with no status block at index 3.
         data = [[["src_no_status"], "No Status", [None, None, None, None, 5]]]
         source = Source.from_api_response(data)
 
-        assert source.status == SourceStatus.READY
+        assert source.status == SourceStatus.UNKNOWN
+        assert source.is_ready is False
 
-        # Flat shape also defaults to READY.
+        # Flat shapes without a status block fail closed too.
         flat = Source.from_api_response(["src_flat", "Flat"])
-        assert flat.status == SourceStatus.READY
+        assert flat.status == SourceStatus.UNKNOWN
+        assert flat.is_ready is False
 
     def test_from_api_response_matches_listing_path(self):
         """``from_api_response`` and the ``GET_NOTEBOOK`` listing path produce

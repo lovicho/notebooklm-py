@@ -209,6 +209,7 @@ class ResearchSource:
     result_type: ResearchResultType = RESEARCH_RESULT_TYPE_WEB
     research_task_id: str | None = None
     report_markdown: str = ""
+    source_ordinal: int | None = None
 
     @classmethod
     def from_public_dict(cls, source: Mapping[str, Any]) -> ResearchSource:
@@ -217,6 +218,7 @@ class ResearchSource:
         title_raw = source.get("title", "Untitled")
         research_task_id_raw = source.get("research_task_id")
         report_markdown_raw = source.get("report_markdown", "")
+        source_ordinal_raw = source.get("source_ordinal")
 
         return cls(
             url=url_raw if isinstance(url_raw, str) else "",
@@ -226,6 +228,7 @@ class ResearchSource:
             if isinstance(research_task_id_raw, str)
             else None,
             report_markdown=report_markdown_raw if isinstance(report_markdown_raw, str) else "",
+            source_ordinal=source_ordinal_raw if type(source_ordinal_raw) is int else None,
         )
 
     @property
@@ -247,6 +250,8 @@ class ResearchSource:
             public["research_task_id"] = self.research_task_id
         if self.report_markdown:
             public["report_markdown"] = self.report_markdown
+        if self.source_ordinal is not None:
+            public["source_ordinal"] = self.source_ordinal
         return public
 
 

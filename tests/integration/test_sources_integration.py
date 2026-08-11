@@ -1536,7 +1536,7 @@ class TestListSourcesParsingEdgeCases:
         httpx_mock: HTTPXMock,
         build_rpc_response,
     ):
-        """Test list() uses default READY when status_code is unknown (lines 125->137, 127->137)."""
+        """Test list() fails closed when the wire status code is unknown."""
         # status_code 999 is not in the SourceStatus enum values
         response = build_rpc_response(
             RPCMethod.GET_NOTEBOOK,
@@ -1563,7 +1563,8 @@ class TestListSourcesParsingEdgeCases:
         assert len(sources) == 1
         from notebooklm.rpc.types import SourceStatus
 
-        assert sources[0].status == SourceStatus.READY
+        assert sources[0].status == SourceStatus.UNKNOWN
+        assert sources[0].is_ready is False
 
     @pytest.mark.asyncio
     async def test_list_sources_type_code_not_int(
@@ -2360,7 +2361,7 @@ class TestListSourcesSkippedEntries:
         httpx_mock: HTTPXMock,
         build_rpc_response,
     ):
-        """Test list() defaults to READY when src has no index 3 (line 125->137 false branch)."""
+        """Test list() fails closed when the source row has no status block."""
         from notebooklm.rpc.types import SourceStatus
 
         # Source with only 2 elements - no status data at index 3
@@ -2382,7 +2383,8 @@ class TestListSourcesSkippedEntries:
             sources = await client.sources.list("nb_123")
 
         assert len(sources) == 1
-        assert sources[0].status == SourceStatus.READY
+        assert sources[0].status == SourceStatus.UNKNOWN
+        assert sources[0].is_ready is False
 
 
 class TestWaitUntilReady:

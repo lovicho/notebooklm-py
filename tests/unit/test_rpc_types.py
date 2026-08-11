@@ -216,6 +216,7 @@ class TestSourceStatusToStr:
 
     def test_all_status_codes(self):
         """Test all SourceStatus enum values map correctly."""
+        assert source_status_to_str(SourceStatus.UNKNOWN) == "unknown"
         assert source_status_to_str(SourceStatus.PROCESSING) == "processing"
         assert source_status_to_str(1) == "processing"
         assert source_status_to_str(SourceStatus.READY) == "ready"
@@ -225,13 +226,10 @@ class TestSourceStatusToStr:
         assert source_status_to_str(SourceStatus.PREPARING) == "preparing"
         assert source_status_to_str(5) == "preparing"
 
-    def test_gap_status_code(self):
-        """Test gap status code 4 returns 'unknown'."""
-        assert source_status_to_str(4) == "unknown"
-
     def test_unknown_status_codes(self):
         """Test unknown status codes return 'unknown'."""
         assert source_status_to_str(0) == "unknown"
+        assert source_status_to_str(4) == "unknown"
         assert source_status_to_str(6) == "unknown"
         assert source_status_to_str(99) == "unknown"
         assert source_status_to_str(-1) == "unknown"

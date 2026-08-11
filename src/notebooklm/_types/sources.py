@@ -244,7 +244,7 @@ class Source:
         :attr:`SourceRow.metadata` returns ``None`` and
         :attr:`~SourceRow.type_code` / :attr:`~SourceRow.url` /
         :attr:`~SourceRow.created_at` all resolve to ``None`` while
-        :attr:`~SourceRow.status` resolves to ``SourceStatus.READY``. The
+        :attr:`~SourceRow.status` resolves to ``SourceStatus.UNKNOWN``. The
         single field mapping below therefore covers all three wire shapes
         identically.
         """
