@@ -79,5 +79,6 @@
   "ShareViewLevel",
   "SharePermission",
   "artifact_status_to_str",
+  "share_permission_to_str",
   "source_status_to_str"
 ]

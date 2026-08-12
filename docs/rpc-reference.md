@@ -2335,6 +2335,20 @@ await rpc_call(
 #   not just the URL sources.
 # - The browser/client flow uses the later polled deep-research task ID here rather
 #   than blindly reusing the original task ID returned by START_DEEP_RESEARCH.
+# - This call commonly runs long on large batches (the server fetches/parses/
+#   embeds every entry before responding), so the client sends a batch-scaled
+#   `read_timeout` here rather than the shared 30s default — see
+#   `_research_import.py::_import_research_read_timeout` (#2187).
+# - A client-side timeout can still land AFTER the server partially commits.
+#   Retrying with the same task_id then gets rejected with gRPC 9
+#   (FAILED_PRECONDITION) — documented backend behavior (#1926 item F2b), not
+#   a novel failure. `import_sources_with_verification` re-probes
+#   `sources.list` on this error: if it verifies every requested URL already
+#   landed, that's treated as success; otherwise the error surfaces
+#   immediately rather than retrying blindly against the same rejected
+#   task_id (unlike a timeout, this attempt's payload was rejected outright,
+#   so a filtered-subset retry isn't evidence-based) — see
+#   `_research_import.py::_is_import_research_failed_precondition`.
 ```
 
 ### RPC: CANCEL_RESEARCH (Zbrupe)

@@ -18,6 +18,7 @@ import httpx
 from ..auth import MasterTokenError as _MasterTokenError
 from ..exceptions import AuthError, NotebookNotFoundError
 from ..paths import get_storage_path
+from ..types import share_permission_to_str
 
 # Cookie-JSON import helpers (split out to keep this module under the size budget).
 from ._cookie_import import _import_cookie_json, _read_auth_json_input
@@ -29,6 +30,7 @@ from ._session_render import (
     _render_auth_inspect_error,
     _render_logout_outcome,
     _render_status,
+    _render_use_notebook,
     _use_notebook_table,
 )
 from .auth_runtime import (
@@ -525,7 +527,8 @@ def register_session_commands(cli):
         nb = result.notebook
         resolved_id = result.resolved_id
         created_str = nb.created_at.strftime("%Y-%m-%d") if nb.created_at else None
-        set_current_notebook(resolved_id, nb.title, nb.is_owner, created_str)
+        role_label = share_permission_to_str(nb.role) if nb.role is not None else None
+        set_current_notebook(resolved_id, nb.title, nb.is_owner, created_str, role=role_label)
 
         if json_output:
             json_output_response(
@@ -537,6 +540,7 @@ def register_session_commands(cli):
                         "id": resolved_id,
                         "title": nb.title,
                         "is_owner": nb.is_owner,
+                        "role": role_label,
                         "created_at": nb.created_at.isoformat() if nb.created_at else None,
                         "modified_at": nb.modified_at.isoformat() if nb.modified_at else None,
                     },
@@ -544,11 +548,7 @@ def register_session_commands(cli):
             )
             return
 
-        table = _use_notebook_table()
-        created = created_str or "-"
-        owner_status = "Owner" if nb.is_owner else "Shared"
-        table.add_row(nb.id, nb.title, owner_status, created)
-        console.print(table)
+        _render_use_notebook(nb, notebook_id=nb.id, created=created_str or "-")
 
     @cli.command("status")
     @click.option("--json", "json_output", is_flag=True, help="Output as JSON")

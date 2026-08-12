@@ -13,12 +13,14 @@ from notebooklm.rpc.types import (
     ArtifactTypeCode,
     GrpcStatusCode,
     RPCMethod,
+    SharePermission,
     SourceStatus,
     artifact_status_to_str,
     get_batchexecute_url,
     get_query_url,
     normalize_grpc_status,
     normalize_rpc_code,
+    share_permission_to_str,
     source_status_to_str,
 )
 
@@ -233,6 +235,35 @@ class TestSourceStatusToStr:
         assert source_status_to_str(6) == "unknown"
         assert source_status_to_str(99) == "unknown"
         assert source_status_to_str(-1) == "unknown"
+
+
+class TestSharePermissionToStr:
+    """Tests for the share_permission_to_str helper function."""
+
+    def test_all_permission_codes(self):
+        """Every displayable SharePermission member maps to its label."""
+        assert share_permission_to_str(SharePermission.OWNER) == "owner"
+        assert share_permission_to_str(1) == "owner"
+        assert share_permission_to_str(SharePermission.EDITOR) == "editor"
+        assert share_permission_to_str(2) == "editor"
+        assert share_permission_to_str(SharePermission.VIEWER) == "viewer"
+        assert share_permission_to_str(3) == "viewer"
+
+    def test_remove_sentinel_is_not_a_label(self):
+        """``_REMOVE`` is a write-only share-mutation sentinel, not a role.
+
+        It must never surface as a displayable permission, so it degrades like
+        any other unmapped code rather than leaking a private enum name.
+        """
+        assert share_permission_to_str(SharePermission._REMOVE) == "unknown"
+        assert share_permission_to_str(4) == "unknown"
+
+    def test_unknown_permission_codes(self):
+        """Unrecognized codes return 'unknown' (future-proofing)."""
+        assert share_permission_to_str(0) == "unknown"
+        assert share_permission_to_str(5) == "unknown"
+        assert share_permission_to_str(99) == "unknown"
+        assert share_permission_to_str(-1) == "unknown"
 
 
 class TestGrpcStatusCode:

@@ -844,7 +844,7 @@ compatibility shim was removed in v0.5.0.
 | `_kernel` | Concrete `Kernel` transport core; owns the `httpx.AsyncClient` (constructed in `Kernel.__init__`, closed in `Kernel.aclose()`) and the cookie jar. | Pure transport surface (see `Kernel` Protocol in `_runtime/contracts.py`). |
 | `_runtime/init.py` | Client composition root helpers: constructor validation, collaborator construction, `RuntimeTransport`, middleware chain, and `RpcExecutor` wiring. | `NotebookLMClient` calls this during construction and stores the result directly. |
 | `_runtime/transport.py` | Authenticated transport leg used by `RpcExecutor` and the middleware chain terminal. | Routes through `Kernel.post` and centralizes request-envelope materialization. |
-| `_runtime/config.py` | Module-level constants: `DEFAULT_TIMEOUT`, `DEFAULT_CHAT_TIMEOUT`, `DEFAULT_KEEPALIVE_MIN_INTERVAL`, `DEFAULT_MAX_CONCURRENT_RPCS`, `DEFAULT_MAX_CONCURRENT_UPLOADS`, `CORE_LOGGER_NAME`, `normalize_max_concurrent_uploads`. | Pure constants; importable without side effects. |
+| `_runtime/config.py` | Module-level constants: `DEFAULT_TIMEOUT`, `DEFAULT_CHAT_TIMEOUT`, `DEFAULT_IMPORT_RESEARCH_BASE_TIMEOUT`/`_PER_SOURCE_TIMEOUT`/`_MAX_TIMEOUT`, `DEFAULT_KEEPALIVE_MIN_INTERVAL`, `DEFAULT_MAX_CONCURRENT_RPCS`, `DEFAULT_MAX_CONCURRENT_UPLOADS`, `CORE_LOGGER_NAME`, `normalize_max_concurrent_uploads`. | Pure constants; importable without side effects. |
 | `_runtime/helpers.py` | `is_auth_error`, `AUTH_ERROR_PATTERNS`, `_resolve_keepalive_interval`. | Cross-seam pure helpers; behaviour-bearing (and therefore unit-tested). |
 | `_error_injection` | `ERROR_INJECT_ENV_VAR`, `_get_error_injection_mode`, `_refuse_synthetic_error_outside_test_context`. | Env-var resolver + startup guard for the synthetic-error harness. |
 | `_runtime/auth.py` | `AuthRefreshCoordinator`: refresh-task lifecycle, refresh lock, `AuthSnapshot` rotation. | Lazy `asyncio.Lock` construction; never instantiated outside a running loop. |
@@ -959,13 +959,17 @@ class NotebookLMClient:
         allow_null: bool = False,
         *,
         disable_internal_retries: bool = False,
+        read_timeout: float | None = None,
     ) -> Any:
 ```
 
 `RPCMethod` is imported from `notebooklm.rpc` for raw-RPC calls; `Any` is
 `typing.Any`. The default-shape call (`client.rpc_call(method, params)`)
 forwards to the underlying `RpcExecutor.rpc_call` with its canonical
-defaults.
+defaults. `read_timeout` (added in #2187) overrides the client-wide read
+timeout for this one call — internal callers use it for RPCs known to run
+long (e.g. `ResearchAPI.import_sources`'s batch-scaled IMPORT_RESEARCH
+timeout); `None` (the default) inherits the client's configured `timeout`.
 
 **Cookie persistence override:** `cookie_saver=None` (the default) uses the
 canonical typed `ProfileStore` merge for close, refresh, and keepalive saves.
@@ -2158,8 +2162,31 @@ class Notebook:
     title: str
     created_at: Optional[datetime]   # creation time (tz-aware UTC)
     sources_count: int
-    is_owner: bool
+    is_owner: bool                   # role is SharePermission.OWNER
     modified_at: Optional[datetime]  # last-modified time (tz-aware UTC)
+    role: Optional[SharePermission]  # your own level: OWNER / EDITOR / VIEWER
+```
+
+`role` is the calling account's permission level on the notebook, decoded from
+the backend's `userRole` field. It is `None` only when the row does not state a
+level (an unexpectedly short or unmapped row), in which case `is_owner`
+defaults to `True`.
+
+`is_owner` is kept as the `role is SharePermission.OWNER` shorthand for
+backward compatibility. Prefer `role` when the distinction matters: a read-only
+collaborator (`VIEWER`) and a full editor (`EDITOR`) both report
+`is_owner=False`.
+
+```python
+from notebooklm.types import SharePermission, share_permission_to_str
+
+for nb in await client.notebooks.list():
+    if nb.role is SharePermission.VIEWER:
+        print(f"{nb.title}: read-only")
+    # Guard the None case: share_permission_to_str is typed int | SharePermission,
+    # and an unstated role is not a level to label.
+    label = share_permission_to_str(nb.role) if nb.role is not None else "unstated"
+    print(label)  # "owner" / "editor" / "viewer" / "unstated"
 ```
 
 ### Source

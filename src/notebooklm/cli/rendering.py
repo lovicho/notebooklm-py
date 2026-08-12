@@ -15,10 +15,10 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from ..types import ArtifactType
+from ..types import ArtifactType, share_permission_to_str
 
 if TYPE_CHECKING:
-    from ..types import Artifact
+    from ..types import Artifact, SharePermission
     from .services.listing import ListRender
 
 
@@ -312,6 +312,37 @@ def get_source_type_display(source_type: str) -> str:
         "unknown": "❓ Unknown",
     }
     return type_map.get(type_str, f"❓ {type_str}")
+
+
+def get_permission_display(
+    permission: SharePermission | None, *, unknown_label: str = "Unknown"
+) -> str:
+    """Get display string for a share permission / notebook role.
+
+    The label for an unstated / unmapped level is the caller's choice, because
+    the two consumers legitimately disagree and silently sharing one default
+    would mislabel the other. The sharing UI keeps the conservative
+    ``"Unknown"``; the notebook columns pass ``"Owner"`` via
+    :func:`get_notebook_access_display`.
+    """
+    if permission is None:
+        return unknown_label
+    label = share_permission_to_str(permission)
+    return unknown_label if label == "unknown" else label.capitalize()
+
+
+def get_notebook_access_display(role: SharePermission | None) -> str:
+    """Get the "Access" column label for a notebook's own-role field.
+
+    An unstated role renders as ``"Owner"`` because that is exactly what
+    ``Notebook.is_owner`` degrades to for the same row — the human-facing
+    column stays consistent with the boolean beside it rather than introducing
+    a fourth state the rest of the CLI does not have. Machine-readable surfaces
+    deliberately do NOT share this optimism: ``role`` / ``role_label`` stay
+    ``null`` in JSON, MCP and REST output so an agent is never told "owner"
+    on the strength of a guess.
+    """
+    return get_permission_display(role, unknown_label="Owner")
 
 
 def _list_column_options(header: str, *, no_truncate: bool) -> dict[str, Any]:

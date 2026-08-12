@@ -334,13 +334,18 @@ class TestContextManagement:
         context_file = tmp_path / "context.json"
         with patch.object(helpers_module, "get_context_path", return_value=context_file):
             set_current_notebook(
-                "nb_test123", title="Test Notebook", is_owner=True, created_at="2024-01-01T00:00:00"
+                "nb_test123",
+                title="Test Notebook",
+                is_owner=True,
+                created_at="2024-01-01T00:00:00",
+                role="owner",
             )
             data = json.loads(context_file.read_text())
             assert data["notebook_id"] == "nb_test123"
             assert data["title"] == "Test Notebook"
             assert data["is_owner"] is True
             assert data["created_at"] == "2024-01-01T00:00:00"
+            assert data["role"] == "owner"
 
     def test_clear_context(self, tmp_path):
         context_file = tmp_path / "context.json"

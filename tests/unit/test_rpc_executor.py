@@ -10,6 +10,7 @@ import pytest
 from notebooklm._logging import get_request_id, reset_request_id, set_request_id
 from notebooklm._request_types import AuthSnapshot
 from notebooklm._rpc_executor import RpcExecutor
+from notebooklm._transport_errors import TransportServerError
 from notebooklm.auth import AuthTokens
 from notebooklm.exceptions import DecodingError, UnknownRPCMethodError
 from notebooklm.rpc import (
@@ -98,6 +99,7 @@ class _Owner:
         rpc_method: str | None = None,
         refresh_budget: Any = None,
         retry_deadline: Any = None,
+        read_timeout: float | None = None,
     ) -> httpx.Response:
         url, body, headers = build_request(self.snapshot)
         self.perform_calls.append(
@@ -109,6 +111,7 @@ class _Owner:
                 "headers": headers,
                 "refresh_budget": refresh_budget,
                 "retry_deadline": retry_deadline,
+                "read_timeout": read_timeout,
             }
         )
         return self.response
@@ -252,6 +255,7 @@ async def test_constructor_injected_decode_response_drives_executor(monkeypatch)
         rpc_method: str | None = None,
         refresh_budget: Any = None,
         retry_deadline: Any = None,
+        read_timeout: float | None = None,
     ) -> httpx.Response:
         return _ok_response("wire")
 
@@ -311,6 +315,35 @@ async def test_execute_threads_override_source_allow_null_and_retry_flag(monkeyp
     assert body["at"] == "CSRF_SNAPSHOT"
     assert '"OverrideRpc"' in body["f.req"]
     assert decode_calls == [{"raw": "raw", "rpc_id": "OverrideRpc", "allow_null": True}]
+
+
+@pytest.mark.asyncio
+async def test_rpc_call_threads_read_timeout_override_to_transport() -> None:
+    """#2187: ``read_timeout`` (e.g. IMPORT_RESEARCH's batch-scaled budget)
+    reaches ``perform_authed_post`` through the public ``rpc_call`` entry
+    point, mirroring the existing chat-transport precedent."""
+    owner = _Owner()
+
+    result = await _executor(owner).rpc_call(
+        RPCMethod.LIST_NOTEBOOKS,
+        [],
+        read_timeout=123.0,
+    )
+
+    assert result == {"rpc_id": RPCMethod.LIST_NOTEBOOKS.value, "allow_null": False}
+    assert owner.perform_calls[0]["read_timeout"] == 123.0
+
+
+@pytest.mark.asyncio
+async def test_rpc_call_omits_read_timeout_by_default() -> None:
+    """Every existing caller that doesn't pass ``read_timeout`` must see no
+    behavior change: the transport receives ``None`` (inherit the client
+    default), not a spuriously-set override."""
+    owner = _Owner()
+
+    await _executor(owner).rpc_call(RPCMethod.LIST_NOTEBOOKS, [])
+
+    assert owner.perform_calls[0]["read_timeout"] is None
 
 
 @pytest.mark.asyncio
@@ -580,6 +613,43 @@ async def test_decode_time_auth_retry_threads_refresh_budget_to_transport() -> N
 
 
 @pytest.mark.asyncio
+async def test_decode_time_auth_retry_threads_read_timeout_to_transport() -> None:
+    """#2187 codex review: a ``read_timeout`` override must survive a
+    decode-time auth-refresh-and-retry, not silently fall back to the
+    client-wide default on the retry leg."""
+
+    async def refresh_callback() -> object:
+        return object()
+
+    owner = _Owner(refresh_callback=refresh_callback)
+    decode_calls = 0
+
+    def decode(_: str, __: str, *, allow_null: bool = False) -> Any:
+        nonlocal decode_calls
+        decode_calls += 1
+        if decode_calls == 1:
+            raise RPCError("authentication expired")
+        return {"ok": True}
+
+    result = await _executor(
+        owner,
+        decode_response=decode,
+        is_auth_error=lambda exc: True,
+    )._execute_once(
+        RPCMethod.LIST_NOTEBOOKS,
+        [],
+        "/",
+        False,
+        False,
+        read_timeout=210.0,
+    )
+
+    assert result == {"ok": True}
+    read_timeouts = [call["read_timeout"] for call in owner.perform_calls]
+    assert read_timeouts == [210.0, 210.0]
+
+
+@pytest.mark.asyncio
 async def test_decode_time_auth_retry_threads_retry_deadline_to_transport() -> None:
     """Issue #1873: the executor seeds the chain with the SAME aggregate deadline.
 
@@ -750,6 +820,7 @@ async def test_constructor_injected_sleep_drives_executor(monkeypatch) -> None:
         *,
         disable_internal_retries: bool = False,
         operation_variant: str | None = None,
+        read_timeout: float | None = None,
         _refresh_budget: Any = None,
         _retry_deadline: Any = None,
     ) -> dict[str, bool]:
@@ -818,6 +889,44 @@ def test_request_error_mapper_uses_owner_timeout_seconds() -> None:
         )
 
     assert raised.value.timeout_seconds == 12.5
+
+
+def test_request_error_mapper_reports_read_timeout_override_when_given() -> None:
+    """#2187 codex review: a call widened via ``read_timeout`` (e.g.
+    IMPORT_RESEARCH's batch-scaled budget) must report ITS actual budget in
+    ``timeout_seconds`` on timeout, not the unwidened client-wide default —
+    otherwise a 240s IMPORT_RESEARCH timeout misreports as a 30s one.
+    """
+    executor = _executor(_Owner(timeout=30.0))
+
+    with pytest.raises(RPCTimeoutError) as raised:
+        executor.raise_rpc_error_from_request_error(
+            httpx.ReadTimeout("slow"),
+            RPCMethod.LIST_NOTEBOOKS,
+            read_timeout=210.0,
+        )
+
+    assert raised.value.timeout_seconds == 210.0
+
+
+@pytest.mark.asyncio
+async def test_rpc_call_timeout_reports_read_timeout_override() -> None:
+    """End-to-end: a ``read_timeout`` passed to ``rpc_call`` reaches the
+    request-error mapper, not just the transport call."""
+    owner = _Owner()
+
+    async def fail_with_read_timeout(**_: Any) -> httpx.Response:
+        raise TransportServerError(
+            "server-error retries exhausted",
+            original=httpx.ReadTimeout("slow", request=httpx.Request("POST", "https://x.test")),
+        )
+
+    owner.perform_authed_post = fail_with_read_timeout  # type: ignore[method-assign]
+
+    with pytest.raises(RPCTimeoutError) as raised:
+        await _executor(owner).rpc_call(RPCMethod.LIST_NOTEBOOKS, [], read_timeout=99.0)
+
+    assert raised.value.timeout_seconds == 99.0
 
 
 @pytest.mark.parametrize(

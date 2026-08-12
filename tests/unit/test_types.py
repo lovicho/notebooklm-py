@@ -21,6 +21,7 @@ from notebooklm.types import (
     Notebook,
     NotebookDescription,
     ReportSuggestion,
+    SharePermission,
     Source,
     SourceFulltext,
     SourceType,
@@ -322,6 +323,34 @@ def test_representative_public_dataclasses_pickle_round_trip():
         assert pickle.loads(pickle.dumps(enum_member)) is enum_member
 
 
+def _notebook_meta(*, user_role=1, has_sharing=False):
+    """Build a ``data[5]`` metadata block in the live 16-slot shape.
+
+    Copied from a real ``LIST_NOTEBOOKS`` response (see
+    ``tests/cassettes/notebooks_list.yaml``): slot 0 is ``userRole``, slot 1 is
+    the "has any sharing" flag, slot 5 is the last-modified instant, slot 8 the
+    creation instant and slot 12 ``isPublic``.
+    """
+    return [
+        user_role,
+        has_sharing,
+        True,
+        None,
+        None,
+        [1768311605, 661578000],
+        1,
+        False,
+        [1768174413, 819385000],
+        None,
+        None,
+        None,
+        has_sharing,
+        True,
+        1,
+        False,
+    ]
+
+
 class TestNotebook:
     def test_from_api_response_basic(self):
         """Test parsing basic notebook data."""
@@ -460,19 +489,173 @@ class TestNotebook:
 
         assert notebook.title == "Actual Title"
 
-    def test_from_api_response_shared_notebook(self):
-        """Test parsing shared notebook (is_owner=False)."""
+    @pytest.mark.parametrize(
+        ("user_role", "has_sharing", "expected_role", "expected_is_owner"),
+        [
+            # Owner of a private notebook — the pre-#2125 code got this right.
+            (1, False, SharePermission.OWNER, True),
+            # Owner who shared the notebook with a colleague. The old code read
+            # the has-sharing slot and reported is_owner=False here; this is the
+            # headline regression #2125 fixes.
+            (1, True, SharePermission.OWNER, True),
+            # Collaborator with edit rights (proto WRITER).
+            (2, True, SharePermission.EDITOR, False),
+            # Collaborator with read-only rights (proto READER). Observed live
+            # in tests/cassettes/notebooks_list.yaml ("Jane Austen").
+            (3, True, SharePermission.VIEWER, False),
+        ],
+    )
+    def test_from_api_response_decodes_user_role(
+        self, user_role, has_sharing, expected_role, expected_is_owner
+    ):
+        """``meta[0]`` (``userRole``) drives ``role`` and therefore ``is_owner``.
+
+        The metadata block is the full 16-slot shape captured from a live
+        ``LIST_NOTEBOOKS`` response, so the positional descents are exercised
+        against a realistic row rather than a hand-shortened one.
+        """
         data = [
-            "Shared Notebook",
+            "A Notebook",
             [],
-            "nb_shared",
+            "nb_role",
             "📓",
             None,
-            [None, True],  # data[5][1] = True means shared
+            _notebook_meta(user_role=user_role, has_sharing=has_sharing),
         ]
+
         notebook = Notebook.from_api_response(data)
 
+        assert notebook.role is expected_role
+        assert notebook.is_owner is expected_is_owner
+
+    @pytest.mark.parametrize("raw_role", [None, 0, 4, 99, True, False, "1", []])
+    def test_from_api_response_unmapped_role_degrades_to_none(self, raw_role):
+        """Absent / unrecognized ``userRole`` codes report an unknown role.
+
+        ``is_owner`` keeps its historical optimistic default so a malformed row
+        soft-degrades instead of mislabelling every entry. ``True``/``False`` are
+        included because ``bool`` is an ``int`` subclass — the neighbouring
+        has-sharing slot's shape must not be misread as ``OWNER``.
+        """
+        data = [
+            "A Notebook",
+            [],
+            "nb_role",
+            "📓",
+            None,
+            _notebook_meta(user_role=raw_role),
+        ]
+
+        notebook = Notebook.from_api_response(data)
+
+        assert notebook.role is None
+        assert notebook.is_owner is True
+
+    @pytest.mark.parametrize("raw_role", [0, 4, 99, True, False, "1", []])
+    def test_from_api_response_unmapped_role_warns(self, caplog, raw_role):
+        """A present-but-unmapped ``userRole`` is drift, so it degrades LOUDLY.
+
+        This WARNING is the tripwire for the repo's #1 breakage class (Google
+        changing the wire shape). ``True``/``False`` matter most: ``bool`` is an
+        ``int`` subclass, so a slot slip onto the neighbouring has-sharing flag
+        would otherwise decode as a confident ``OWNER`` (#1485 policy).
+        """
+        import logging
+
+        data = ["A Notebook", [], "nb_role", "📓", None, _notebook_meta(user_role=raw_role)]
+        with caplog.at_level(logging.WARNING, logger="notebooklm"):
+            notebook = Notebook.from_api_response(data)
+
+        assert notebook.role is None
+        assert any(
+            r.levelno == logging.WARNING and "userRole slot unmapped" in r.message
+            for r in caplog.records
+        ), f"no drift WARNING for raw_role={raw_role!r}"
+
+    def test_from_api_response_absent_role_is_silent(self, caplog):
+        """A ``None`` slot / missing meta block is absence, not drift — no WARNING."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="notebooklm"):
+            null_slot = Notebook.from_api_response(
+                ["A Notebook", [], "nb_role", "📓", None, _notebook_meta(user_role=None)]
+            )
+            no_meta = Notebook.from_api_response(["No Meta", [], "nb_nometa", "📓"])
+
+        assert null_slot.role is None
+        assert no_meta.role is None
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+    def test_from_api_response_ignores_has_sharing_slot(self):
+        """``meta[1]`` no longer participates in the ownership decision.
+
+        Pre-#2125 this slot *was* the ownership signal, so pinning both
+        polarities against a fixed OWNER role is the regression guard.
+        """
+        roles = {
+            has_sharing: Notebook.from_api_response(
+                [
+                    "A Notebook",
+                    [],
+                    "nb_role",
+                    "📓",
+                    None,
+                    _notebook_meta(user_role=1, has_sharing=has_sharing),
+                ]
+            )
+            for has_sharing in (True, False)
+        }
+
+        assert roles[True].role is roles[False].role is SharePermission.OWNER
+        assert roles[True].is_owner is roles[False].is_owner is True
+
+    def test_is_owner_is_derived_from_role_on_construction(self):
+        """``Notebook(role=..., is_owner=...)`` cannot hold an inconsistent pair.
+
+        ``is_owner`` stays a dataclass *field* (the MCP/REST serializer emits
+        fields only), so the invariant is enforced in ``__post_init__`` rather
+        than by turning it into a property.
+        """
+        assert Notebook(id="a", title="t", role=SharePermission.OWNER).is_owner is True
+        assert Notebook(id="a", title="t", role=SharePermission.EDITOR).is_owner is False
+        assert Notebook(id="a", title="t", role=SharePermission.VIEWER).is_owner is False
+        # A contradictory explicit boolean is corrected, not preserved.
+        assert (
+            Notebook(id="a", title="t", role=SharePermission.VIEWER, is_owner=True).is_owner
+            is False
+        )
+
+    def test_is_owner_tracks_role_reassigned_after_construction(self):
+        """``Notebook`` is mutated in place elsewhere, so the invariant must survive it.
+
+        ``_app.notebooks._backfill_created_timestamps`` already assigns to a
+        live ``Notebook``, so a construction-only hook would let ``is_owner`` go
+        stale the moment anyone assigned ``role``.
+        """
+        notebook = Notebook(id="a", title="t", role=SharePermission.OWNER)
+        assert notebook.is_owner is True
+
+        notebook.role = SharePermission.VIEWER
         assert notebook.is_owner is False
+
+        notebook.role = SharePermission.OWNER
+        assert notebook.is_owner is True
+
+        # Clearing the role leaves the last derived value rather than guessing.
+        notebook.role = None
+        assert notebook.is_owner is True
+
+    def test_is_owner_is_untouched_when_role_is_unknown(self):
+        """With no role stated, the caller's explicit ``is_owner`` still wins."""
+        assert Notebook(id="a", title="t").is_owner is True
+        assert Notebook(id="a", title="t", is_owner=False).is_owner is False
+
+    def test_from_api_response_missing_meta_block_reports_unknown_role(self):
+        """A row with no metadata block states no role, and stays is_owner=True."""
+        notebook = Notebook.from_api_response(["No Meta", [], "nb_nometa", "📓"])
+
+        assert notebook.role is None
+        assert notebook.is_owner is True
 
     def test_from_api_response_empty_data(self):
         """Test parsing with minimal data."""
@@ -2212,6 +2395,7 @@ class TestNotebookMetadata:
             created_at=datetime(2024, 1, 1, 12, 0),
             is_owner=True,
             modified_at=datetime(2024, 1, 2, 9, 30),
+            role=SharePermission.OWNER,
         )
         metadata = NotebookMetadata(
             notebook=notebook,
@@ -2228,6 +2412,7 @@ class TestNotebookMetadata:
             "created_at": "2024-01-01T12:00:00",
             "modified_at": "2024-01-02T09:30:00",
             "is_owner": True,
+            "role": "owner",
             "sources": [
                 {"type": "pdf", "title": "test.pdf", "url": None},
                 {"type": "web_page", "title": "Example", "url": "https://example.com"},
@@ -2246,6 +2431,7 @@ class TestNotebookMetadata:
             created_at=datetime(2024, 2, 1),
             is_owner=False,
             modified_at=datetime(2024, 3, 1),
+            role=SharePermission.VIEWER,
         )
         metadata = NotebookMetadata(notebook=notebook)
 
@@ -2254,6 +2440,7 @@ class TestNotebookMetadata:
         assert metadata.created_at == datetime(2024, 2, 1)
         assert metadata.modified_at == datetime(2024, 3, 1)
         assert metadata.is_owner is False
+        assert metadata.role is SharePermission.VIEWER
 
     def test_to_dict_with_none_created_at(self):
         """Test serialization when created_at is None."""
@@ -2264,6 +2451,8 @@ class TestNotebookMetadata:
 
         result = metadata.to_dict()
         assert result["created_at"] is None
+        # An unknown role serializes as ``null``, not the "unknown" label.
+        assert result["role"] is None
 
     def test_empty_sources_list(self):
         """Test metadata with empty sources list."""

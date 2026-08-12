@@ -555,6 +555,7 @@ class NotebookLMClient:
         allow_null: bool = False,
         *,
         disable_internal_retries: bool = False,
+        read_timeout: float | None = None,
     ) -> Any:
         """Make a raw NotebookLM RPC call.
 
@@ -569,6 +570,10 @@ class NotebookLMClient:
         underlying internal-only parameters do so against the executor
         surface directly, not via this public wrapper.
 
+        ``read_timeout`` (default ``None``) overrides the client-wide read
+        timeout for this one call — useful for RPCs known to run long (e.g.
+        bulk imports) without lowering the default for every other call.
+
         .. versionchanged:: 0.6.0
             The deprecated keyword arguments previously documented here
             were removed (see :doc:`/deprecations`). The default-shape
@@ -579,6 +584,7 @@ class NotebookLMClient:
             params=params,
             allow_null=allow_null,
             disable_internal_retries=disable_internal_retries,
+            read_timeout=read_timeout,
         )
 
     @property

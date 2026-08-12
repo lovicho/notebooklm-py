@@ -506,12 +506,51 @@ class ShareViewLevel(int, Enum):
 
 
 class SharePermission(int, Enum):
-    """User permission level for sharing."""
+    """User permission level on a notebook.
+
+    This is the wire enum the backend uses for *both* halves of the sharing
+    story, under two different proto names:
+
+    * ``SharedUser.permission`` — a collaborator's level, from
+      ``GET_SHARE_STATUS`` (``SharePermission``).
+    * ``Notebook.role`` — the *calling account's own* level, from
+      ``ProjectMetadata.userRole`` (tag 1, ``meta[0]``) on every
+      ``LIST_NOTEBOOKS`` / ``GET_NOTEBOOK`` row. The proto names its members
+      ``OWNER``/``WRITER``/``READER``, but the integers are identical, so this
+      one enum covers both rather than shipping a value-identical twin (#2125).
+    """
 
     OWNER = 1  # Full control (read-only, cannot assign)
-    EDITOR = 2  # Can edit notebook
-    VIEWER = 3  # Read-only access
-    _REMOVE = 4  # Internal: remove user from share list
+    EDITOR = 2  # Can edit notebook (proto: WRITER)
+    VIEWER = 3  # Read-only access (proto: READER)
+    _REMOVE = 4  # Internal: remove user from share list (proto: NOT_SHARED)
+
+
+# Share permission code to string mapping (uses int keys for mypy compatibility).
+# ``_REMOVE`` is deliberately absent: it is a write-only sentinel with no
+# display meaning, so it degrades to "unknown" like any unmapped code.
+_SHARE_PERMISSION_MAP: dict[int, str] = {
+    SharePermission.OWNER: "owner",
+    SharePermission.EDITOR: "editor",
+    SharePermission.VIEWER: "viewer",
+}
+
+
+def share_permission_to_str(permission: int | SharePermission) -> str:
+    """Convert a share permission / notebook role code to a human-readable string.
+
+    This is the single source of truth for permission code to string mapping
+    (the sibling of :func:`source_status_to_str`). Use this helper instead of
+    inline conditionals so every adapter's label stays in lock-step.
+
+    Args:
+        permission: Permission code as int or SharePermission enum.
+
+    Returns:
+        String permission: ``"owner"``, ``"editor"``, or ``"viewer"``.
+        Returns ``"unknown"`` for unrecognized codes (future-proofing).
+    """
+    return _SHARE_PERMISSION_MAP.get(permission, "unknown")
 
 
 class SourceStatus(int, Enum):

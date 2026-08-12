@@ -23,18 +23,14 @@ from .._app.sharing import (
 from ..types import SharePermission, ShareViewLevel
 from .auth_runtime import resolve_client_factory, with_client
 from .options import notebook_option
-from .rendering import console, json_output_response
+from .rendering import console, get_permission_display, json_output_response
 from .resolve import require_notebook, resolve_notebook_id
 from .services.confirming_mutation import MutationPlan, run_confirmed_mutation
 
 
 def _permission_name(perm: SharePermission) -> str:
     """Convert permission enum to display name."""
-    return {
-        SharePermission.OWNER: "Owner",
-        SharePermission.EDITOR: "Editor",
-        SharePermission.VIEWER: "Viewer",
-    }.get(perm, "Unknown")
+    return get_permission_display(perm)
 
 
 def _view_level_display(view_level: ShareViewLevel) -> str:

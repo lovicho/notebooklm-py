@@ -28,7 +28,14 @@ from notebooklm.exceptions import (
     RPCError,
 )
 from notebooklm.rpc import RPCMethod
-from notebooklm.types import AccountLimits, Notebook, NotebookMetadata, Source, SourceType
+from notebooklm.types import (
+    AccountLimits,
+    Notebook,
+    NotebookMetadata,
+    SharePermission,
+    Source,
+    SourceType,
+)
 
 
 def _make_core(rpc_call: AsyncMock | None = None):
@@ -69,7 +76,33 @@ def _owned_notebooks(count: int) -> list[Notebook]:
 
 
 def _shared_notebooks(count: int) -> list[Notebook]:
-    return [Notebook(id=f"shared_{i}", title=f"Shared {i}", is_owner=False) for i in range(count)]
+    return [
+        Notebook(id=f"shared_{i}", title=f"Shared {i}", role=SharePermission.VIEWER)
+        for i in range(count)
+    ]
+
+
+def _owned_but_shared_notebooks(count: int) -> list[Notebook]:
+    """Notebooks the account OWNS and has shared with a collaborator.
+
+    Parsed from the live row shape rather than constructed with an explicit
+    ``is_owner``: ``meta[0] == 1`` (userRole OWNER) with ``meta[1] is True``
+    (the notebook has sharing) is exactly the combination the pre-#2125 decoder
+    mis-read as "not owned".
+    """
+    return [
+        Notebook.from_api_response(
+            [
+                f"Owned & Shared {i}",
+                [],
+                f"owned_shared_{i}",
+                "\U0001f4d3",
+                None,
+                [1, True, True, None, None, None, 1, False, None],
+            ]
+        )
+        for i in range(count)
+    ]
 
 
 def _create_invalid_argument_error(
@@ -361,6 +394,59 @@ class TestCreateNotebookQuotaDetection:
         # ``create`` calls ``list`` twice on an RPC failure path:
         # once for the baseline snapshot, once for the quota check.
         assert api.list.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_quota_check_counts_owned_notebooks_the_user_has_shared(self):
+        """#2125: sharing a notebook must not remove it from ``owned_count``.
+
+        The pre-fix decoder derived ``is_owner`` from the "has any sharing"
+        slot, so every notebook the account owned *and had shared* dropped out
+        of this count and ``NotebookLimitError`` was never raised. Here all 500
+        notebooks are owned-and-shared, so a correct count reaches the limit.
+        """
+        original = _create_invalid_argument_error()
+        api = _make_api(rpc_call=AsyncMock(side_effect=original))
+        _set_account_limit(api, 500)
+        owned_and_shared = _owned_but_shared_notebooks(500)
+        assert all(nb.role is SharePermission.OWNER for nb in owned_and_shared)
+        api.list = AsyncMock(return_value=owned_and_shared)
+
+        with pytest.raises(NotebookLimitError) as exc_info:
+            await api.create("At Paid Limit")
+
+        assert exc_info.value.current_count == 500
+
+    @pytest.mark.asyncio
+    async def test_quota_check_counts_rows_with_no_stated_role(self):
+        """An unstated role counts as owned — matching ``is_owner``'s soft-degrade.
+
+        Pinned deliberately: it means widespread protocol drift would inflate
+        ``owned_count`` rather than deflate it. That direction is the safe one
+        here — this path only runs to reclassify an already-failed create, so
+        the worst case is a more specific error message, never a blocked create.
+        """
+        api = _make_api(rpc_call=AsyncMock(side_effect=_create_invalid_argument_error()))
+        _set_account_limit(api, 500)
+        unstated = [Notebook(id=f"nb_{i}", title=f"N{i}") for i in range(500)]
+        assert all(nb.role is None for nb in unstated)
+        api.list = AsyncMock(return_value=unstated)
+
+        with pytest.raises(NotebookLimitError) as exc_info:
+            await api.create("Unknown Roles")
+
+        assert exc_info.value.current_count == 500
+
+    @pytest.mark.asyncio
+    async def test_quota_check_excludes_notebooks_shared_with_the_user(self):
+        """Notebooks owned by *someone else* still must not count toward quota."""
+        api = _make_api(rpc_call=AsyncMock(side_effect=_create_invalid_argument_error()))
+        _set_account_limit(api, 500)
+        api.list = AsyncMock(return_value=_owned_notebooks(100) + _shared_notebooks(400))
+
+        with pytest.raises(RPCError) as exc_info:
+            await api.create("Mostly Someone Else's")
+
+        assert not isinstance(exc_info.value, NotebookLimitError)
 
     @pytest.mark.asyncio
     async def test_create_invalid_argument_at_paid_limit_raises_limit_error(self):

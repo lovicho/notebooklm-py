@@ -17,6 +17,9 @@ __all__ = [
     "DEFAULT_CHAT_RESPONSE_MAX_BYTES",
     "DEFAULT_CHAT_TIMEOUT",
     "DEFAULT_CONNECT_TIMEOUT",
+    "DEFAULT_IMPORT_RESEARCH_BASE_TIMEOUT",
+    "DEFAULT_IMPORT_RESEARCH_MAX_TIMEOUT",
+    "DEFAULT_IMPORT_RESEARCH_PER_SOURCE_TIMEOUT",
     "DEFAULT_KEEPALIVE_MIN_INTERVAL",
     "DEFAULT_MAX_CONCURRENT_RPCS",
     "DEFAULT_MAX_CONCURRENT_UPLOADS",
@@ -53,6 +56,17 @@ DEFAULT_CHAT_TIMEOUT = 180.0
 # the answer text. Keep ordinary metadata RPCs on the shared 50 MiB stream
 # guard, but give chat a larger explicit default.
 DEFAULT_CHAT_RESPONSE_MAX_BYTES = 256 * 1024 * 1024
+
+# IMPORT_RESEARCH ingests every requested entry (fetch/parse/embed) server-side
+# before responding to one RPC, so a large deep-research batch (the notebook
+# source cap varies 50-600 by account tier) needs materially more time than
+# the shared 30s metadata window. Scaled per requested source rather than
+# flat-overridden so a small fast-research import still fails fast on a
+# genuinely broken call; see ``_research_import._import_research_read_timeout``
+# (#2187).
+DEFAULT_IMPORT_RESEARCH_BASE_TIMEOUT = 60.0
+DEFAULT_IMPORT_RESEARCH_PER_SOURCE_TIMEOUT = 3.0
+DEFAULT_IMPORT_RESEARCH_MAX_TIMEOUT = 240.0
 
 # Minimum keepalive interval to avoid accidentally rate-limiting accounts.google.com
 DEFAULT_KEEPALIVE_MIN_INTERVAL = 60.0

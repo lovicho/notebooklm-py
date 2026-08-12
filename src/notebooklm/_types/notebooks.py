@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from ..rpc import RPCMethod, safe_index
+from ..rpc.types import SharePermission, share_permission_to_str
 from .common import _datetime_from_timestamp
 from .sources import SourceType
 
@@ -55,6 +56,45 @@ def _extract_notebook_sources_count(data: list[Any]) -> int:
     return len(sources) if isinstance(sources, list) else 0
 
 
+#: Wire codes the ``userRole`` slot may legitimately carry, as plain ints —
+#: comparing ints to ints rather than relying on ``SharePermission`` hashing as
+#: its value, so the check cannot quietly start rejecting everything if the enum
+#: ever stops mixing in ``int``. ``SharePermission`` also owns ``_REMOVE = 4``
+#: (proto ``NOT_SHARED``), but that is a write-only sentinel for the
+#: share-mutation call — a notebook row never reports it (a revoked account gets
+#: ``PERMISSION_DENIED``, not role 4), so it is excluded here rather than
+#: surfaced as a nonsensical role.
+_NOTEBOOK_ROLES = frozenset(
+    {SharePermission.OWNER.value, SharePermission.EDITOR.value, SharePermission.VIEWER.value}
+)
+
+
+def _role_from_wire(raw_role: Any, row: list[Any]) -> SharePermission | None:
+    """Map a raw ``userRole`` slot to :class:`SharePermission`, or ``None``.
+
+    ``None`` means "not stated by this row" — an absent slot, or a value this
+    client does not recognize. Callers treat that as unknown rather than
+    guessing a level. An unmapped *present* value logs a WARNING because it is
+    the signature of protocol drift (#1485 absence-vs-malformed policy).
+    """
+    if raw_role is None:
+        return None
+    # ``bool`` is an ``int`` subclass, so ``SharePermission(True)`` would
+    # silently yield ``OWNER``. Reject booleans explicitly: they are the shape
+    # of the neighbouring has-sharing slot, i.e. exactly the drift we would
+    # most want to notice.
+    if isinstance(raw_role, int) and not isinstance(raw_role, bool):
+        if raw_role in _NOTEBOOK_ROLES:
+            return SharePermission(raw_role)
+    logger.warning(
+        "Notebook row userRole slot unmapped — reporting unknown role "
+        "(expected 1/2/3 at data[5][0], got %r; row=%s)",
+        raw_role,
+        reprlib.repr(row),
+    )
+    return None
+
+
 @dataclass
 class Notebook:
     """Represents a NotebookLM notebook."""
@@ -63,10 +103,45 @@ class Notebook:
     title: str
     created_at: datetime | None = None
     sources_count: int = 0
+    #: ``True`` when :attr:`role` is :attr:`~notebooklm.types.SharePermission.OWNER`.
+    #: Kept as a convenience derivation of :attr:`role`; it can no longer
+    #: distinguish an editor from a viewer, so prefer :attr:`role` (#2125).
     is_owner: bool = True
-    # ``modified_at`` is appended at the END of the field list so positional
-    # construction stays unaffected (additive, defaults to ``None``).
+    # ``modified_at`` / ``role`` are appended at the END of the field list so
+    # positional construction stays unaffected (additive, default ``None``).
     modified_at: datetime | None = None
+    #: The calling account's permission level on this notebook, decoded from
+    #: ``ProjectMetadata.userRole``. ``None`` when the row omits the slot or
+    #: carries an unmapped code.
+    role: SharePermission | None = None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Keep ``is_owner`` in lock-step with ``role``, at construction *and* after.
+
+        ``is_owner`` stays a *field* rather than becoming a property because the
+        MCP/REST serializer emits ``dataclasses.fields`` only — a property would
+        silently vanish from every adapter's response, a breaking wire change.
+        So the invariant is maintained on assignment instead.
+
+        Hooking ``__setattr__`` rather than ``__post_init__`` matters because
+        this dataclass is mutated in place after construction (see the
+        timestamp backfill in ``_app.notebooks._backfill_created_timestamps``);
+        a construction-only hook would let ``is_owner`` go stale the moment
+        anyone assigned ``role``.
+
+        A contradictory ``is_owner`` is *corrected*, not rejected. Raising is not
+        actually available here: ``is_owner`` has a plain ``True`` default, so
+        the ordinary ``Notebook(id=..., title=..., role=VIEWER)`` call is
+        indistinguishable from an explicit ``is_owner=True``, and rejecting the
+        contradiction would reject the most natural construction in the codebase.
+
+        When ``role`` is ``None`` (the row stated no level) the caller's
+        ``is_owner`` is left untouched, preserving the historical
+        optimistic-``True`` soft-degrade.
+        """
+        super().__setattr__(name, value)
+        if name == "role" and value is not None:
+            super().__setattr__("is_owner", value is SharePermission.OWNER)
 
     @classmethod
     def from_api_response(cls, data: list[Any]) -> Notebook:
@@ -100,7 +175,7 @@ class Notebook:
                 )
 
         # ``data[5]`` is the metadata block; bind it once so the timestamp and
-        # owner-flag descents read a single named local instead of re-chaining
+        # role descents read a single named local instead of re-chaining
         # ``data[5][...]`` (the legitimately-absent block defaults below). The
         # slot read goes through ``safe_index`` (length-guarded first, so it
         # cannot raise) and the result is only retained when it is a list.
@@ -142,21 +217,36 @@ class Notebook:
                     )
                 )
 
-        is_owner = True
-        if meta is not None and len(meta) > 1:
-            # The API sends False in this slot for owner notebooks; truthy values mean shared.
-            is_owner = (
-                safe_index(meta, 1, method_id=_NOTEBOOK_METHOD_ID, source="Notebook.is_owner")
-                is False
-            )
+        # ``meta[0]`` (``data[5][0]``) is ``ProjectMetadata.userRole`` — the
+        # CALLING account's permission level on this notebook (1 OWNER /
+        # 2 WRITER / 3 READER, value-identical to ``SharePermission``).
+        #
+        # This used to be read from ``meta[1]`` instead, on the belief that the
+        # slot was an owner flag. A two-account live probe (#2125) showed
+        # ``meta[1]`` actually tracks "this notebook has ANY sharing at all":
+        # it flipped ``False -> True`` the moment a collaborator was added to a
+        # notebook the account owned, and back on revoke. So the old expression
+        # evaluated to ``not (shared with anyone)`` and reported ``is_owner=False``
+        # for every notebook the user owned *and had shared*. ``meta[0]`` stayed
+        # pinned at ``1`` for the owner across every stage of that probe, and is
+        # present on 100% of ``LIST_NOTEBOOKS`` *and* ``GET_NOTEBOOK`` rows, so
+        # the correct read costs no extra RPC.
+        role = None
+        if meta is not None and len(meta) > 0:
+            raw_role = safe_index(meta, 0, method_id=_NOTEBOOK_METHOD_ID, source="Notebook.role")
+            role = _role_from_wire(raw_role, data)
 
+        # ``is_owner`` is derived from ``role`` in ``__post_init__``. An unknown
+        # / absent role leaves the field's default of ``True``: the
+        # overwhelmingly common case is the caller's own notebook, and a short
+        # or malformed row must soft-degrade rather than mislabel every entry.
         return cls(
             id=notebook_id,
             title=title,
             created_at=created_at,
             sources_count=sources_count,
-            is_owner=is_owner,
             modified_at=modified_at,
+            role=role,
         )
 
 
@@ -235,8 +325,13 @@ class NotebookMetadata:
 
     @property
     def is_owner(self) -> bool:
-        """Get owner status."""
+        """Get owner status (``role is SharePermission.OWNER``)."""
         return self.notebook.is_owner
+
+    @property
+    def role(self) -> SharePermission | None:
+        """Get the calling account's permission level on the notebook."""
+        return self.notebook.role
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -246,5 +341,6 @@ class NotebookMetadata:
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "modified_at": self.modified_at.isoformat() if self.modified_at else None,
             "is_owner": self.is_owner,
+            "role": share_permission_to_str(self.role) if self.role is not None else None,
             "sources": [s.to_dict() for s in self.sources],
         }

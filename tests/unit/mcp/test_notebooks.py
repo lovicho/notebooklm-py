@@ -27,6 +27,7 @@ from notebooklm.exceptions import (  # noqa: E402 - after importorskip guard
 from notebooklm.types import (  # noqa: E402 - after importorskip guard
     Notebook,
     NotebookMetadata,
+    SharePermission,
     SourceSummary,
     SourceType,
 )
@@ -38,6 +39,9 @@ from .conftest import AsyncMock  # noqa: E402 - after importorskip guard
 class FakeNotebook:
     id: str
     title: str
+    # ``_app.views.notebook_view`` reads ``role`` to add the ``role_label``
+    # projection, so even the minimal fake carries the field (#2125).
+    role: SharePermission | None = None
 
 
 @dataclass
@@ -57,6 +61,7 @@ class FakeNotebookFull:
     sources_count: int = 0
     is_owner: bool = True
     modified_at: datetime | None = None
+    role: SharePermission | None = None
 
 
 @dataclass
@@ -71,10 +76,14 @@ MODIFIED_AT = datetime(2026, 1, 3, 4, 5, 6, tzinfo=timezone.utc)
 
 
 async def test_notebook_list(mcp_call, mock_client) -> None:
-    mock_client.notebooks.list = AsyncMock(return_value=[FakeNotebook(id=NB_ID, title="Research")])
+    mock_client.notebooks.list = AsyncMock(
+        return_value=[FakeNotebook(id=NB_ID, title="Research", role=SharePermission.VIEWER)]
+    )
     result = await mcp_call("notebook_list")
+    # ``role`` is the raw wire code; ``role_label`` is the agent-readable
+    # projection added by ``_app.views.notebook_view`` (#2125).
     assert result.structured_content == {
-        "notebooks": [{"id": NB_ID, "title": "Research"}],
+        "notebooks": [{"id": NB_ID, "title": "Research", "role": 3, "role_label": "viewer"}],
         "total": 1,
         "offset": 0,
         "has_more": False,
@@ -112,7 +121,13 @@ async def test_notebook_create_surfaces_backfilled_timestamps(mcp_call, mock_cli
     the populated ``created_at`` / ``modified_at`` and the id as ``notebook_id``.
     """
     mock_client.notebooks.create = AsyncMock(
-        return_value=FakeNotebookFull(id=NB_ID, title="New", sources_count=0, is_owner=True)
+        return_value=FakeNotebookFull(
+            id=NB_ID,
+            title="New",
+            sources_count=0,
+            is_owner=True,
+            role=SharePermission.OWNER,
+        )
     )
     # The core re-reads via GET to backfill the null create timestamps; the GET
     # diverges on the non-timestamp fields to prove the create stays authoritative.
@@ -135,6 +150,8 @@ async def test_notebook_create_surfaces_backfilled_timestamps(mcp_call, mock_cli
         "sources_count": 0,  # from create
         "is_owner": True,  # from create
         "modified_at": MODIFIED_AT.isoformat(),  # backfilled by the core
+        "role": SharePermission.OWNER.value,  # from create
+        "role_label": "owner",
     }
     mock_client.notebooks.create.assert_awaited_once_with("New")
     mock_client.notebooks.get.assert_awaited_once_with(NB_ID)
@@ -188,7 +205,7 @@ async def test_notebook_describe_include_metadata_adds_block(mcp_call, mock_clie
     )
     mock_client.notebooks.get_metadata = AsyncMock(
         return_value=NotebookMetadata(
-            notebook=Notebook(id=NB_ID, title="Research"),
+            notebook=Notebook(id=NB_ID, title="Research", role=SharePermission.EDITOR),
             sources=[SourceSummary(kind=SourceType.PDF, title="Doc", url=None)],
         )
     )
@@ -206,8 +223,11 @@ async def test_notebook_describe_include_metadata_adds_block(mcp_call, mock_clie
             "title": "Research",
             "created_at": None,
             "sources_count": 1,
-            "is_owner": True,
+            # An EDITOR is a collaborator, not the owner (#2125).
+            "is_owner": False,
             "modified_at": None,
+            "role": SharePermission.EDITOR.value,
+            "role_label": "editor",
         },
         "sources": [{"kind": "pdf", "title": "Doc", "url": None}],
     }

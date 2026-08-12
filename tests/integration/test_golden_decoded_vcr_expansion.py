@@ -97,28 +97,47 @@ _WIKIPEDIA_SOURCE_ID = "466b9ee3-c1ce-45ef-861c-1d4bfcd939ad"
 
 
 # Per-row golden for the first three recorded notebooks:
-# (id, title, sources_count, is_owner). The (id <-> title <-> count <-> owner)
-# tuple is the positional canary for the notebook-list decoder.
+# (id, title, sources_count, role, is_owner). The tuple is the positional canary
+# for the notebook-list decoder.
+#
+# Row 2 is the #2125 regression witness: the recorded row carries
+# ``meta[0] == 1`` (userRole OWNER) alongside ``meta[1] is True`` (the notebook
+# has been shared). The pre-fix decoder read ``meta[1]`` and reported
+# ``is_owner=False`` for this row — the recorded account's own notebook,
+# labelled "Shared" by its own CLI.
 _NOTEBOOKS_LIST_GOLDEN_HEAD = [
     (
         "f66923f0-1df4-4ffe-9822-3ed63c558b1c",
         "GENERATION: Claude Code Deep Dive: Skills, Agents, Commands & Plugins",
         42,
+        SharePermission.OWNER,
         True,
     ),
     (
         "167481cd-23a3-4331-9a45-c8948900bf91",
         "READ ONLY: Learn Claude Code & AI Agents for High School Students",
         8,
-        False,
+        SharePermission.OWNER,
+        True,
     ),
     (
         "c3f6285f-1709-44c4-9cd6-e95cf0ea4f5e",
         "TypeScript Fundamentals: A Handbook of Type Systems and Rules",
         2,
+        SharePermission.OWNER,
         True,
     ),
 ]
+
+#: The one recorded row the account does NOT own — ``meta[0] == 3`` (READER).
+#: Pinned separately so the list golden covers a genuine non-owner role rather
+#: than only the owner path.
+_NOTEBOOKS_LIST_GOLDEN_VIEWER_ROW = (
+    "40b0bb3f-afa6-49b2-959f-d91fb0a91a3b",
+    "Jane Austen: The Complete Works",
+    SharePermission.VIEWER,
+    False,
+)
 
 
 class TestNotebooksGoldenDecoded:
@@ -128,14 +147,20 @@ class TestNotebooksGoldenDecoded:
     @pytest.mark.asyncio
     @notebooklm_vcr.use_cassette("notebooks_list.yaml")
     async def test_list_decoded_golden(self):
-        """``notebooks.list`` decodes id/title/sources_count/is_owner per row."""
+        """``notebooks.list`` decodes id/title/sources_count/role/is_owner per row."""
         async with vcr_client() as client:
             notebooks = await client.notebooks.list()
 
         assert_decoded_equals(len(notebooks), 12, field="notebooks_list length")
-        actual_head = [(n.id, n.title, n.sources_count, n.is_owner) for n in notebooks[:3]]
+        actual_head = [(n.id, n.title, n.sources_count, n.role, n.is_owner) for n in notebooks[:3]]
         assert_decoded_equals(
             actual_head, _NOTEBOOKS_LIST_GOLDEN_HEAD, field="notebooks_list[:3] rows"
+        )
+        viewer = next(nb for nb in notebooks if nb.id == _NOTEBOOKS_LIST_GOLDEN_VIEWER_ROW[0])
+        assert_decoded_equals(
+            (viewer.id, viewer.title, viewer.role, viewer.is_owner),
+            _NOTEBOOKS_LIST_GOLDEN_VIEWER_ROW,
+            field="notebooks_list viewer row",
         )
         # The created_at / modified_at slots decode to real timestamps (not
         # fabricated defaults) — pin the first row's to catch a timestamp-column
@@ -181,6 +206,7 @@ class TestNotebooksGoldenDecoded:
             field="notebooks_get.title",
         )
         assert_decoded_equals(notebook.sources_count, 2, field="notebooks_get.sources_count")
+        assert_decoded_equals(notebook.role, SharePermission.OWNER, field="notebooks_get.role")
         assert_decoded_equals(notebook.is_owner, True, field="notebooks_get.is_owner")
         # created_at is the CREATION instant (``data[5][8][0]``); modified_at is
         # the LAST-MODIFIED instant (``data[5][5][0]``). Pin both epochs (TZ-

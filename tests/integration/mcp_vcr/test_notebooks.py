@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import pytest
 
+from notebooklm.types import SharePermission
 from tests.integration.conftest import skip_no_cassettes
 from tests.vcr_config import notebooklm_vcr
 
@@ -104,6 +105,10 @@ async def test_mcp_notebook_create_over_vcr() -> None:
         "sources_count",
         "is_owner",
         "modified_at",
+        "role",
+        # ``role_label`` is not a dataclass field — it is the agent-readable
+        # projection ``_app.views.notebook_view`` adds next to the raw code.
+        "role_label",
     }
     # #1699: CREATE_NOTEBOOK returns null created_at/modified_at; the tool's
     # GET_NOTEBOOK re-read populates them. Asserting NON-null is the load-bearing
@@ -111,6 +116,9 @@ async def test_mcp_notebook_create_over_vcr() -> None:
     # (or a silent fallback) would leave these null and fail here.
     assert structured["created_at"] is not None, "created_at should be populated by the re-read"
     assert structured["modified_at"] is not None, "modified_at should be populated by the re-read"
+    # The creating account owns what it just created (#2125).
+    assert structured["role"] == SharePermission.OWNER.value
+    assert structured["role_label"] == "owner"
 
 
 @pytest.mark.asyncio

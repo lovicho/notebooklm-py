@@ -11,6 +11,8 @@ projection into ``_app`` rather than copy it per adapter):
   ``access=1`` etc.).
 * :func:`source_view` — a ``Source`` with string ``kind`` / ``status_label``
   labels added alongside the raw ``status`` / ``_type_code`` integers.
+* :func:`notebook_view` — a ``Notebook`` with a string ``role_label`` added
+  alongside the raw ``role`` integer.
 * :func:`ask_result_view` — an ``AskResult`` serialized with the internal
   ``raw_response`` debugging blob stripped (it just burns agent context; the
   field stays on the dataclass, it is only omitted from the wire).
@@ -23,11 +25,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ..types import source_status_to_str
+from ..types import share_permission_to_str, source_status_to_str
 from .serialize import to_jsonable
 
 if TYPE_CHECKING:
-    from ..types import AskResult, ShareStatus, Source
+    from ..types import AskResult, Notebook, ShareStatus, Source
 
 __all__ = [
     "ACCESS_LABELS",
@@ -35,6 +37,7 @@ __all__ = [
     "VIEW_LEVEL_LABELS",
     "ask_result_view",
     "label",
+    "notebook_view",
     "share_status_view",
     "source_view",
 ]
@@ -99,6 +102,23 @@ def source_view(source: Source) -> dict[str, Any]:
     view = to_jsonable(source)
     view["kind"] = source.kind.value
     view["status_label"] = source_status_to_str(source.status)
+    return view
+
+
+def notebook_view(notebook: Notebook) -> dict[str, Any]:
+    """Serialize a ``Notebook`` with an agent-readable ``role_label`` added.
+
+    ``role`` is the caller's own permission level on the notebook
+    (``SharePermission``), so a raw :func:`to_jsonable` pass would leak
+    ``role=3`` and force an agent to guess. ``role_label`` comes from
+    :func:`~notebooklm.rpc.types.share_permission_to_str` — the repo's single
+    source of truth for permission→string — and is one of ``owner``/``editor``/
+    ``viewer``, or ``None`` when the row did not state a role.
+    """
+    view = to_jsonable(notebook)
+    view["role_label"] = (
+        share_permission_to_str(notebook.role) if notebook.role is not None else None
+    )
     return view
 
 

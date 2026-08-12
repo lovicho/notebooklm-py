@@ -16,15 +16,16 @@ from typing import TYPE_CHECKING, Any
 from . import research as _research_pub
 from ._notebook_metadata import NotebookSourceLister, create_default_source_lister
 from ._research_import import (
+    _import_research_read_timeout,
     _imported_result,
-    _imported_source_entry,
+    _is_import_research_failed_precondition,
     _is_importable_report_source,
     _merge_imported_sources,
     _no_import_verification_url_entry_count,
     _normalize_import_verification_url,
     _partition_requested_sources,
+    _reconcile_import_probe,
     _requested_import_verification_urls,
-    _source_import_verification_url,
     _validate_research_task_provenance,
 )
 from ._research_task_parser import parse_research_task_models
@@ -673,6 +674,7 @@ class ResearchAPI:
             RPCMethod.IMPORT_RESEARCH,
             [None, [1], effective_task_id, notebook_id, source_array],
             source_path=f"/notebook/{notebook_id}",
+            read_timeout=_import_research_read_timeout(len(source_array)),
         )
         imported = []
         # ``unwrap_import_rows`` centralises the ``[[src1, ...]]`` envelope probe
@@ -723,14 +725,12 @@ class ResearchAPI:
         1. Snapshot baseline sources via ``client.sources.list`` (also the URL
            set used for the idempotency pre-filter above).
         2. Call :meth:`import_sources`.
-        3. On :class:`RPCTimeoutError`, probe ``client.sources.list`` again:
-           - If every requested URL appears among *new* (post-baseline)
-             sources, treat as success and return the imported entries
-             without retrying — the server committed before the response
-             was lost.
-           - Otherwise filter out URLs that are already present (the
-             server committed *some* of the batch) and retry only the
-             remaining sources.
+        3. On :class:`RPCTimeoutError`, probe ``client.sources.list``: if every
+           requested URL now appears among *new* sources, treat as success;
+           otherwise filter out already-present URLs and retry the remainder.
+           IMPORT_RESEARCH's documented ``FAILED_PRECONDITION`` (#2187, #1926
+           F2b) shares only the verified-success half — anything less
+           re-raises rather than retrying the rejected task_id blindly.
         4. Bound total elapsed time by ``max_elapsed``; back off between
            retries (capped by ``max_delay``).
         5. Report-only imports (no URLs to verify) cap retries at one
@@ -743,7 +743,10 @@ class ResearchAPI:
         the #808 analysis said was unavailable to the executor.
 
         Raises:
-            RPCTimeoutError: If retries exhaust the ``max_elapsed`` budget.
+            RPCTimeoutError: If retries exhaust ``max_elapsed``.
+            RPCError: Immediately for any non-FAILED_PRECONDITION error, or
+                once a FAILED_PRECONDITION's post-error verification fails to
+                confirm every requested URL landed — no budget is spent on it.
         """
         if not sources:
             return _imported_result([], [])
@@ -818,6 +821,20 @@ class ResearchAPI:
         # synthesized return after a timeout.
         requested_no_url_count = _no_import_verification_url_entry_count(source_models)
 
+        def _log_discarded_progress() -> None:
+            # #2187 silent-failure-hunter finding: ``verified_imported`` (probe-
+            # confirmed commits from earlier iterations) carries no signal once
+            # this raises — surface it in logs so it isn't silently lost.
+            if verified_imported:
+                logger.error(
+                    "IMPORT_RESEARCH failing for notebook %s but %d source(s) "
+                    "were already confirmed imported before this failure (%s); "
+                    "check sources.list rather than assuming a total loss",
+                    notebook_id,
+                    len(verified_imported),
+                    [entry["id"] for entry in verified_imported],
+                )
+
         while True:
             try:
                 imported = await self.import_sources(notebook_id, task_id, source_inputs)
@@ -825,143 +842,99 @@ class ResearchAPI:
                     _merge_imported_sources(imported, verified_imported, verified_imported_ids),
                     already_present,
                 )
-            except RPCTimeoutError:
+            except (RPCTimeoutError, RPCError) as exc:
+                if isinstance(exc, RPCError) and not _is_import_research_failed_precondition(exc):
+                    _log_discarded_progress()
+                    raise  # non-FAILED_PRECONDITION RPCErrors surface immediately (#2187)
+                reason = (
+                    "timed out"
+                    if isinstance(exc, RPCTimeoutError)
+                    else "hit a retry-time FAILED_PRECONDITION"
+                )
                 elapsed = time.monotonic() - started_at
                 remaining = max_elapsed - elapsed
 
                 if requested_urls_norm:
                     try:
                         current = await self._source_lister.list(notebook_id, strict=True)
-                        new_sources = (
-                            [src for src in current if src.id not in baseline_ids]
-                            if baseline_ids is not None
-                            else []
+                        outcome = _reconcile_import_probe(
+                            current=current,
+                            baseline_ids=baseline_ids,
+                            requested_urls_norm=requested_urls_norm,
+                            requested_no_url_count=requested_no_url_count,
+                            source_inputs=source_inputs,
+                            source_models=source_models,
+                            already_verified_ids=verified_imported_ids,
+                            allow_duplicate=allow_duplicate,
                         )
-                        new_urls_norm = {
-                            _normalize_import_verification_url(src.url)
-                            for src in new_sources
-                            if src.url
-                        }
-                        current_urls_norm = {
-                            _normalize_import_verification_url(src.url)
-                            for src in current
-                            if src.url
-                        }
-                        committed_urls_norm = requested_urls_norm & new_urls_norm
-                        if baseline_ids is not None and requested_urls_norm.issubset(new_urls_norm):
+                        if outcome.fully_verified_entries is not None:
                             logger.warning(
-                                "IMPORT_RESEARCH timed out for notebook %s but "
-                                "sources.list shows all %d requested URLs among "
-                                "new sources; treating as success and skipping "
+                                "IMPORT_RESEARCH %s for notebook %s but "
+                                "sources.list verifies every outstanding "
+                                "source; treating as success and skipping "
                                 "retry to avoid duplicate inflation",
+                                reason,
                                 notebook_id,
-                                len(requested_urls_norm),
                             )
-                            timeout_verified: list[dict[str, str]] = []
-                            remaining_no_url = requested_no_url_count
-                            for src in new_sources:
-                                if (
-                                    src.url
-                                    and _normalize_import_verification_url(src.url)
-                                    in requested_urls_norm
-                                ):
-                                    timeout_verified.append(_imported_source_entry(src))
-                                elif not src.url and remaining_no_url > 0:
-                                    timeout_verified.append(_imported_source_entry(src))
-                                    remaining_no_url -= 1
                             return _imported_result(
                                 _merge_imported_sources(
-                                    timeout_verified, verified_imported, verified_imported_ids
+                                    outcome.fully_verified_entries,
+                                    verified_imported,
+                                    verified_imported_ids,
                                 ),
                                 already_present,
                             )
-                        source_norms = [
-                            (
-                                source_input,
-                                source,
-                                _source_import_verification_url(source),
+                        if outcome.filtered:
+                            verified_imported.extend(outcome.newly_verified)
+                            verified_imported_ids.update(
+                                entry["id"] for entry in outcome.newly_verified
                             )
-                            for source_input, source in zip(
-                                source_inputs, source_models, strict=True
-                            )
-                        ]
-                        # Filter for retry: drop already-present URLs. Also, when
-                        # *any* URL committed, drop no-URL entries (deep-research
-                        # reports are appended FIRST in the IMPORT_RESEARCH payload,
-                        # so a newly-observed URL implies the report committed too —
-                        # without this guard each retry duplicates it server-side).
-                        # Pre-existing URLs only de-dupe URL entries. When no URL
-                        # committed, keep no-URL entries (report fate unknown; the
-                        # report-only attempt cap below bounds the worst case).
-                        drop_no_url_entries = bool(committed_urls_norm)
-                        # Drop-for-retry anchor: normally a URL already present in
-                        # the notebook (baseline OR committed by this call) is
-                        # dropped to avoid duplicate inflation. But under
-                        # ``allow_duplicate`` the caller explicitly opted to re-add
-                        # baseline URLs, so anchor on the post-baseline
-                        # ``new_urls_norm`` — only URLs THIS attempt committed are
-                        # dropped; a pre-existing baseline URL is still retried and
-                        # re-added, not silently treated as "already done" (#1961
-                        # codex review). #1934 safety holds in both modes: a URL
-                        # committed by this attempt is never retried.
-                        retry_present_urls = new_urls_norm if allow_duplicate else current_urls_norm
-                        filtered_source_pairs = [
-                            (source_input, source)
-                            for source_input, source, url in source_norms
-                            if url not in retry_present_urls
-                            and not (drop_no_url_entries and url is None)
-                        ]
-                        if len(filtered_source_pairs) != len(source_models):
-                            removed_count = len(source_models) - len(filtered_source_pairs)
-                            for src in new_sources:
-                                if (
-                                    src.url
-                                    and _normalize_import_verification_url(src.url)
-                                    in committed_urls_norm
-                                    and src.id not in verified_imported_ids
-                                ):
-                                    verified_imported.append(_imported_source_entry(src))
-                                    verified_imported_ids.add(src.id)
-                            source_inputs = [
-                                source_input for source_input, _ in filtered_source_pairs
-                            ]
-                            source_models = [source for _, source in filtered_source_pairs]
-                            requested_urls_norm = _requested_import_verification_urls(source_models)
-                            requested_no_url_count = _no_import_verification_url_entry_count(
-                                source_models
-                            )
-                            if not source_models:
+                            source_inputs = outcome.source_inputs
+                            source_models = outcome.source_models
+                            requested_urls_norm = outcome.requested_urls_norm
+                            requested_no_url_count = outcome.requested_no_url_count
+                            if isinstance(exc, RPCError):
                                 logger.warning(
-                                    "IMPORT_RESEARCH timed out for notebook %s "
-                                    "but sources.list shows all requested URLs "
-                                    "already present; treating as success and "
-                                    "skipping retry to avoid duplicate inflation",
+                                    "IMPORT_RESEARCH %s for notebook %s: %d "
+                                    "of %d requested source(s) verified "
+                                    "present, but the remainder can't be "
+                                    "confirmed — surfacing the error instead "
+                                    "of retrying the rejected task_id",
+                                    reason,
                                     notebook_id,
+                                    outcome.removed_count,
+                                    outcome.removed_count + len(source_models),
                                 )
-                                return _imported_result(
-                                    _merge_imported_sources(
-                                        [], verified_imported, verified_imported_ids
-                                    ),
-                                    already_present,
+                            else:
+                                logger.warning(
+                                    "IMPORT_RESEARCH %s for notebook %s after "
+                                    "%d requested source(s) were already "
+                                    "present; retrying with %d remaining "
+                                    "source(s)",
+                                    reason,
+                                    notebook_id,
+                                    outcome.removed_count,
+                                    len(source_models),
                                 )
-                            logger.warning(
-                                "IMPORT_RESEARCH timed out for notebook %s after "
-                                "%d requested source(s) were already present; "
-                                "retrying with %d remaining source(s)",
-                                notebook_id,
-                                removed_count,
-                                len(source_models),
-                            )
                     except (NetworkError, RPCError) as probe_exc:
                         # CancelledError is a BaseException, not Exception, and
                         # is not in this tuple — it propagates naturally for
                         # callers that need to cancel the operation cleanly.
                         logger.warning(
-                            "Failed to probe server state after timeout: %s; falling back to retry",
+                            "Failed to probe server state after %s: %s; %s",
+                            reason,
                             probe_exc,
+                            "falling back to retry"
+                            if not isinstance(exc, RPCError)
+                            else "surfacing the original error",
                         )
 
                 if remaining <= 0:
+                    _log_discarded_progress()
+                    raise
+
+                if isinstance(exc, RPCError):  # no verified-success return above
+                    _log_discarded_progress()
                     raise
 
                 # Report-only imports (no URLs to verify) can't use the success
@@ -969,18 +942,21 @@ class ResearchAPI:
                 # duplicate inflation for report entries when timeouts persist.
                 if not requested_urls_norm and attempt >= 2:
                     logger.warning(
-                        "IMPORT_RESEARCH timed out for notebook %s with no URLs "
+                        "IMPORT_RESEARCH %s for notebook %s with no URLs "
                         "to verify; giving up after %d attempts to bound "
                         "duplicate inflation",
+                        reason,
                         notebook_id,
                         attempt,
                     )
+                    _log_discarded_progress()
                     raise
 
                 sleep_for = min(delay, max_delay, remaining)
                 logger.warning(
-                    "IMPORT_RESEARCH timed out for notebook %s; retrying in "
+                    "IMPORT_RESEARCH %s for notebook %s; retrying in "
                     "%.1fs (attempt %d, %.1fs elapsed)",
+                    reason,
                     notebook_id,
                     sleep_for,
                     attempt + 1,

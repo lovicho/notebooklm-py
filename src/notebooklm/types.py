@@ -110,6 +110,7 @@ from .rpc.types import (
     VideoFormat,
     VideoStyle,
     artifact_status_to_str,
+    share_permission_to_str,
     source_status_to_str,
 )
 from .rpc.types import (
@@ -249,6 +250,7 @@ __all__ = [
     "SharePermission",
     # Helper functions
     "artifact_status_to_str",
+    "share_permission_to_str",
     "source_status_to_str",
 ]
 

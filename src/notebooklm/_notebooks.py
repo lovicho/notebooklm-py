@@ -648,6 +648,10 @@ class NotebooksAPI:
             )
             return
 
+        # ``is_owner`` is now ``role is SharePermission.OWNER``. It previously
+        # decoded a "has any sharing" slot, so this count silently dropped every
+        # notebook the user owned *and had shared* — biasing the quota check
+        # towards never raising ``NotebookLimitError`` (#2125).
         owned_count = sum(1 for notebook in notebooks if notebook.is_owner)
         # Allow one notebook of slack because list results can lag a failed
         # create or omit service-internal notebooks that still count.

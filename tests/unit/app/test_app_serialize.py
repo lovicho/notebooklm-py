@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from enum import Enum, IntEnum
 
 from notebooklm._app.serialize import to_jsonable
-from notebooklm.types import Notebook
+from notebooklm.types import Notebook, SharePermission
 
 
 class Color(str, Enum):
@@ -125,10 +125,13 @@ def test_real_notebooklm_type_round_trips() -> None:
         created_at=datetime(2026, 6, 8, 0, 0, 0, tzinfo=timezone.utc),
         sources_count=3,
         is_owner=True,
+        role=SharePermission.OWNER,
     )
 
     result = to_jsonable(nb)
 
+    # ``role`` is an ``int`` enum, so ``to_jsonable`` unwraps it to its wire
+    # value; adapters add the ``role_label`` string via ``_app.views``.
     assert result == {
         "id": "nb-1",
         "title": "My Notebook",
@@ -136,8 +139,34 @@ def test_real_notebooklm_type_round_trips() -> None:
         "sources_count": 3,
         "is_owner": True,
         "modified_at": None,
+        "role": 1,
     }
     json.dumps(result)
+
+
+def test_notebook_view_adds_role_label() -> None:
+    """``notebook_view`` labels the raw role code for agent consumers (#2125)."""
+    from notebooklm._app.views import notebook_view
+
+    view = notebook_view(Notebook(id="nb-1", title="N", role=SharePermission.VIEWER))
+
+    assert view["role"] == SharePermission.VIEWER.value
+    assert view["role_label"] == "viewer"
+    # The projection is additive — every dataclass field still ships.
+    assert view["is_owner"] is False
+    assert view["id"] == "nb-1"
+
+
+def test_notebook_view_role_label_is_none_for_unknown_role() -> None:
+    """An unstated role stays ``None`` rather than becoming the "unknown" label."""
+    from notebooklm._app.views import notebook_view
+
+    view = notebook_view(Notebook(id="nb-1", title="N"))
+
+    assert view["role"] is None
+    assert view["role_label"] is None
+    # ``role`` is unknown, so the historical optimistic default holds.
+    assert view["is_owner"] is True
 
 
 def test_unknown_object_falls_back_to_str() -> None:
