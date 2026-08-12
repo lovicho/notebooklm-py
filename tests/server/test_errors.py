@@ -175,6 +175,34 @@ def test_error_body_carries_retriable_flag() -> None:
     assert _error_body(exc.ValidationError("bad"))["retriable"] is False
 
 
+@pytest.mark.parametrize(
+    ("cause", "status", "category", "retriable"),
+    [
+        (exc.NetworkError("offline"), 502, "network", True),
+        (exc.ServerError("unavailable"), 502, "server", True),
+        (exc.AuthError("expired"), 401, "auth", False),
+        (exc.RateLimitError("slow down"), 429, "rate_limited", True),
+        (exc.ValidationError("rejected file"), 400, "validation", False),
+    ],
+)
+def test_partial_upload_error_preserves_cause_projection(
+    cause: Exception, status: int, category: str, retriable: bool
+) -> None:
+    """``raise_partial_upload_failure()`` attaches ``source_id``/``stage`` directly
+    to the real cause rather than wrapping it, so it must project exactly like an
+    ordinary instance of its own type.
+    """
+    cause.source_id = "source-1"  # type: ignore[attr-defined]
+    cause.stage = "upload_finalize"  # type: ignore[attr-defined]
+
+    response = error_response(cause)
+    body = _error_body(cause)
+
+    assert response.status_code == status
+    assert body["category"] == category
+    assert body["retriable"] is retriable
+
+
 def test_error_body_carries_hint_where_present() -> None:
     assert "hint" in _error_body(exc.RateLimitError("slow down"))
     # A category with no hint (RPC) omits the field entirely.

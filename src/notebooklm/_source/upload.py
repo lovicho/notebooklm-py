@@ -57,6 +57,7 @@ from ._upload_decode import (  # noqa: F401
     _STRICT_TRANSIENT_ERROR_TYPES,
     _TIER_SOURCE_LIMITS_SUMMARY,
     GetSourceLimit,
+    SourceAddStage,
     _build_invalid_argument_source_limit_hint,
     _coerce_filename_candidate,
     _coerce_source_id_candidate,
@@ -80,6 +81,7 @@ from ._upload_decode import (  # noqa: F401
     _validate_resumable_upload_url,
     _validate_upload_file_supported,
     raise_for_upload_status,
+    raise_partial_upload_failure,
 )
 from .listing import SourceLister
 from .polling import SourcePoller
@@ -401,21 +403,28 @@ class SourceUploadPipeline(LoopBoundPrimitive):
                         notebook_id, filename
                     )
                     source_id = registration.value
-                    upload_url = await self.start_resumable_upload(
-                        notebook_id,
-                        filename,
-                        file_size,
-                        source_id,
-                        content_type,
-                    )
-                    handed_off = True
-                    await self.upload_file_streaming(
-                        upload_url,
-                        file_obj,
-                        filename=filename,
-                        on_progress=on_progress,
-                        total_bytes=file_size,
-                    )
+                    stage: SourceAddStage = "start_session"
+                    try:
+                        upload_url = await self.start_resumable_upload(
+                            notebook_id,
+                            filename,
+                            file_size,
+                            source_id,
+                            content_type,
+                        )
+                        stage = "upload_finalize"
+                        handed_off = True
+                        await self.upload_file_streaming(
+                            upload_url,
+                            file_obj,
+                            filename=filename,
+                            on_progress=on_progress,
+                            total_bytes=file_size,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - preserve all post-register failures
+                        raise_partial_upload_failure(
+                            exc, filename, source_id=source_id, stage=stage
+                        )
                 finally:
                     if not handed_off:
                         file_obj.close()

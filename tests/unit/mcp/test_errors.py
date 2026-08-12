@@ -136,6 +136,32 @@ def test_retriable_categories_are_marked_retriable() -> None:
         assert tool_error_payload(exception)["retriable"] is (category in retriable)
 
 
+@pytest.mark.parametrize(
+    ("cause", "code", "retriable"),
+    [
+        (exc.NetworkError("offline"), "NETWORK", True),
+        (exc.ServerError("unavailable"), "SERVER", True),
+        (exc.AuthError("expired"), "AUTH", False),
+        (exc.RateLimitError("slow down"), "RATE_LIMITED", True),
+        (exc.ValidationError("rejected file"), "VALIDATION", False),
+    ],
+)
+def test_partial_upload_error_projects_its_cause_consistently(
+    cause: Exception, code: str, retriable: bool
+) -> None:
+    """``raise_partial_upload_failure()`` attaches ``source_id``/``stage`` directly
+    to the real cause rather than wrapping it, so it must project exactly like an
+    ordinary instance of its own type.
+    """
+    cause.source_id = "source-1"  # type: ignore[attr-defined]
+    cause.stage = "upload_finalize"  # type: ignore[attr-defined]
+
+    payload = tool_error_payload(cause)
+
+    assert payload["code"] == code
+    assert payload["retriable"] is retriable
+
+
 def test_message_is_redaction_capped_but_code_preserved() -> None:
     """A very long message is capped; code + retriable still present and correct."""
     long = exc.ValidationError("x" * 2000)

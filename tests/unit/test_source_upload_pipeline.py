@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
+import io
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -155,6 +157,27 @@ def make_pipeline(
         record_upload_queue_wait=session.record_upload_queue_wait,
         async_client_factory=async_client_factory,
     )
+
+
+def track_opened_files(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    opened_files: list[Any] = []
+    real_open = builtins.open
+
+    def tracked_open(*args, **kwargs):
+        file_obj = real_open(*args, **kwargs)
+        opened_files.append(file_obj)
+        return file_obj
+
+    monkeypatch.setattr(builtins, "open", tracked_open)
+    return opened_files
+
+
+def upload_client_factory(failure: BaseException) -> MagicMock:
+    client = AsyncMock()
+    client.post = AsyncMock(side_effect=failure)
+    client_cm = AsyncMock()
+    client_cm.__aenter__.return_value = client
+    return MagicMock(return_value=client_cm)
 
 
 def test_extract_register_file_source_id_accepts_known_response_shapes() -> None:
@@ -474,6 +497,182 @@ async def test_add_file_uses_pipeline_steps_and_finishes_transport(
     start_resumable_upload.assert_awaited_once_with(
         "nb_123", "report.pdf", 5, "src_123", "application/pdf"
     )
+
+
+@pytest.mark.parametrize(
+    ("failing_step", "expected_stage"),
+    [
+        ("start", "start_session"),
+        ("upload", "upload_finalize"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_add_file_surfaces_registered_source_when_upload_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    failing_step: str,
+    expected_stage: str,
+) -> None:
+    file_path = tmp_path / "report.pdf"
+    file_path.write_bytes(b"hello")
+    failure = ValidationError(f"{failing_step} failed")
+    factory = upload_client_factory(failure) if failing_step == "upload" else None
+    service = make_pipeline(async_client_factory=factory)
+    opened_files = track_opened_files(monkeypatch)
+
+    monkeypatch.setattr(service, "register_file_source", AsyncMock(return_value="src_123"))
+    monkeypatch.setattr(
+        service,
+        "start_resumable_upload",
+        AsyncMock(
+            side_effect=failure if failing_step == "start" else None,
+            return_value="https://notebooklm.google.com/upload/_/?upload_id=session",
+        ),
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        await service.add_file("nb_123", file_path)
+
+    error = exc_info.value
+    # Unwrapped: the real cause propagates directly, with recovery context
+    # attached rather than wrapped in a new exception type.
+    assert error is failure
+    assert error.source_id == "src_123"  # type: ignore[attr-defined]
+    assert error.stage == expected_stage  # type: ignore[attr-defined]
+    assert opened_files and opened_files[0].closed
+
+
+@pytest.mark.parametrize(
+    ("failing_step", "expected_stage"),
+    [("start", "start_session"), ("upload", "upload_finalize")],
+)
+@pytest.mark.asyncio
+async def test_transport_failure_is_typed_as_network_error_not_input_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    failing_step: str,
+    expected_stage: str,
+) -> None:
+    """A dropped connection must not be projected as a per-source input rejection.
+
+    ``upload_file_streaming`` POSTs through a bare ``httpx.AsyncClient``, so a
+    mid-body reset surfaces as an untyped ``httpx.RequestError``. Left raw, the
+    cause-based classification in ``_app/errors.py`` has nothing to match on and
+    falls through to ``SOURCE_ADD`` — projected to REST/MCP as HTTP 422 "your
+    input is unacceptable", which tells a caller not to retry a failure that is
+    entirely retryable.
+    """
+    file_path = tmp_path / "report.pdf"
+    file_path.write_bytes(b"hello")
+    reset = httpx.RequestError("connection reset by peer")
+    factory = upload_client_factory(reset) if failing_step == "upload" else None
+    service = make_pipeline(async_client_factory=factory)
+    track_opened_files(monkeypatch)
+
+    monkeypatch.setattr(service, "register_file_source", AsyncMock(return_value="src_123"))
+    monkeypatch.setattr(
+        service,
+        "start_resumable_upload",
+        AsyncMock(
+            side_effect=reset if failing_step == "start" else None,
+            return_value="https://notebooklm.google.com/upload/_/?upload_id=session",
+        ),
+    )
+
+    with pytest.raises(NetworkError) as exc_info:
+        await service.add_file("nb_123", file_path)
+
+    error = exc_info.value
+    assert error.source_id == "src_123"  # type: ignore[attr-defined]
+    assert error.stage == expected_stage  # type: ignore[attr-defined]
+    # Typed, so the classifier routes it as NETWORK, not SOURCE_ADD…
+    assert error.original_error is reset
+    # …without losing the httpx exception it came from.
+    assert error.__cause__ is reset
+
+
+@pytest.mark.asyncio
+async def test_add_file_does_not_wrap_registration_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    file_path = tmp_path / "report.pdf"
+    file_path.write_bytes(b"hello")
+    service = make_pipeline()
+    opened_files = track_opened_files(monkeypatch)
+    failure = SourceAddError("report.pdf", message="registration failed")
+    monkeypatch.setattr(service, "register_file_source", AsyncMock(side_effect=failure))
+    start = AsyncMock()
+    monkeypatch.setattr(service, "start_resumable_upload", start)
+
+    with pytest.raises(SourceAddError) as exc_info:
+        await service.add_file("nb_123", file_path)
+
+    assert exc_info.value is failure
+    assert not hasattr(exc_info.value, "source_id")
+    assert opened_files and opened_files[0].closed
+    start.assert_not_awaited()
+
+
+@pytest.mark.parametrize("cancel_stage", ["start", "upload"])
+@pytest.mark.asyncio
+async def test_add_file_does_not_wrap_cancellation_after_registration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, cancel_stage: str
+) -> None:
+    file_path = tmp_path / "report.pdf"
+    file_path.write_bytes(b"hello")
+    cancelled = asyncio.CancelledError()
+    factory = upload_client_factory(cancelled) if cancel_stage == "upload" else None
+    service = make_pipeline(async_client_factory=factory)
+    opened_files = track_opened_files(monkeypatch)
+    monkeypatch.setattr(service, "register_file_source", AsyncMock(return_value="src_123"))
+    monkeypatch.setattr(
+        service,
+        "start_resumable_upload",
+        AsyncMock(
+            side_effect=cancelled if cancel_stage == "start" else None,
+            return_value="https://notebooklm.google.com/upload/_/?upload_id=session",
+        ),
+    )
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await service.add_file("nb_123", file_path)
+
+    # The contract is that cancellation stays cancellation — ``except Exception``
+    # in the partial-upload wrap must not see it (``CancelledError`` is a
+    # ``BaseException``). Asserted by type, not identity: on the ``upload`` leg the
+    # cancellation crosses ``asyncio.shield(finalize_task)``, and on Python 3.10
+    # ``Task.__wakeup`` re-raises a FRESH ``CancelledError`` rather than
+    # propagating the instance the test constructed (3.11+ preserves it). Identity
+    # would pin an interpreter detail; not-wrapped is the behaviour we care about.
+    assert not hasattr(exc_info.value, "source_id")
+    if cancel_stage == "start":
+        assert exc_info.value is cancelled
+    assert opened_files and opened_files[0].closed
+
+
+@pytest.mark.asyncio
+async def test_upload_failure_closes_file_object_after_ownership_transfer() -> None:
+    """Passing an IO object transfers ownership to the upload pipeline."""
+    request = httpx.Request("POST", "https://notebooklm.google.com/upload/_/")
+    response = httpx.Response(400, request=request)
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=response)
+    client_cm = AsyncMock()
+    client_cm.__aenter__.return_value = client
+    client_factory = MagicMock(return_value=client_cm)
+    runtime = HttpRuntime()
+    service = make_pipeline(kernel=runtime, auth=runtime, async_client_factory=client_factory)
+    file_obj = io.BytesIO(b"hello")
+
+    with pytest.raises(ValidationError):
+        await service.upload_file_streaming(
+            "https://notebooklm.google.com/upload/_/?upload_id=session",
+            file_obj,
+            filename="report.pdf",
+            total_bytes=5,
+        )
+
+    assert file_obj.closed
 
 
 @pytest.mark.parametrize(

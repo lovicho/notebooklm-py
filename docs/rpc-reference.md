@@ -132,7 +132,7 @@ or local convenience that has no stable web-control equivalent in the capture.
 | `NotesAPI.list/get/create/update/delete` | UI covered/partial | Add note, note row, note view close/title input, and note menu delete are documented. Rich body editing uses NotebookLM's internal editor; keep selectors conservative. |
 | `MindMapsAPI.list/generate/rename/delete/get_tree` | UI covered/partial | Interactive mind map generation is the live Studio tile. Note-backed mind maps are a synthetic/library backing; tree extraction via `GET_INTERACTIVE_HTML` is programmatic. |
 | `ResearchAPI.start/poll/wait/import_sources` | UI covered for start only | Source discovery corpus/mode/submit selectors map to fast/deep web/Drive research. Polling and import verification are backend workflow helpers. |
-| `SettingsAPI.get/set_output_language`, `SharingAPI.get_status/set_public/set_view_level/add_user/update_user/remove_user` | UI covered/partial | Settings and Share dialogs are covered at entry/save/copy selectors. Programmatic user-permission mutations go beyond the captured UI selectors. |
+| `SettingsAPI.get/set_output_language`, `SharingAPI.get_status/set_public/set_view_level/add_user/set_users/update_user/remove_user` | UI covered/partial | Settings and Share dialogs are covered at entry/save/copy selectors. Programmatic user-permission mutations go beyond the captured UI selectors. |
 | UI-only note operations | UI-only | Note menus expose `Convert to source`, `Convert all notes to source`, `Export to Docs`, and `Export to Sheets`; keep them documented as selectors unless/until a public library method owns those flows. |
 
 ---
@@ -1876,7 +1876,8 @@ await rpc_call(
 
 ### RPC: SHARE_NOTEBOOK (QDyure)
 
-**Source:** `_sharing.py::set_public()`, `_sharing.py::add_user()`, `_sharing.py::remove_user()`
+**Source:** `_sharing.py::set_public()`, `_sharing.py::add_user()`,
+`_sharing.py::set_users()`, `_sharing.py::remove_user()`
 
 Multi-purpose RPC for managing notebook sharing: toggle public access, add/update users, or remove users.
 
@@ -1900,17 +1901,22 @@ params = [
 # Response: [] (empty on success)
 ```
 
-**Add/update user:**
+**Add/update users:**
 ```python
 # permission: 2=editor, 3=viewer, 4=remove
 # notify_flag: 0=no email, 1=send notification
 # message_flag: 0=has message, 1=no message
+# entries may mix editor and viewer grants in one request
+entries = [
+    ["viewer@example.com", None, 3],
+    ["editor@example.com", None, 2],
+]
 params = [
     [
         [
             notebook_id,
-            [[email, None, permission]],  # user to add/update
-            None,                          # None = no public access change
+            entries,                       # users to add/update
+            None,                          # no public access change
             [message_flag, welcome_message]
         ]
     ],
@@ -1920,7 +1926,38 @@ params = [
 ]
 
 # Response: [] (empty on success)
+
+# SharingAPI.set_users() sends the SHARE_NOTEBOOK call above once, then calls
+# GET_SHARE_STATUS once and returns the refreshed ShareStatus. notify_flag and
+# welcome_message apply to every entry in this call. Batching collapses N
+# RPC + status-refresh round trips into one; it is NOT established to change
+# how many notification emails recipients receive.
 ```
+
+**Entry-list semantics (live-probed 2026-08-11, two scratch notebooks, `notify=False`).**
+The entry list is a general batch **set/upsert** keyed by email, not an add:
+
+| Sent | Observed |
+|---|---|
+| Two distinct users, mixed VIEWER/EDITOR | Both granted; both grantees could open the notebook |
+| Two existing users with flipped permissions | Both permissions changed |
+| One existing update batched with one absent add | Both applied |
+| Singular update for an absent user | User was added |
+| The same email twice, conflicting permissions | RPC returned success, permission **unchanged** — a silent no-op |
+| Remove two users, both present | Both removed |
+| Remove several where any target is absent | **Whole request silently did nothing**, even with the present user listed first |
+| Remove one user and update another in one request | Both applied |
+
+Two consequences the client encodes: `set_users()` rejects duplicate emails before
+issuing the RPC (there is no first/last-wins rule to honour), and plural removal is
+not offered — it would need a `GET_SHARE_STATUS` preflight, an intersection with the
+currently-shared set, and post-verification to avoid the silent all-or-nothing trap.
+
+The duplicate check compares addresses **exactly**, because that is what the probe
+covered. Whether two addresses differing only in case resolve to one account is
+**not established** — RFC 5321 keeps the local part case-sensitive — so the client
+passes them through rather than raising on an unobserved rule. Worth a probe row if
+anyone runs this again.
 
 **Remove user:**
 ```python
@@ -1993,6 +2030,15 @@ status = await client.sharing.get_status(notebook_id)
 await client.sharing.set_public(notebook_id, True)
 await client.sharing.set_view_level(notebook_id, ShareViewLevel.CHAT_ONLY)
 await client.sharing.add_user(notebook_id, "user@example.com", SharePermission.VIEWER)
+await client.sharing.set_users(
+    notebook_id,
+    [
+        ("viewer@example.com", SharePermission.VIEWER),
+        ("editor@example.com", SharePermission.EDITOR),
+    ],
+    notify=True,
+    welcome_message="Welcome, team!",
+)
 ```
 
 **Share URLs:**

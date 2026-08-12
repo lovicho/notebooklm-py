@@ -2810,8 +2810,15 @@ class TestStartResumableUploadError:
         )
 
         async with NotebookLMClient(auth_tokens) as client:
-            with pytest.raises(SourceAddError, match="Failed to get upload URL"):
+            with pytest.raises(SourceAddError) as exc_info:
                 await client.sources.add_file("nb_123", test_file)
+
+        # The real failure propagates unwrapped; the retained-source recovery
+        # context rides along as attributes rather than a wrapper type.
+        error = exc_info.value
+        assert error.source_id == "file_src_001"
+        assert error.stage == "start_session"
+        assert "Failed to get upload URL" in str(error)
 
 
 class TestWaitUntilReadyPolling:

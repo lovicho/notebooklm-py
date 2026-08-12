@@ -90,6 +90,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SharingAPI.set_users()` sets several users' permissions in one request.**
+  The client sends one `SHARE_NOTEBOOK` RPC for all email/permission pairs,
+  then refreshes the returned sharing status once. Notification and welcome
+  message settings apply to the whole call, not per grant; batching collapses N
+  RPC + status-refresh round trips into one, which is not the same as sending
+  fewer notification emails. The operation is an **upsert** — a live probe
+  confirmed the backend adds an absent email and replaces an existing one, in
+  both the plural and singular forms — so `add_user()` and `update_user()` are
+  now intent wrappers over it rather than distinct operations, differing only in
+  their default `notify`. Two backend preconditions the probe exposed are
+  encoded here: a batch naming one email twice returns success while silently
+  leaving that user unchanged, so duplicates now raise `ValueError` before the
+  request is issued (exact match — case variants are passed through, since
+  RFC 5321 keeps the local part case-sensitive); and a batch removal silently drops the
+  *whole* request if any target is already absent, so plural removal is
+  deliberately not offered — it needs a share-status preflight and
+  post-verification rather than a wider entry list. Both are recorded in
+  [`docs/rpc-reference.md`](docs/rpc-reference.md)
+  ([#2000](https://github.com/teng-lin/notebooklm-py/issues/2000)).
 - **Deep-research sources expose the backend's per-task source ordinal.**
   `ResearchSource.source_ordinal` and its serializers preserve an integer
   `src[8]` when the row carries one — in the captures a 1-based bijection over
@@ -323,6 +342,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type still warns. That is the same split the sibling walk over this slot
   already makes in `_source/listing.py`
   ([#2131](https://github.com/teng-lin/notebooklm-py/issues/2131)).
+- **Expected no-answer chat responses no longer emit a wire-drift warning.**
+  Responses without a TailwindDoc answer now return the backend apology quietly,
+  while present-but-unmarked response documents still warn
+  ([#2118](https://github.com/teng-lin/notebooklm-py/issues/2118)).
 - **Chat turn numbers now come from server history instead of the client-local
   cache.** Stateless remote MCP requests create a fresh client for each call, so
   a real continuation could previously report the contradictory pair
@@ -705,6 +728,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   such alias and still accepts only itself
   ([#2013](https://github.com/teng-lin/notebooklm-py/issues/2013)).
 
+- **Partial file-upload failures now retain their recovery context.** If upload
+  session start or finalization fails after source registration, the retained
+  source row is no longer silently orphaned: the failure carries `source_id` and
+  `stage` attributes naming that row (read with
+  `getattr(exc, "source_id", None)`), and `notebooklm source add` prints the
+  `source delete` needed to retry cleanly (`--json` adds `source_id` / `stage`
+  beside the existing code / `retry_after`). The exception **type is unchanged**
+  — `AuthError`, `RateLimitError`, `ServerError`, `NetworkError`,
+  `ValidationError`, or a bare `SourceAddError` still propagate as themselves, so
+  every existing `except` clause around `add_file()` keeps matching. A raw
+  `httpx.RequestError` is normalised to `NetworkError` first (httpx exception on
+  `.original_error`, `__cause__` unchanged) so a dropped connection projects as
+  retryable infrastructure rather than a 4xx input rejection. Wire source type
+  code `0` now maps silently to `UNKNOWN` instead of emitting a drift warning
+  (#2138).
 - **Resumable-upload URL trust is now host-relative, and `Origin`/`Referer`
   derive from the validated upload URL.** Google's Scotty frontend picks which
   personal host it names in the `X-Goog-Upload-URL` response header, so an

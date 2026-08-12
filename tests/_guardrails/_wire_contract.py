@@ -216,6 +216,26 @@ MAPPINGS: tuple[Mapping, ...] = (
         section=DOC,
         note="nested inside responseDoc, not a top-level AnswerResponse index",
     ),
+    Mapping(
+        "chat",
+        "AnswerRow",
+        "_ANSWER_MARKER_POS",
+        "TailwindDoc",
+        "type",
+        section=DOC,
+        note="nested inside responseDoc, not a top-level AnswerResponse index",
+    ),
+    Mapping(
+        "chat",
+        "AnswerRow",
+        "_EMPTY_ANSWER_REASON_POS",
+        "AnswerResponse",
+        "emptyAnswerReason",
+        note=(
+            "the authoritative expected-empty-answer signal (UNANSWERABLE / "
+            "FILTERED); read to keep the drift warning off deliberate non-answers"
+        ),
+    ),
     # ---- Notes: ProjectNote ------------------------------------------------
     Mapping("notes", "NoteRow", "_ID_POS", "ProjectNote", "id"),
     Mapping("notes", "NoteRow", "_CONTENT_POS", "ProjectNote", "content"),
@@ -342,13 +362,6 @@ UNMAPPED: tuple[Unmapped, ...] = (
     Unmapped("artifacts", "ReportSuggestionRow", "_PROMPT_POS", _SHAPE_UNKNOWN),
     Unmapped("artifacts", "ReportSuggestionRow", "_AUDIENCE_LEVEL_POS", _SHAPE_UNKNOWN),
     # chat.py
-    Unmapped(
-        "chat",
-        "AnswerRow",
-        "_ANSWER_MARKER_POS",
-        "negative index (-1) into a positional message; only lands on "
-        "TailwindDoc.type because tag 5 is currently last — see #2121",
-    ),
     Unmapped("chat", "SavedChatNoteRow", "_OUTER_NOTE_POS", _NESTED_LOCAL),
     Unmapped("chat", "SavedChatNoteRow", "_ID_POS", _SHAPE_UNKNOWN),
     Unmapped("chat", "SavedChatNoteRow", "_SERVER_TITLE_POS", _SHAPE_UNKNOWN),
@@ -529,6 +542,7 @@ ENUM_BINDINGS: dict[str, tuple[str, dict[int, str]]] = {
     "SourceType": (
         "OriginalSourceContentType",
         {
+            0: "SOURCE_CONTENT_TYPE_UNKNOWN",
             1: "SOURCE_CONTENT_TYPE_GOOGLE_DOC",
             2: "SOURCE_CONTENT_TYPE_GOOGLE_SLIDES",
             3: "SOURCE_CONTENT_TYPE_PDF",
@@ -559,12 +573,6 @@ ENUM_GAPS: dict[str, tuple[tuple[int, str, str], ...]] = {
         (6, "ARTIFACT_PENDING_REVIEW", "#2127 — state discovered only in the object store"),
     ),
     "SourceType": (
-        (
-            0,
-            "SOURCE_CONTENT_TYPE_UNKNOWN",
-            "occurs live (rejected upload, failed processing) and triggers a "
-            "misleading 'Consider updating notebooklm-py' prompt no upgrade fixes",
-        ),
         (
             6,
             "SOURCE_CONTENT_TYPE_POWERPOINT",

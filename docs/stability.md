@@ -100,6 +100,13 @@ NonIdempotentRetryError            # Raised by idempotent=True calls on a non-id
 # WaitTimeoutError` catches source/artifact/research wait timeouts uniformly,
 # while `except TimeoutError` keeps working — see docs/python-api.md#waittimeouterror.
 SourceError, SourceAddError, SourceProcessingError, SourceTimeoutError, SourceNotFoundError
+# A post-registration add_file() failure keeps raising its own type (AuthError /
+# RateLimitError / ServerError / NetworkError / ValidationError / bare
+# SourceAddError), so existing `except` clauses around add_file() are unaffected.
+# It additionally carries `source_id` and `stage` attributes identifying the
+# source row the failure left behind; the library does not delete that row
+# automatically. Read them with getattr(exc, "source_id", None) — they are absent
+# on every other failure. See docs/python-api.md#partial-file-uploads.
 NotebookError, NotebookNotFoundError
 ArtifactError, ArtifactDownloadError, ArtifactFeatureUnavailableError, ArtifactNotFoundError, ArtifactNotReadyError, ArtifactParseError
 ArtifactTimeoutError, ArtifactPendingTimeoutError, ArtifactInProgressTimeoutError

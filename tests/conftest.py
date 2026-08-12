@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+from urllib.parse import parse_qs
 
 import pytest
 
@@ -533,6 +534,24 @@ def build_rpc_response():
         return f")]}}'\n{len(chunk)}\n{chunk}\n"
 
     return _build
+
+
+@pytest.fixture
+def rpc_request_params():
+    """Decode the positional params out of an outgoing ``batchexecute`` request.
+
+    The inverse of :func:`build_rpc_response` for assertions on request shape:
+    unwraps the ``f.req`` form body and returns the params list the client sent.
+    Shared here rather than duplicated per test module, since both tiers assert on
+    wire shape and ``tests/_guardrails/test_no_cross_test_imports.py`` forbids one
+    test module importing another.
+    """
+
+    def _params(request) -> list:
+        outer = json.loads(parse_qs(request.content.decode())["f.req"][0])
+        return json.loads(outer[0][0][1])
+
+    return _params
 
 
 @pytest.fixture

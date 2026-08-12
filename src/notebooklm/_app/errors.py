@@ -131,7 +131,10 @@ class ErrorCategory(Enum):
     #: project it as a 4xx input error and, in a batch add, ISOLATE it as a
     #: per-item error instead of aborting the whole batch. ``_source/add.py``
     #: re-raises every infra signal (auth/rate-limit/server/network) UNWRAPPED,
-    #: so a ``SourceAddError`` is guaranteed to be a per-item input failure.
+    #: and a post-registration upload failure (``_source/upload.py``) does too
+    #: (with ``source_id``/``stage`` attributes attached rather than a wrapper
+    #: type), so a ``SourceAddError`` is guaranteed to be a per-item input
+    #: failure.
     SOURCE_ADD = "source_add"
     #: A library error that fits none of the above (catch-all under
     #: ``NotebookLMError``).
@@ -353,6 +356,9 @@ def _category_for(exc: BaseException) -> ErrorCategory:
     # infra signals (auth/rate-limit/server/network) UNWRAPPED and wraps only a
     # residual RPCError as SourceAddError — usually a genuine per-source rejection
     # (bad URL, FAILED_PRECONDITION, …), which isolates as the NON-fatal SOURCE_ADD.
+    # A post-registration upload failure (``_source/upload.py``) does the same: the
+    # typed cause propagates unwrapped (with ``source_id``/``stage`` attached), so it
+    # is classified by the earlier branches above and never reaches this one at all.
     # BUT a transient/server failure can still reach the wrap as a *bare* RPCError
     # (the null-result-with-status path in ``rpc/decoder.py`` raises RPCError with an
     # infra ``rpc_code`` rather than a typed ServerError). Keep those FATAL so a batch

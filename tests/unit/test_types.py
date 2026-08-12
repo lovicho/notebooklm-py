@@ -1181,6 +1181,14 @@ class TestSourceKindProperty:
         source = Source(id="x", _type_code=None)
         assert source.kind == SourceType.UNKNOWN
 
+    def test_kind_unknown_for_wire_unknown_type_code_without_warning(self):
+        """Backend enum value 0 is UNKNOWN/unset, not schema drift (#2138)."""
+        source = Source(id="x", _type_code=0)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UnknownTypeWarning)
+            assert source.kind is SourceType.UNKNOWN
+
     def test_kind_unknown_for_unrecognized_type_code(self):
         """Test that kind returns UNKNOWN for unrecognized type codes."""
         # Clear the warned set to ensure we get the warning

@@ -27,7 +27,7 @@ Position contracts (pinned by ``tests/unit/test_chat_row_adapter.py``):
   =====  ============================================================
   0      answer text (str)
   2      conversation-id block; ``[2][0]`` is the server conversation id
-  4      type/flags block; ``[4][-1] == 1`` marks an answer record and
+  4      type/flags block; ``[4][4] == 1`` marks an answer record and
          ``[4][3]`` is the citation list
   =====  ============================================================
 
@@ -660,7 +660,7 @@ class AnswerRow:
     whose ``inner_data`` is a populated list (heartbeats decode to ``[]``
     and never reach this adapter). Position knowledge is centralised here;
     consumer sites should NEVER open-code ``first[0]`` / ``first[2][0]`` /
-    ``first[4][-1]`` / ``first[4][3]``.
+    ``first[4][4]`` / ``first[4][3]``.
 
     The dataclass is frozen so the wrapped row can't be mutated through the
     adapter; the adapter never copies the raw row, so it is cheap to build.
@@ -678,8 +678,9 @@ class AnswerRow:
     # change signal.
     _TEXT_POS: ClassVar[int] = 0
     _CONV_BLOCK_POS: ClassVar[int] = 2
+    _EMPTY_ANSWER_REASON_POS: ClassVar[int] = 3
     _TYPE_BLOCK_POS: ClassVar[int] = 4
-    _ANSWER_MARKER_POS: ClassVar[int] = -1
+    _ANSWER_MARKER_POS: ClassVar[int] = 4
     _CITATIONS_POS: ClassVar[int] = 3
     _ANSWER_MARKER_VALUE: ClassVar[int] = 1
 
@@ -737,17 +738,34 @@ class AnswerRow:
         return block if isinstance(block, list) else None
 
     @property
+    def has_response_doc(self) -> bool:
+        """Whether the optional ``TailwindDoc`` slot is present."""
+        return len(self._raw) > self._TYPE_BLOCK_POS and self._raw[self._TYPE_BLOCK_POS] is not None
+
+    @property
+    def suggests_wire_drift(self) -> bool:
+        """Whether an *unmarked* row looks like drift rather than an empty answer.
+
+        Drift when ``responseDoc`` is present but unmarked (the marker moved), or
+        when the row is too short to reach ``first[3]`` — a row that could not even
+        carry ``emptyAnswerReason`` is malformed, so "no doc" proves nothing about
+        it. A row long enough to have spoken, with no doc, is the observed
+        empty-answer shape and stays quiet.
+        """
+        return self.has_response_doc or len(self._raw) <= self._EMPTY_ANSWER_REASON_POS
+
+    @property
     def is_answer(self) -> bool:
-        """Whether the type block marks this record as an answer (``[4][-1] == 1``).
+        """Whether the type block marks this record as an answer (``[4][4] == 1``).
 
         An absent / empty type block legitimately means "not an answer", so the
-        flag read is a single-level ``type_block[-1]`` index on a bound local
-        rather than a chained ``first[4][-1]`` descent.
+        flag read is a single-level ``type_block[4]`` index on a bound local
+        rather than a chained ``first[4][4]`` descent.
         """
         type_block = self._type_block
         return (
             type_block is not None
-            and len(type_block) > 0
+            and len(type_block) > self._ANSWER_MARKER_POS
             and type_block[self._ANSWER_MARKER_POS] == self._ANSWER_MARKER_VALUE
         )
 
