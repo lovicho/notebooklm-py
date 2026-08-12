@@ -61,7 +61,9 @@ RESEARCH_SOURCE_TYPE_DRIVE = 2
 #      that 3 means "no matches" — so the decode only asserts it inside the
 #      envelope it was observed in (see ``ResearchTask.termination_reason``).
 #   4  a deep run cancelled mid-flight via CANCEL_RESEARCH
-#   6  deep research completion (pre-existing knowledge, unchanged)
+#   6  completed — inherited from earlier undocumented knowledge and present in
+#      no captured payload (0 of 9 task rows across the POLL cassettes; every
+#      completed run, deep included, reports 2). Kept as forward-compat only.
 #
 # These are undocumented Google internals and can change without notice — the
 # same volatility class as the RPC method ids. An unrecognised code stays a

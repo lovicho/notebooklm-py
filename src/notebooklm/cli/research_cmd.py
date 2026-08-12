@@ -197,9 +197,18 @@ def research_cancel(ctx, run_id, notebook_id, json_output, client_auth):
 @notebook_option
 @click.option(
     "--timeout",
-    default=300,
+    # 1800, matching ``source add-research`` (#2142). The legacy 5-minute cap sat
+    # below every observed deep run: 374 s live, 358 s in
+    # ``research_deep_poll_long.yaml``. Fast runs settle in seconds, so the raised
+    # ceiling costs them nothing — it is a cap, not a wait.
+    default=1800,
     type=int,
-    help="Maximum seconds to wait (default: 300)",
+    help=(
+        "Per-phase seconds budget for (a) the research-completion poll loop "
+        "and (b) the --import-all retry loop (default: 1800). Each phase gets "
+        "the full budget independently, so worst-case total wall time is up to "
+        "2× this value. Matches 'source add-research --timeout' semantics."
+    ),
 )
 @click.option(
     "--interval",

@@ -8900,10 +8900,10 @@
           }
         },
         {
-          "default": 300,
+          "default": 1800,
           "envvar": null,
           "has_custom_shell_complete": false,
-          "help": "Maximum seconds to wait (default: 300)",
+          "help": "Per-phase seconds budget for (a) the research-completion poll loop and (b) the --import-all retry loop (default: 1800). Each phase gets the full budget independently, so worst-case total wall time is up to 2\u00d7 this value. Matches 'source add-research --timeout' semantics.",
           "is_flag": false,
           "kind": "option",
           "multiple": false,

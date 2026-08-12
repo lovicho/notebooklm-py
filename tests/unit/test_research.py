@@ -927,7 +927,7 @@ class TestResearch:
                 None,
             ]
         ]
-        task_info = [None, ["deep query", 1], 1, [sources, "Deep summary"], 6]
+        task_info = [None, ["deep query", 1], 1, [sources, "Deep summary"], 2]
         response_body = build_rpc_response(RPCMethod.POLL_RESEARCH, [[["report_123", task_info]]])
         httpx_mock.add_response(content=response_body.encode(), method="POST")
 
@@ -960,8 +960,16 @@ class TestResearch:
         assert result.sources[0].result_type == 2
 
     @pytest.mark.asyncio
-    async def test_poll_status_code_6_completed(self, auth_tokens, httpx_mock, build_rpc_response):
-        """Test that status code 6 (deep research) is treated as completed."""
+    async def test_poll_unobserved_status_code_6_completed(
+        self, auth_tokens, httpx_mock, build_rpc_response
+    ):
+        """Status code 6 coarsens to completed, as forward-compat only (#2143).
+
+        Constructed input: 6 appears in no captured payload (0 of 9 task rows
+        across the POLL cassettes), and every completed run — deep included —
+        reports 2. This pins the fallback without claiming 6 is deep research's
+        completion code.
+        """
         task_info = [None, ["query", 1], 1, [[], ""], 6]
         response_body = build_rpc_response(RPCMethod.POLL_RESEARCH, [[["task_123", task_info]]])
         httpx_mock.add_response(content=response_body.encode(), method="POST")

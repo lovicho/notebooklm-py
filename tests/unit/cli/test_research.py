@@ -239,7 +239,7 @@ class TestResearchWait:
             "nb_123",
             "task_123",
             [{"url": "http://example.com", "title": "Source 1", "result_type": 1}],
-            max_elapsed=300,
+            max_elapsed=1800,
         )
 
     def test_wait_with_import_all_cited_only(self, runner, mock_auth, mock_fetch_tokens):
@@ -276,7 +276,7 @@ class TestResearchWait:
             "nb_123",
             "task_123",
             [{"url": "https://example.com/cited", "title": "Cited", "result_type": 1}],
-            max_elapsed=300,
+            max_elapsed=1800,
         )
 
     def test_wait_cited_only_requires_import_all(self, runner, mock_auth, mock_fetch_tokens):
@@ -343,7 +343,7 @@ class TestResearchWait:
             "nb_123",
             "task_123",
             [{"url": "http://example.com", "title": "Source 1", "result_type": 1}],
-            max_elapsed=300,
+            max_elapsed=1800,
             json_output=True,
         )
 
@@ -384,7 +384,7 @@ class TestResearchWait:
             "nb_123",
             "task_123",
             [{"url": "https://example.com/cited", "title": "Cited", "result_type": 1}],
-            max_elapsed=300,
+            max_elapsed=1800,
             json_output=True,
         )
 

@@ -285,7 +285,7 @@ class TestWaitImportAll:
             "nb_123",
             "task_abc",
             [{"url": "http://example.com", "title": "Source 1", "result_type": 1}],
-            max_elapsed=300,
+            max_elapsed=1800,
         )
 
     def test_import_all_json(self, runner_and_mocks):
@@ -314,7 +314,7 @@ class TestWaitImportAll:
             "nb_123",
             "task_abc",
             [{"url": "http://example.com", "title": "Source 1", "result_type": 1}],
-            max_elapsed=300,
+            max_elapsed=1800,
             json_output=True,
         )
 
@@ -354,7 +354,7 @@ class TestWaitImportAll:
             "nb_123",
             "task_abc",
             [{"url": "https://example.com/cited", "title": "Cited", "result_type": 1}],
-            max_elapsed=300,
+            max_elapsed=1800,
         )
 
     def test_import_all_cited_only_json(self, runner_and_mocks):
@@ -404,7 +404,7 @@ class TestWaitImportAll:
             "nb_123",
             "task_abc",
             [{"url": "https://example.com/cited", "title": "Cited", "result_type": 1}],
-            max_elapsed=300,
+            max_elapsed=1800,
             json_output=True,
         )
 

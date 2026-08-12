@@ -1,7 +1,7 @@
 # RPC & UI Reference
 
 **Status:** Active
-**Last Updated:** 2026-06-17
+**Last Updated:** 2026-08-12
 **Source of Truth:** `src/notebooklm/rpc/types.py` for method IDs; payload builders in `src/notebooklm/` and golden tests under `tests/unit/`
 **Purpose:** Complete reference for RPC methods, UI selectors, and payload structures
 
@@ -2126,7 +2126,7 @@ Start a fast research session.
 params = [
     [query, source_type],  # 0: Query and source type
     None,                   # 1
-    1,                      # 2: Fixed value
+    1,                      # 2: DiscoveryMode — 1 = DEFAULT_LLM_SEARCH
     notebook_id,            # 3: Notebook ID
 ]
 
@@ -2137,7 +2137,14 @@ await rpc_call(
     source_path=f"/notebook/{notebook_id}",
 )
 
-# Response: [task_id, report_id, ...]
+# Response: [task_id]
+#
+# A ONE-element list, in 4/4 captured fast starts. Only deep research returns a
+# second slot (2/2 captured deep starts); a fast start never carries a report_id
+# (`research_start_fast.yaml` → `['ac0bc757-…']`, `research_start_deep.yaml` →
+# `['e9b7cb1c-…', '24f83c74-…']`). `start()` returns both ids as-is; the
+# adapters that poll/import/cancel select the mode-specific handle — slot 0 for
+# fast, slot 1 for deep (`_app/source_research.py`).
 ```
 
 ### RPC: START_DEEP_RESEARCH (QA9ei)
@@ -2152,7 +2159,7 @@ params = [
     None,                   # 0
     [1],                    # 1: Fixed flag
     [query, source_type],   # 2: Query and source type
-    5,                      # 3: Fixed value
+    5,                      # 3: DiscoveryMode — 5 = DEEP_RESEARCH
     notebook_id,            # 4: Notebook ID
 ]
 
@@ -2163,7 +2170,10 @@ await rpc_call(
     source_path=f"/notebook/{notebook_id}",
 )
 
-# Response: [task_id, report_id, ...]
+# Response: [task_id, report_id]
+#
+# Exactly two elements in 2/2 captured deep starts. The FIRST is an unpollable
+# sessionId; POLL_RESEARCH / IMPORT_RESEARCH / CANCEL_RESEARCH key off the second.
 ```
 
 Deep research is not complete after `QA9ei` alone. In the observed browser/client
@@ -2194,22 +2204,62 @@ await rpc_call(
     source_path=f"/notebook/{notebook_id}",
 )
 
-# Response structure:
+# Response structure. The envelope is either [[task, ...]] or a flat [task, ...]
+# (`unwrap_poll_tasks` probes both). Slot inventory below is from 9 task rows in
+# 10 POLL frames across six cassettes — five carry rows (3 deep / 6 fast), one is
+# empty-only:
 # [
-#     [task_id, [
-#         ...,
-#         query_info,           # [1]: [query_text, source_type]  (1=web, 2=drive)
-#         ...,
-#         sources_and_summary,  # [3]: [[sources], summary_text]
-#         status_code,          # [4]: see the status-code table below
-#     ]],
+#     [
+#         task_id,              # [0]: str — the poll/import/cancel handle
+#         task_info,            # [1]: see below
+#         updated_like,         # [2]: [seconds, nanos], 9/9 rows — advanced across
+#                               #      all 3 within-cassette repeated-row transitions
+#         created_like,         # [3]: [seconds, nanos], 9/9 rows — constant across
+#                               #      all 4 repeated-row transitions
+#         stable_id,            # [4]: str in 6/9 rows, always '400237754469' — one
+#                               #      capture environment, so "not task-scoped" is
+#                               #      supported (3 cassettes, both modes) but the
+#                               #      ownership reading is NOT. Unread.
+#     ],
 #     ...
+# ]
+#
+# task_info (len 5 on fast, 6 on deep):
+# [
+#     None,                     # [0]
+#     query_info,               # [1]: [query_text, source_type]  (1=web, 2=drive)
+#     discovery_mode,           # [2]: DiscoveryMode — 1 = DEFAULT_LLM_SEARCH (6/6
+#                               #      fast rows), 5 = DEEP_RESEARCH (3/3 deep rows).
+#                               #      The same enum the start params carry, so mode
+#                               #      is two-sided confirmable. Unread today.
+#     sources_and_summary,      # [3]: [[sources], summary_text] — None until results
+#     status_code,              # [4]: see the status-code table below
+#     deep_run_block,           # [5]: DEEP ONLY (3/3 deep rows, 0/6 fast):
+#                               #      [id, base64_blob | None, int, None, model_tag].
+#                               #      [0] is NOT the poll handle: in the one cassette
+#                               #      that links a start to its polls, [0] is the deep
+#                               #      start's slot-0 id (the unpollable sessionId)
+#                               #      while task[0] is slot 1. [1] is None on the
+#                               #      first poll, then 888 and 222596 base64 chars as
+#                               #      the run progresses. [2] was 1, 1, 5 — not fixed.
+#                               #      model_tag was 'deep_research.flash.prod'.
+#                               #      All unread.
 # ]
 #
 # sources_and_summary[0] can contain a mix of:
 #
 # Fast research web source:
-# [url, title, desc, type, ...]
+# [url, title, desc, type]                       # len 4 in 20/46 captured rows
+#
+# A deep row is the SAME row type carrying three more populated slots, so a
+# reader that stops at [3] silently drops them (46 source rows captured):
+#   [4]  unpopulated in every captured row
+#   [5]  favicon URL — 25/46 rows, every value a `t*.gstatic.com/faviconV2?…`
+#        `type=FAVICON` URL; unread
+#   [6]  typed content block — 26/46 rows; see the kind discriminator below
+#   [8]  1-based integer source ordinal, 1..24 — 24/46 rows. Whether it equals
+#        the report's citation numbering is unverified here (see #2141)
+# Row lengths seen: 4 (x20), 7 (x2), 9 (x24).
 #
 # Deep research report source (captured shape):
 # [None, title, None, type, None, None,
@@ -2236,7 +2286,8 @@ await rpc_call(
 #### Task status codes (`task_info[4]`)
 
 Captured live against the serving backend for issue #1964 — except code `6`,
-which was already known. `ResearchStatus` coarsens these into `in_progress` /
+which is inherited from an earlier undocumented claim and has **never** appeared
+in a capture (see the note below). `ResearchStatus` coarsens these into `in_progress` /
 `completed` / `failed`; `ResearchTask.termination_reason` keeps the distinction
 the coarse status loses, and is derived from the same table so the two can never
 disagree.
@@ -2244,10 +2295,10 @@ disagree.
 | Code | Meaning | Termination reason | Observed in |
 | --- | --- | --- | --- |
 | `1` | Run in flight | `in_progress` | Every run, before it settles |
-| `2` | Completed with results | `completed` | Fast web and fast Drive runs |
+| `2` | Completed with results | `completed` | Fast web, fast Drive, **and deep** runs |
 | `3` | **No matches** — terminal, zero sources | `no_results` | Drive runs (only place observed) |
 | `4` | Cancelled via `CANCEL_RESEARCH` | `cancelled` | A deep run cancelled mid-flight |
-| `6` | Completed (deep research) | `completed` | Deep research |
+| `6` | Completed (assumed) | `completed` | **Never observed** — see note |
 
 Notes:
 
@@ -2263,6 +2314,17 @@ Notes:
 - **A cancelled run is code `4`, distinct from `3`.** Confirmed by cancelling a
   deep run mid-flight. Fast runs finish server-side before a cancel can land, so
   a fast run cancelled immediately after start still completes with code `2`.
+- **Code `6` has no captured support, and deep research completes with `2`.**
+  Across the repo's own POLL cassettes — 9 task rows in 10 frames, 3 deep and 6
+  fast — the only codes present are `1` (6 rows, in flight) and `2` (3 rows,
+  completed). All three completed rows carry `2`, including the deep run in
+  `research_deep_poll_long.yaml` (`task_info[2] == 5`), which is what refutes the
+  old "code 6 = deep completion" attribution. The `6 → completed` coarsening is
+  KEPT — an absent observation is not a refutation, and the fallback is free —
+  but it is forward-compat, not observed behaviour. The unit fixtures that used
+  `6` to stand for "a completed deep run" now use the captured `2`; the two
+  dedicated `6` tests (one parser-level, one through `poll()`) say in their names
+  that the code is unobserved.
 - Any other terminal code maps to the `unknown` reason rather than being guessed
   at — these codes are undocumented Google internals in the same volatility class
   as the RPC method ids.
