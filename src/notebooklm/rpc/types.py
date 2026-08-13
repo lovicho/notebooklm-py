@@ -293,20 +293,63 @@ INTERACTIVE_MIND_MAP_VARIANT: Final[int] = 4
 class ArtifactStatus(int, Enum):
     """Processing status of an artifact.
 
-    Values correspond to artifact_data[4] in API responses.
+    Values correspond to artifact_data[4] in API responses and mirror the
+    backend's own ``ArtifactStatus`` enum (recovered in ``docs/mobile/enums.txt``
+    and pinned by ``tests/_guardrails/_wire_contract.py``):
+
+    * 0 — ``ARTIFACT_STATUS_UNKNOWN`` -> :attr:`UNKNOWN` -> ``"unknown"``
+    * 1 — ``ARTIFACT_STATUS_INITIALIZED`` -> :attr:`PENDING` -> ``"pending"``
+    * 2 — ``ARTIFACT_STATUS_PROCESSING`` -> :attr:`PROCESSING` -> ``"in_progress"``
+    * 3 — ``ARTIFACT_STATUS_READY`` -> :attr:`COMPLETED` -> ``"completed"``
+    * 4 — ``ARTIFACT_STATUS_FAILED`` -> :attr:`FAILED` -> ``"failed"``
+    * 5 — ``ARTIFACT_STATUS_SUGGESTED`` -> :attr:`SUGGESTED` -> ``"suggested"``
+    * 6 — ``ARTIFACT_PENDING_REVIEW`` -> :attr:`PENDING_REVIEW` -> ``"pending_review"``
+
+    Member *names* describe the lifecycle phase, not the backend spelling, so
+    they are stable across this correction: ``PENDING`` has always meant
+    "queued, worker not started" and ``PROCESSING`` "actively generating". Only
+    the wire integers behind them moved — until issue #2127 they were swapped
+    (1 was read as PROCESSING and 2 as PENDING), which made
+    :attr:`~notebooklm.types.Artifact.is_pending` and
+    :attr:`~notebooklm.types.Artifact.is_processing` answer each other's
+    question during the transitional window.
     """
 
-    PROCESSING = 1  # Artifact is being generated
-    PENDING = 2  # Artifact is queued
+    UNKNOWN = 0  # Status unset/unrecognized by the backend
+    PENDING = 1  # ARTIFACT_STATUS_INITIALIZED — row created, worker not started
+    PROCESSING = 2  # Artifact is actively being generated
     COMPLETED = 3  # Artifact is ready for use/download
     FAILED = 4  # Generation failed
+    SUGGESTED = 5  # A suggestion, not a real artifact; LIST_ARTIFACTS filters these out
+    # Backend spelling is ARTIFACT_PENDING_REVIEW (no ``ARTIFACT_STATUS_``
+    # prefix). Semantics are UNCONFIRMED: the member exists in the backend enum
+    # dump but has never been observed on this transport (0 of 42 live
+    # artifacts, 0 of 301 recorded rows). It is modeled so a caller can *detect*
+    # it distinctly instead of having it collapse into "unknown" — do not infer
+    # a workflow from the name. Despite the shared prefix it is UNRELATED to
+    # PENDING above; the collision is the backend's own spelling, kept so the
+    # member stays greppable against the recovered dump.
+    PENDING_REVIEW = 6
+
+
+#: Wire spelling of :attr:`ArtifactStatus.SUGGESTED` for the server-side
+#: LIST_ARTIFACTS filter expression. The backend filter grammar takes the
+#: symbolic enum-value name, not the integer, so the string cannot be derived
+#: from the member value. ``tests/_guardrails/test_wire_contract.py`` asserts
+#: this equals the recovered dump's name for code 5, so a backend rename
+#: cannot leave the filter stale (a stale filter matches nothing, and
+#: suggestion rows would start appearing in every listing).
+ARTIFACT_STATUS_SUGGESTED_WIRE_NAME: Final[str] = "ARTIFACT_STATUS_SUGGESTED"
 
 
 _ARTIFACT_STATUS_MAP: dict[int, str] = {
-    ArtifactStatus.PROCESSING: "in_progress",
+    ArtifactStatus.UNKNOWN: "unknown",
     ArtifactStatus.PENDING: "pending",
+    ArtifactStatus.PROCESSING: "in_progress",
     ArtifactStatus.COMPLETED: "completed",
     ArtifactStatus.FAILED: "failed",
+    ArtifactStatus.SUGGESTED: "suggested",
+    ArtifactStatus.PENDING_REVIEW: "pending_review",
 }
 
 
@@ -320,8 +363,10 @@ def artifact_status_to_str(status_code: int) -> str:
         status_code: Numeric status from API response (artifact_data[4]).
 
     Returns:
-        String status: "in_progress", "pending", "completed", "failed", or "unknown".
-        Returns "unknown" for unrecognized codes (future-proofing).
+        String status: "unknown", "pending", "in_progress", "completed",
+        "failed", "suggested", or "pending_review". Returns "unknown" for
+        unrecognized codes (future-proofing), which is also what code ``0``
+        (``ARTIFACT_STATUS_UNKNOWN``) maps to.
     """
     return _ARTIFACT_STATUS_MAP.get(status_code, "unknown")
 
@@ -370,14 +415,16 @@ class VideoStyle(int, Enum):
 class QuizQuantity(int, Enum):
     """Quiz/Flashcards quantity options.
 
-    Note: Google's API only distinguishes between FEWER (1) and STANDARD (2).
-    MORE is an alias for STANDARD - the API treats them identically.
-    This matches the observed behavior from NotebookLM's web interface.
+    Values match the backend ``QuizGenerationOptions.QuestionQuantity`` /
+    ``FlashcardsGenerationOptions.CardQuantity`` enums, both of which declare
+    FEWER (1), STANDARD (2) and MORE (3). ``MORE`` was previously an alias for
+    ``STANDARD`` on the (incorrect) belief that the API could not express the
+    distinction; the backend accepts and persists ``cardQuantity = 3`` (#2117).
     """
 
     FEWER = 1
     STANDARD = 2
-    MORE = 2  # Alias for STANDARD - API limitation
+    MORE = 3
 
 
 class QuizDifficulty(int, Enum):
@@ -579,6 +626,16 @@ _SOURCE_STATUS_MAP: dict[int, str] = {
 }
 
 
+#: Every label :func:`source_status_to_str` can return, in enum order — the
+#: canonical vocabulary for a status filter, so a CLI ``--status`` choice cannot
+#: drift from the enum the rows are rendered from. Derived from the map rather
+#: than restated, which is the whole point: a new ``SourceStatus`` member becomes
+#: filterable the moment it is mapped. (The MCP tool's ``Literal`` cannot be
+#: derived — ``Literal`` needs static values — and is guarded for parity by
+#: ``tests/unit/mcp/test_sources.py::test_source_list_status_filter_enum_parity``.)
+SOURCE_STATUS_LABELS: tuple[str, ...] = tuple(_SOURCE_STATUS_MAP.values())
+
+
 def source_status_to_str(status_code: int | SourceStatus) -> str:
     """Convert source status code to human-readable string.
 
@@ -593,3 +650,164 @@ def source_status_to_str(status_code: int | SourceStatus) -> str:
         Returns "unknown" for unrecognized codes (future-proofing).
     """
     return _SOURCE_STATUS_MAP.get(status_code, "unknown")
+
+
+class DriveSourceStatus(int, Enum):
+    """Drive-side health of a Drive-backed source (``UserDriveSourceStatus``).
+
+    The sibling of :class:`SourceStatus`, and a *different question*.
+    :class:`SourceStatus` reports NotebookLM's own ingestion pipeline
+    (``SourceSettings.status``, tag 2 → ``source[3][1]``), which completes —
+    and stays complete — even after the underlying Drive file is deleted or
+    unshared. Drive-side health lives only here
+    (``SourceSettings.userDriveSourceStatus``, tag 4 → ``source[3][3]``), so a
+    source can read ``READY`` while its Drive file is gone (#2111).
+
+    Only Drive-backed sources carry the slot; every other source decodes to
+    ``None`` (see :attr:`notebooklm.Source.drive_status`).
+
+    The backend's ``DRIVE_SOURCE_STATUS_UNSPECIFIED`` (0) is deliberately NOT
+    modelled here. proto3 omits zero-valued fields, so it normally arrives as
+    an absent slot, and it means exactly what an absent slot means — "no claim".
+    Modelling it would give that one state two representations (``None`` and a
+    falsy member), so :attr:`notebooklm._row_adapters.sources.SourceRow.drive_status`
+    normalizes an explicit ``0`` to ``None`` instead. Recorded in
+    ``tests/_guardrails/_wire_contract.py::ENUM_GAPS``.
+
+    Values are the backend ``UserDriveSourceStatus`` enum, recovered from the
+    official Android app (``docs/mobile/enums.txt``) and pinned by
+    ``tests/_guardrails/_wire_contract.py``.
+
+    .. warning::
+       Only :attr:`ACTIVE` has been observed on the wire (4 Drive rows in a
+       409-row live capture; see
+       ``docs/notes/web-rpc-vs-mobile-grpc-audit-2026-08-07.md`` §1.6).
+       The degraded members below are read off the backend enum, **not**
+       from an observed response — producing them requires deliberately
+       breaking access to a real Drive file. Treat their exact wire behaviour
+       as unverified.
+    """
+
+    #: Client-side sentinel — the slot carried a code this client does not
+    #: model (or a non-integer). Never sent by the backend. ``None`` means
+    #: "no Drive status on this row"; this means "present but unmappable".
+    UNKNOWN = -1
+    #: The account can no longer read the Drive file (e.g. unshared).
+    INACCESSIBLE = 1
+    #: The Drive file is being (re-)synced into the notebook.
+    SYNCING = 2
+    #: The Drive file is present and in sync. The only value observed live.
+    ACTIVE = 3
+    #: The Drive file has been deleted.
+    DELETED = 4
+    #: Gemini/AI access to the file is denied (e.g. a Workspace policy).
+    GEN_AI_ACCESS_DENIED = 5
+
+
+# Drive source status code to string mapping (uses int keys for mypy
+# compatibility), the sibling of ``_SOURCE_STATUS_MAP``.
+_DRIVE_SOURCE_STATUS_MAP: dict[int, str] = {
+    DriveSourceStatus.UNKNOWN: "unknown",
+    DriveSourceStatus.INACCESSIBLE: "inaccessible",
+    DriveSourceStatus.SYNCING: "syncing",
+    DriveSourceStatus.ACTIVE: "active",
+    DriveSourceStatus.DELETED: "deleted",
+    DriveSourceStatus.GEN_AI_ACCESS_DENIED: "gen_ai_access_denied",
+}
+
+
+def drive_source_status_to_str(status_code: int | DriveSourceStatus) -> str:
+    """Convert a Drive source status code to a human-readable string.
+
+    The single source of truth for Drive-status code to string mapping (the
+    sibling of :func:`source_status_to_str`). Use this helper instead of
+    inline conditionals so every adapter's label stays in lock-step.
+
+    Args:
+        status_code: Status code as int or :class:`DriveSourceStatus`.
+
+    Returns:
+        One of ``"inaccessible"``, ``"syncing"``, ``"active"``,
+        ``"deleted"``, ``"gen_ai_access_denied"``. Returns ``"unknown"`` for
+        the client sentinel and for unrecognized codes (future-proofing) —
+        including the backend's unmodelled ``0``, which the decoder normalizes
+        to ``None`` before it can reach this helper.
+    """
+    return _DRIVE_SOURCE_STATUS_MAP.get(status_code, "unknown")
+
+
+class DiscoveryMode(int, Enum):
+    """How a research run searched for sources (backend ``DiscoveryMode``).
+
+    Echoed back by ``POLL_RESEARCH`` at ``task_info[2]`` — the same enum the
+    ``START_FAST_RESEARCH`` / ``START_DEEP_RESEARCH`` request params carry, so
+    the mode a run is executing under is confirmable from the response rather
+    than only remembered from the request (#2122).
+
+    The backend's ``DISCOVERY_MODE_UNSPECIFIED`` (0) is deliberately NOT
+    modelled, for the same reason as
+    :class:`DriveSourceStatus`: proto3 omits zero-valued fields, so it arrives
+    as an absent slot and means what an absent slot means. The decoder
+    normalizes an explicit ``0`` to ``None``. Recorded in
+    ``tests/_guardrails/_wire_contract.py::ENUM_GAPS``.
+
+    Values are the backend ``DiscoveryMode`` enum recovered from the official
+    Android app (``docs/mobile/enums.txt``) and pinned by
+    ``tests/_guardrails/_wire_contract.py``.
+
+    .. warning::
+       Only :attr:`DEFAULT_LLM_SEARCH` and :attr:`DEEP_RESEARCH` have been
+       observed: ``1`` on every fast run (live probe #2122 plus 6/6 fast
+       cassette rows) and ``5`` on every deep run (3/3 cassette rows). This
+       client only ever *sends* those two. The remaining members come from the
+       recovered enum and are decode-only forward compatibility.
+    """
+
+    #: Client-side sentinel — the slot carried a code this client does not
+    #: model (or a non-integer). Never sent by the backend. ``None`` means
+    #: "the poll made no mode claim"; this means "present but unmappable".
+    UNKNOWN = -1
+    #: The default LLM-driven search. Sent + observed for ``mode="fast"``.
+    DEFAULT_LLM_SEARCH = 1
+    #: Raw (non-LLM) search. Never sent by this client.
+    RAW_SEARCH = 2
+    #: "Curious" LLM search. Never sent by this client.
+    CURIOUS_SEARCH = 3
+    #: "Curious" raw search. Never sent by this client.
+    CURIOUS_RAW_SEARCH = 4
+    #: Multi-step deep research. Sent + observed for ``mode="deep"``.
+    DEEP_RESEARCH = 5
+    #: Lightweight LLM search. Never sent by this client.
+    LITE_LLM_SEARCH = 6
+
+
+# Discovery-mode code to string mapping (int keys for mypy compatibility),
+# the sibling of ``_DRIVE_SOURCE_STATUS_MAP``.
+_DISCOVERY_MODE_MAP: dict[int, str] = {
+    DiscoveryMode.UNKNOWN: "unknown",
+    DiscoveryMode.DEFAULT_LLM_SEARCH: "default_llm_search",
+    DiscoveryMode.RAW_SEARCH: "raw_search",
+    DiscoveryMode.CURIOUS_SEARCH: "curious_search",
+    DiscoveryMode.CURIOUS_RAW_SEARCH: "curious_raw_search",
+    DiscoveryMode.DEEP_RESEARCH: "deep_research",
+    DiscoveryMode.LITE_LLM_SEARCH: "lite_llm_search",
+}
+
+
+def discovery_mode_to_str(mode: int | DiscoveryMode) -> str:
+    """Convert a research discovery-mode code to a human-readable string.
+
+    The single source of truth for discovery-mode code to string mapping (the
+    sibling of :func:`drive_source_status_to_str`). Use this helper instead of
+    inline conditionals so every adapter's label stays in lock-step.
+
+    Args:
+        mode: Discovery mode as int or :class:`DiscoveryMode`.
+
+    Returns:
+        The lower-snake-case member name (``"default_llm_search"`` /
+        ``"deep_research"`` / …). Returns ``"unknown"`` for the client sentinel
+        and for unrecognized codes — including the backend's unmodelled ``0``,
+        which the decoder normalizes to ``None`` before it can reach here.
+    """
+    return _DISCOVERY_MODE_MAP.get(mode, "unknown")

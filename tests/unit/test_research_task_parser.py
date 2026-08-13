@@ -1,6 +1,9 @@
 """Tests for POLL_RESEARCH task parsing."""
 
+import json
 import logging
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +24,8 @@ from notebooklm._research_task_parser import (
     termination_reason_from_code,
 )
 from notebooklm.exceptions import UnknownRPCMethodError
+from notebooklm.rpc.types import DiscoveryMode
+from notebooklm.types import ResearchStatus
 
 
 class TestParseResultType:
@@ -236,6 +241,10 @@ class TestParseResearchTasks:
                         "title": "Example",
                         "result_type": 1,
                         "research_task_id": "task_123",
+                        # src[2] is DiscoveredSource.hint, which this fixture
+                        # has always carried as "desc" and the parser dropped
+                        # until #2122.
+                        "hint": "desc",
                     }
                 ],
                 "summary": "Summary",
@@ -669,3 +678,164 @@ class TestStatusCodeTableIsSingleSourced:
         assert task.termination_reason == "completed"
         assert task.reason_message is None
         assert task.hint is None
+
+
+#: The same live ``POLL_RESEARCH`` capture the row-adapter tests use (#2122):
+#: one fast web run polled while in flight and again once it settled.
+_CAPTURED_POLLS = json.loads(
+    (Path(__file__).parent / "fixtures" / "research_poll_task_metadata.json").read_text(
+        encoding="utf-8"
+    )
+)["polls"]
+
+
+class TestTaskMetadataFromCapture:
+    """The #2122 metadata, end to end from a real poll payload."""
+
+    def _task(self, poll_index: int) -> ResearchTask:
+        tasks = parse_research_task_models(_CAPTURED_POLLS[poll_index])
+        assert len(tasks) == 1
+        return tasks[0]
+
+    def test_settled_task_carries_every_new_field(self) -> None:
+        task = self._task(2)
+        assert task.discovery_mode is DiscoveryMode.DEFAULT_LLM_SEARCH
+        assert task.account_id == "400237754469"
+        assert task.created_at == datetime.fromtimestamp(1786619578, tz=timezone.utc)
+        assert task.updated_at == datetime.fromtimestamp(1786619585, tz=timezone.utc)
+        assert task.status == "completed"
+
+    def test_duration_is_the_backend_measured_run_time(self) -> None:
+        assert self._task(2).duration == timedelta(seconds=7)
+
+    def test_in_flight_task_has_not_advanced_yet(self) -> None:
+        task = self._task(1)
+        assert task.created_at == task.updated_at
+        assert task.duration == timedelta(0)
+        assert task.status == "in_progress"
+
+    def test_created_at_is_stable_across_polls_and_updated_at_is_not(self) -> None:
+        in_flight, settled = self._task(1), self._task(2)
+        assert in_flight.created_at == settled.created_at
+        assert in_flight.updated_at < settled.updated_at
+
+    def test_every_captured_source_carries_its_hint(self) -> None:
+        sources = self._task(2).sources
+        assert len(sources) == 10
+        assert all(src.hint for src in sources)
+        assert sources[0].hint == (
+            "Comprehensive introduction to the event loop's role as a conductor."
+        )
+
+    def test_hint_reaches_the_public_source_dict(self) -> None:
+        """``to_public_dict`` is what the CLI ``--json``, the MCP tool and the
+        REST route all emit for a source, so the hint has to arrive there."""
+        public = self._task(2).sources[0].to_public_dict()
+        assert public["hint"] == (
+            "Comprehensive introduction to the event loop's role as a conductor."
+        )
+
+    def test_empty_poll_yields_no_tasks(self) -> None:
+        assert parse_research_task_models(_CAPTURED_POLLS[0]) == []
+
+
+class TestTaskMetadataAbsence:
+    """Most of these slots are optional in the type; absence must stay soft."""
+
+    def test_a_row_without_metadata_slots_parses_with_none(self) -> None:
+        task_info = [None, ["query", 1], None, [[], "Summary"], 2]
+        task = parse_research_task_models([[["task_bare", task_info]]])[0]
+        assert task.discovery_mode is None
+        assert task.created_at is None
+        assert task.updated_at is None
+        assert task.account_id is None
+        assert task.duration is None
+
+    def test_one_missing_timestamp_leaves_duration_unreportable(self) -> None:
+        task_info = [None, ["query", 1], 1, [[], "Summary"], 2]
+        row = ["task_half", task_info, [1786619585, 0]]
+        task = parse_research_task_models([[row]])[0]
+        assert task.updated_at is not None
+        assert task.created_at is None
+        assert task.duration is None
+
+    def test_public_dict_shape_is_unchanged_by_the_task_metadata(self) -> None:
+        """The task-level fields stay OFF the byte-stable CLI ``--json``
+        payload, matching ``status_code`` / ``source_type``."""
+        task = parse_research_task_models(_CAPTURED_POLLS[2])[0]
+        assert set(task.to_public_dict()) == {
+            "task_id",
+            "status",
+            "query",
+            "sources",
+            "summary",
+            "report",
+            "tasks",
+        }
+
+
+class TestDurationRefusesAnInvertedInterval:
+    """A negative duration means the two timestamp slots were read the wrong
+    way round — this decode's most fragile claim. It must not reach a caller.
+    """
+
+    def _task(self, created, updated) -> ResearchTask:
+        return ResearchTask(
+            task_id="task_inverted",
+            status=ResearchStatus.COMPLETED,
+            created_at=created,
+            updated_at=updated,
+        )
+
+    def test_inverted_interval_reports_none_and_warns(self, caplog) -> None:
+        task = self._task(
+            datetime.fromtimestamp(1786619585, tz=timezone.utc),
+            datetime.fromtimestamp(1786619578, tz=timezone.utc),
+        )
+        with caplog.at_level(logging.WARNING, logger="notebooklm._types.research"):
+            assert task.duration is None
+        assert any("BEFORE created_at" in r.message for r in caplog.records)
+
+    def test_zero_interval_is_a_real_duration_not_an_inversion(self) -> None:
+        """A just-started run reports both slots equal — that is 0s, not drift."""
+        instant = datetime.fromtimestamp(1786619578, tz=timezone.utc)
+        assert self._task(instant, instant).duration == timedelta(0)
+
+    def test_the_app_projection_refuses_it_too(self, caplog) -> None:
+        """``ResearchStatusResult.duration_seconds`` re-derives from the ISO
+        strings, so the guard has to hold there independently — AND warn.
+
+        On the MCP/REST path ``ResearchTask.duration`` is never called (this
+        projection is built from the timestamps directly), so if this did not
+        warn, the one surface an agent consumes the value from would be the
+        surface with no diagnostic.
+        """
+        from notebooklm._app.research import ResearchStatusResult
+
+        inverted = ResearchStatusResult(
+            kind="completed",
+            status="completed",
+            query="q",
+            sources=[],
+            summary="",
+            report="",
+            public_dict={},
+            created_at="2026-08-13T12:11:16+00:00",
+            updated_at="2026-08-13T12:11:10+00:00",
+        )
+        with caplog.at_level(logging.WARNING, logger="notebooklm._app.research"):
+            assert inverted.duration_seconds is None
+        assert any("BEFORE created_at" in r.message for r in caplog.records)
+
+        forward = ResearchStatusResult(
+            kind="completed",
+            status="completed",
+            query="q",
+            sources=[],
+            summary="",
+            report="",
+            public_dict={},
+            created_at="2026-08-13T12:11:10+00:00",
+            updated_at="2026-08-13T12:11:16+00:00",
+        )
+        assert forward.duration_seconds == 6.0

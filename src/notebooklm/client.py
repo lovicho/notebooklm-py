@@ -59,8 +59,8 @@ from ._notes import NotesAPI
 from ._research import ResearchAPI
 from ._rpc_executor import RpcExecutor
 from ._runtime.config import (
+    AUTO_READ_TIMEOUT,
     DEFAULT_CHAT_RESPONSE_MAX_BYTES,
-    DEFAULT_CHAT_TIMEOUT,
     DEFAULT_KEEPALIVE_MIN_INTERVAL,
     DEFAULT_MAX_CONCURRENT_RPCS,
     DEFAULT_MAX_CONCURRENT_UPLOADS,
@@ -164,18 +164,39 @@ class NotebookLMClient:
         on_rpc_event: Callable[[RpcTelemetryEvent], object] | None = None,
         cookie_saver: CookieSaver | None = None,
         cookie_rotator: CookieRotator | None = None,
-        chat_timeout: float | None = DEFAULT_CHAT_TIMEOUT,
+        chat_timeout: float | None = AUTO_READ_TIMEOUT,
         chat_response_max_bytes: int | None = DEFAULT_CHAT_RESPONSE_MAX_BYTES,
+        import_research_timeout: float | None = AUTO_READ_TIMEOUT,
     ):
         """Initialize the NotebookLM client.
 
         Args:
             auth: Authentication tokens from browser login.
             timeout: HTTP request timeout in seconds. Defaults to 30 seconds.
+                It is the *base* read budget for every RPC: the built-in
+                per-RPC windows below only ever lengthen it, never shorten it,
+                so ``timeout=600`` really does buy 600 s everywhere (#2205).
             chat_timeout: Per-read HTTP timeout in seconds for
-                ``client.chat.ask``. Defaults to 180 seconds because shared
-                notebooks can be slow to send the first streamed byte. Pass
-                ``None`` to inherit the normal client timeout for chat.
+                ``client.chat.ask``. Left unset it is ``max(180, timeout)`` —
+                180 s because shared notebooks can be slow to send the first
+                streamed byte, floored at ``timeout`` so a larger configured
+                budget still applies to chat. Pass an explicit value to fix
+                the chat window outright (including *below* ``timeout``, for
+                deliberately fast failure), or ``None`` to inherit ``timeout``.
+            import_research_timeout: Per-attempt read window in seconds for
+                ``client.research.import_sources``' IMPORT_RESEARCH RPC, read
+                exactly like ``chat_timeout``: left unset it is the batch-scaled
+                window (60 s + 3 s per requested source, capped at 240 s)
+                floored at ``timeout``; a value replaces both the scaling and
+                the floor; ``None`` inherits ``timeout`` verbatim. Either way an
+                attempt made by ``import_sources_with_verification`` is
+                additionally clamped to what remains of that call's
+                ``max_elapsed`` budget, and that loop stops rather than sending
+                an attempt too short to observe its own result.
+
+                A non-positive or non-finite ``chat_timeout`` /
+                ``import_research_timeout`` raises rather than silently
+                producing a window that times out instantly.
             chat_response_max_bytes: Maximum buffered response size for
                 ``client.chat.ask``. Defaults to 256 MiB because the
                 streamed chat endpoint can include notebook-state sync
@@ -299,6 +320,7 @@ class NotebookLMClient:
             cookie_saver=cookie_saver,
             cookie_rotator=cookie_rotator,
             chat_timeout=chat_timeout,
+            import_research_timeout=import_research_timeout,
             chat_response_max_bytes=chat_response_max_bytes,
         )
 
@@ -556,6 +578,7 @@ class NotebookLMClient:
         *,
         disable_internal_retries: bool = False,
         read_timeout: float | None = None,
+        raise_on_null_status: bool = False,
     ) -> Any:
         """Make a raw NotebookLM RPC call.
 
@@ -574,6 +597,12 @@ class NotebookLMClient:
         timeout for this one call — useful for RPCs known to run long (e.g.
         bulk imports) without lowering the default for every other call.
 
+        ``raise_on_null_status`` (default ``False``) pairs with
+        ``allow_null=True``: it turns a null result that the server tagged with
+        a non-OK ``google.rpc.Status`` into a raised error instead of a silent
+        ``None``, so the server's own rejection is reported rather than
+        swallowed (#2188).
+
         .. versionchanged:: 0.6.0
             The deprecated keyword arguments previously documented here
             were removed (see :doc:`/deprecations`). The default-shape
@@ -585,6 +614,7 @@ class NotebookLMClient:
             allow_null=allow_null,
             disable_internal_retries=disable_internal_retries,
             read_timeout=read_timeout,
+            raise_on_null_status=raise_on_null_status,
         )
 
     @property
@@ -607,8 +637,9 @@ class NotebookLMClient:
         max_concurrent_rpcs: int | None = DEFAULT_MAX_CONCURRENT_RPCS,
         upload_timeout: httpx.Timeout | None = None,
         on_rpc_event: Callable[[RpcTelemetryEvent], object] | None = None,
-        chat_timeout: float | None = DEFAULT_CHAT_TIMEOUT,
+        chat_timeout: float | None = AUTO_READ_TIMEOUT,
         chat_response_max_bytes: int | None = DEFAULT_CHAT_RESPONSE_MAX_BYTES,
+        import_research_timeout: float | None = AUTO_READ_TIMEOUT,
         *,
         allow_headless: bool = False,
     ) -> _FromStorageContext:
@@ -660,8 +691,13 @@ class NotebookLMClient:
                 pool so back-pressure surfaces cleanly instead of as
                 opaque ``httpx.PoolTimeout``).
             chat_timeout: Per-read HTTP timeout in seconds for
-                ``client.chat.ask``. Defaults to 180 seconds. Pass ``None``
-                to inherit ``timeout`` for chat.
+                ``client.chat.ask``. Left unset it is ``max(180, timeout)``;
+                pass a value to fix it outright, or ``None`` to inherit
+                ``timeout``. See :class:`NotebookLMClient`.
+            import_research_timeout: Per-attempt read window for
+                IMPORT_RESEARCH. Unset keeps the batch-scaled window floored at
+                ``timeout``; a value replaces both; ``None`` inherits
+                ``timeout``. See :class:`NotebookLMClient`.
             chat_response_max_bytes: Maximum buffered response size for
                 ``client.chat.ask``. Defaults to 256 MiB. Pass ``None`` to
                 inherit the shared RPC response cap. Must be ``>= 1``
@@ -713,6 +749,7 @@ class NotebookLMClient:
             max_concurrent_rpcs=max_concurrent_rpcs,
             chat_timeout=chat_timeout,
             chat_response_max_bytes=chat_response_max_bytes,
+            import_research_timeout=import_research_timeout,
             upload_timeout=upload_timeout,
             on_rpc_event=on_rpc_event,
             allow_headless=allow_headless,
@@ -931,6 +968,7 @@ class _FromStorageContext:
             max_concurrent_rpcs=kwargs["max_concurrent_rpcs"],
             chat_timeout=kwargs["chat_timeout"],
             chat_response_max_bytes=kwargs["chat_response_max_bytes"],
+            import_research_timeout=kwargs["import_research_timeout"],
             upload_timeout=kwargs["upload_timeout"],
             on_rpc_event=kwargs["on_rpc_event"],
         )

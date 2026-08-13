@@ -196,7 +196,7 @@ class TestSourcesAPI:
     @pytest.mark.vcr
     @pytest.mark.asyncio
     @notebooklm_vcr.use_cassette("sources_add_url.yaml")
-    async def test_add_url(self):
+    async def test_add_url(self, legacy_vcr_add_url_baseline):
         """Add a URL source."""
         async with vcr_client() as client:
             source = await client.sources.add_url(
@@ -595,7 +595,16 @@ class TestArtifactsGenerateAPI:
     @pytest.mark.asyncio
     @notebooklm_vcr.use_cassette("artifacts_generate_flashcards.yaml")
     async def test_generate_flashcards(self):
-        """Generate flashcards."""
+        """Generate flashcards.
+
+        Note: this tier cannot pin the quantity/difficulty pair. The ``freq``
+        matcher compares request bodies *shape-only* (see ``_shape_only`` in
+        ``tests/vcr_config.py``), so ``[1, 3]``, ``[3, 1]`` and the ``[null,
+        null]`` this cassette actually recorded are indistinguishable to it.
+        The transposition in #2116 was therefore invisible here and would be
+        again — the ordering is pinned by the unit golden payloads in
+        ``tests/unit/test_rpc_golden_payloads.py`` instead.
+        """
         async with vcr_client() as client:
             result = await client.artifacts.generate_flashcards(MUTABLE_NOTEBOOK_ID)
         assert result is not None
@@ -604,12 +613,17 @@ class TestArtifactsGenerateAPI:
     @pytest.mark.asyncio
     @notebooklm_vcr.use_cassette("artifacts_retry_failed.yaml")
     async def test_retry_failed(self):
-        """Retry a failed artifact in place — the same id comes back in_progress."""
+        """Retry a failed artifact in place — the same id comes back re-queued.
+
+        The recorded row carries status code 1 (``ARTIFACT_STATUS_INITIALIZED``),
+        which decodes to ``"pending"`` since #2127 corrected the transposed
+        1/2 codes.
+        """
         artifact_id = "11111111-2222-3333-4444-555555555555"
         async with vcr_client() as client:
             result = await client.artifacts.retry_failed(MUTABLE_NOTEBOOK_ID, artifact_id)
         assert result.task_id == artifact_id
-        assert result.status == "in_progress"
+        assert result.status == "pending"
 
 
 # =============================================================================

@@ -30,6 +30,8 @@ from notebooklm.types import (
     GenerationStatus,
     Label,
     Notebook,
+    ResearchStatus,
+    ResearchTask,
     Source,
 )
 
@@ -244,6 +246,21 @@ def _fail_notebook_list(client: MagicMock) -> None:
 def _research_no_research(client: MagicMock) -> None:
     # research wait + status both surface "no_research" as a failure.
     client.research.poll = AsyncMock(return_value={"status": "no_research"})
+
+
+def _research_import_in_progress(client: MagicMock) -> None:
+    # `research import` refuses a run that has not finished, rather than
+    # waiting for it — the fail-fast half of the command's contract (#2206).
+    client.research.poll = AsyncMock(
+        return_value=ResearchTask(
+            task_id="run_789",
+            status=ResearchStatus.IN_PROGRESS,
+            query="q",
+            sources=(),
+            summary="",
+            report="",
+        )
+    )
 
 
 def _fail_research_cancel(client: MagicMock) -> None:
@@ -477,6 +494,13 @@ JSON_ERROR_CASES: list[tuple[str, list[str], object]] = [
         "research_wait_no_research",
         ["research", "wait", "-n", "abc123def456ghi789jkl", "--json"],
         _research_no_research,
+    ),
+    # research import against a run that is still in flight: the whole point of
+    # the command is that this FAILS FAST (VALIDATION_ERROR) instead of waiting.
+    (
+        "research_import_not_complete_json",
+        ["research", "import", "-n", "abc123def456ghi789jkl", "--json"],
+        _research_import_in_progress,
     ),
     # research cancel: a transport failure surfaces as the typed JSON envelope.
     (

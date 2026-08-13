@@ -222,7 +222,8 @@
       "sources_count": 1,
       "is_owner": true,
       "modified_at": "2024-01-02T00:00:00+00:00",
-      "role": 1
+      "role": 1,
+      "last_viewed_at": "2024-01-02T00:00:00+00:00"
     },
     {
       "id": "SCRUBBED_NB_002",
@@ -231,7 +232,8 @@
       "sources_count": 0,
       "is_owner": false,
       "modified_at": "2024-01-03T00:00:00+00:00",
-      "role": 3
+      "role": 3,
+      "last_viewed_at": "2024-01-03T00:00:00+00:00"
     }
   ]
 }

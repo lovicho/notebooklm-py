@@ -295,7 +295,7 @@ jobs:
       # (Google auth tokens + API keys) without tripping on the intentional
       # placeholder content (``"Scrubbed ..."`` names, test emails) that fills
       # those fixtures.
-      run: uv run python tests/scripts/check_cassettes_clean.py --secrets-only --recursive tests/fixtures
+      run: uv run python tests/scripts/check_cassettes_clean.py --secrets-only --recursive tests/fixtures tests/unit/fixtures
 
     - name: Run tests with coverage
       # ``-n auto --dist loadgroup`` parallelizes the ~11k-test suite across the

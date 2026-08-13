@@ -132,6 +132,12 @@ async def research_status(notebook_id: str, run_id: str, client: ClientDep) -> d
         "termination_reason": result.termination_reason,
         "reason_message": result.reason_message,
         "hint": result.hint,
+        # Run metadata recovered by #2122 — the mode the run is executing
+        # under, plus its create/update times and elapsed duration.
+        "discovery_mode": result.discovery_mode,
+        "created_at": result.created_at,
+        "updated_at": result.updated_at,
+        "duration_seconds": result.duration_seconds,
         "query": result.query,
         "sources": to_jsonable(result.sources),
         "summary": result.summary,

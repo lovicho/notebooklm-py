@@ -288,6 +288,16 @@ def register(mcp: Any) -> None:
                 # An agent should branch on this rather than the coarse
                 # ``status``, which flattens every one of them into ``failed``.
                 "termination_reason": result.termination_reason,
+                # Run metadata the backend has always sent and this client
+                # dropped until #2122. ``discovery_mode`` confirms which mode
+                # the run is actually executing under (``deep_research`` vs
+                # ``default_llm_search``) instead of the agent having to
+                # remember what it asked for; the timestamps + duration make a
+                # long-running deep run's progress reportable.
+                "discovery_mode": result.discovery_mode,
+                "created_at": result.created_at,
+                "updated_at": result.updated_at,
+                "duration_seconds": result.duration_seconds,
                 "query": result.query,
                 "sources": windowed,
                 "sources_total": sources_total,

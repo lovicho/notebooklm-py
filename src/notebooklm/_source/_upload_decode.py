@@ -20,6 +20,7 @@ import httpx
 
 from .._env import PERSONAL_APP_HOSTS
 from .._transport_errors import parse_retry_after
+from .._types.sources import _HTML_FILE_EXTENSIONS
 from ..exceptions import (
     AuthError,
     NetworkError,
@@ -54,7 +55,7 @@ _MEDIA_APPLICATION_CONTENT_TYPES = frozenset(
 )
 _MEDIA_TRANSIENT_ERROR_TYPES: tuple[int | None, ...] = (10, 0, None)
 _STRICT_TRANSIENT_ERROR_TYPES: tuple[int | None, ...] = ()
-_HTML_UPLOAD_SUFFIXES = frozenset({".html", ".htm", ".xhtml", ".xht"})
+_HTML_UPLOAD_SUFFIXES = _HTML_FILE_EXTENSIONS
 _HTML_UPLOAD_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 # ``mimetypes.guess_type`` returns ``None`` for some text suffixes on Python 3.10
 # and on hosts without a populated ``/etc/mime.types`` (notably ``.md``). Without

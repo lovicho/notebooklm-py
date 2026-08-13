@@ -79,7 +79,14 @@ def _error_host_suffix(request: httpx.Request | None) -> str:
 
 
 class DecodeResponse(Protocol):
-    def __call__(self, raw: str, rpc_id: str, *, allow_null: bool = False) -> Any: ...
+    def __call__(
+        self,
+        raw: str,
+        rpc_id: str,
+        *,
+        allow_null: bool = False,
+        raise_on_null_status: bool = False,
+    ) -> Any: ...
 
 
 class RpcExecutor:
@@ -126,6 +133,7 @@ class RpcExecutor:
         disable_internal_retries: bool = False,
         operation_variant: str | None = None,
         read_timeout: float | None = None,
+        raise_on_null_status: bool = False,
         _refresh_budget: RefreshBudget | None = None,
         _retry_deadline: RuntimeDeadline | None = None,
     ) -> Any:
@@ -169,6 +177,13 @@ class RpcExecutor:
         ``RuntimeTransport.perform_authed_post`` (see ``_chat/transport.py``).
         ``None`` inherits the client default, so callers that omit it are
         unaffected.
+
+        ``raise_on_null_status`` (default ``False``) only matters alongside
+        ``allow_null=True``: it tells the decoder that a null result the server
+        tagged with a non-OK ``google.rpc.Status`` is a rejection to raise on,
+        not an empty-but-acceptable payload to swallow. See
+        :func:`notebooklm.rpc.decoder.decode_response` for why it is opt-in per
+        call site (#2188).
         """
         # Pre-open guard — preserves the historical ``RuntimeError`` surface by
         # routing through ``Kernel.get_http_client()`` (which raises the same
@@ -194,6 +209,7 @@ class RpcExecutor:
                 disable_internal_retries=disable_internal_retries,
                 operation_variant=operation_variant,
                 read_timeout=read_timeout,
+                raise_on_null_status=raise_on_null_status,
                 _refresh_budget=_refresh_budget,
                 _retry_deadline=_retry_deadline,
             )
@@ -216,6 +232,7 @@ class RpcExecutor:
                 disable_internal_retries=disable_internal_retries,
                 operation_variant=operation_variant,
                 read_timeout=read_timeout,
+                raise_on_null_status=raise_on_null_status,
                 _refresh_budget=_refresh_budget,
                 _retry_deadline=_retry_deadline,
             )
@@ -234,6 +251,7 @@ class RpcExecutor:
         disable_internal_retries: bool = False,
         operation_variant: str | None = None,
         read_timeout: float | None = None,
+        raise_on_null_status: bool = False,
         _refresh_budget: RefreshBudget | None = None,
         _retry_deadline: RuntimeDeadline | None = None,
     ) -> Any:
@@ -352,7 +370,12 @@ class RpcExecutor:
             self.raise_rpc_error_from_http_status(exc, method)
 
         try:
-            result = self._decode_response(response.text, resolved_id, allow_null=allow_null)
+            result = self._decode_response(
+                response.text,
+                resolved_id,
+                allow_null=allow_null,
+                raise_on_null_status=raise_on_null_status,
+            )
             elapsed = time.perf_counter() - start
             logger.debug("RPC %s completed in %.3fs", method.name, elapsed)
             return result
@@ -394,6 +417,7 @@ class RpcExecutor:
                     disable_internal_retries=disable_internal_retries,
                     operation_variant=operation_variant,
                     read_timeout=read_timeout,
+                    raise_on_null_status=raise_on_null_status,
                     _refresh_budget=_refresh_budget,
                     _retry_deadline=_retry_deadline,
                 )
@@ -571,6 +595,7 @@ class RpcExecutor:
         disable_internal_retries: bool = False,
         operation_variant: str | None = None,
         read_timeout: float | None = None,
+        raise_on_null_status: bool = False,
         _refresh_budget: RefreshBudget,
         _retry_deadline: RuntimeDeadline | None = None,
     ) -> Any | None:
@@ -645,6 +670,7 @@ class RpcExecutor:
             disable_internal_retries=disable_internal_retries,
             operation_variant=operation_variant,
             read_timeout=read_timeout,
+            raise_on_null_status=raise_on_null_status,
             _refresh_budget=_refresh_budget,
             _retry_deadline=_retry_deadline,
         )

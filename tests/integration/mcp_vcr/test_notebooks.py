@@ -94,7 +94,7 @@ async def test_mcp_notebook_create_over_vcr() -> None:
     # ``id`` renamed to ``notebook_id``. Asserting the exact set (not just
     # ``in`` checks) is the load-bearing guard: it catches BOTH a regression
     # back to the nested ``{"notebook": ...}`` shape AND a silently dropped
-    # field such as ``modified_at`` ("no metadata is dropped"). A new Notebook
+    # field such as ``last_viewed_at`` ("no metadata is dropped"). A new Notebook
     # field will fail this assertion by design, forcing a conscious wire-shape
     # decision.
     assert set(structured) == {
@@ -106,16 +106,21 @@ async def test_mcp_notebook_create_over_vcr() -> None:
         "is_owner",
         "modified_at",
         "role",
+        "last_viewed_at",
         # ``role_label`` is not a dataclass field — it is the agent-readable
         # projection ``_app.views.notebook_view`` adds next to the raw code.
         "role_label",
     }
-    # #1699: CREATE_NOTEBOOK returns null created_at/modified_at; the tool's
+    # #1699: CREATE_NOTEBOOK returns null created_at/last_viewed_at; the tool's
     # GET_NOTEBOOK re-read populates them. Asserting NON-null is the load-bearing
     # guard that the enrichment actually ran — a regression to the create result
     # (or a silent fallback) would leave these null and fail here.
     assert structured["created_at"] is not None, "created_at should be populated by the re-read"
-    assert structured["modified_at"] is not None, "modified_at should be populated by the re-read"
+    assert structured["last_viewed_at"] is not None, (
+        "last_viewed_at should be populated by the re-read"
+    )
+    # The deprecated ``modified_at`` alias is still emitted, same value (#2126).
+    assert structured["modified_at"] == structured["last_viewed_at"]
     # The creating account owns what it just created (#2125).
     assert structured["role"] == SharePermission.OWNER.value
     assert structured["role_label"] == "owner"

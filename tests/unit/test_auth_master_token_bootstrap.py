@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sys
 import threading
+import traceback
 from http.cookiejar import Cookie as HttpCookie
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -454,13 +454,36 @@ async def test_public_token_read_io_projection_with_outer_exception(tmp_path, lo
             await mt.remint_from_stored_token(tmp_path / "storage_state.json")
 
     error = raised.value
+    # ``__cause__`` and ``__suppress_context__`` are set explicitly by the
+    # projection (``raise ... from lower`` semantics) and ARE the contract.
     assert error.__cause__ is lower
-    expected_context = lower if sys.version_info >= (3, 13) else outer
-    assert error.__context__ is expected_context
     assert error.__suppress_context__ is True
+    assert not isinstance(error.__cause__, _BootstrapError)
     assert lower.__context__ is None
-    if sys.version_info >= (3, 13):
-        assert outer not in (error.__cause__, error.__context__)
+    # The public-chain sanitization contract, asserted directly rather than
+    # inferred from the rendered traceback (#2229 review). *Which* exception
+    # ``__context__`` holds is ambient — that is the whole point of #2224 — but
+    # it must never be the private ``_BootstrapError`` in any of them. A
+    # regression that re-chained the private error here would satisfy every
+    # other assertion above: ``__suppress_context__`` is true, so
+    # ``format_exception`` follows ``__cause__`` and omits the context entirely,
+    # leaving the rendered-output check blind to it.
+    assert not isinstance(error.__context__, _BootstrapError)
+
+    # ``__context__`` is deliberately NOT asserted here (#2224). CPython
+    # re-chains an exception as it propagates out of a coroutine, so the value
+    # a caller observes depends on ambient exception state and await depth --
+    # not on the code under test. Measured: it flips between the first and a
+    # later invocation *within one process on one interpreter*, which is why
+    # the old ``sys.version_info >= (3, 13)`` branch could not stabilise it.
+    #
+    # What the projection actually owes the user is asserted instead, and is
+    # invariant: because the context is suppressed, the rendered traceback
+    # shows the real cause and never leaks the caller's unrelated exception.
+    rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert str(lower) in rendered
+    assert "active caller" not in rendered
+    assert "_BootstrapError" not in rendered
 
 
 @pytest.mark.parametrize("active_outer", [False, True])
@@ -489,10 +512,19 @@ async def test_public_malformed_projection_preserves_ordinary_context(
         error = await invoke()
 
     assert error.__cause__ is None
-    expected_context = outer if active_outer and sys.version_info >= (3, 13) else None
-    assert error.__context__ is expected_context
     assert error.__suppress_context__ is False
+    # Same reasoning as #2224 above: the *identity* of ``__context__`` under an
+    # active outer exception is ambient, so only the leak contract is asserted
+    # -- no private bootstrap/record shape may reach the caller, by type or by
+    # rendered text. With no outer exception active there is nothing ambient to
+    # pick up, so that arm still pins the exact value.
     assert not isinstance(error.__context__, (_BootstrapError, _MasterTokenRecordError))
+    if not active_outer:
+        assert error.__context__ is None
+    rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert "private shape" not in rendered
+    assert "_MasterTokenRecordError" not in rendered
+    assert "_BootstrapError" not in rendered
 
 
 @pytest.mark.asyncio

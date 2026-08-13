@@ -13,6 +13,7 @@ from .._row_adapters.notes import NoteRow
 from .._runtime.contracts import RpcCaller
 from ..exceptions import DecodingError
 from ..rpc import (
+    ARTIFACT_STATUS_SUGGESTED_WIRE_NAME,
     FLASHCARDS_VARIANT,
     INTERACTIVE_MIND_MAP_VARIANT,
     QUIZ_VARIANT,
@@ -96,7 +97,13 @@ class ArtifactListingService:
 
     async def list_raw(self, notebook_id: str, *, rpc: RpcCaller) -> list[Any]:
         """Get raw studio artifact rows from NotebookLM."""
-        params = [[2], notebook_id, 'NOT artifact.status = "ARTIFACT_STATUS_SUGGESTED"']
+        # Server-side filter: drop suggestion rows (``ArtifactStatus.SUGGESTED``,
+        # code 5) so the listing only carries real artifacts.
+        params = [
+            [2],
+            notebook_id,
+            f'NOT artifact.status = "{ARTIFACT_STATUS_SUGGESTED_WIRE_NAME}"',
+        ]
         result = await rpc.rpc_call(
             RPCMethod.LIST_ARTIFACTS,
             params,

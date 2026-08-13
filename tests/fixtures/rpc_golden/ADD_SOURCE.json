@@ -148,6 +148,8 @@
     "url": null,
     "_type_code": null,
     "created_at": null,
-    "status": -1
+    "status": -1,
+    "drive_document_id": null,
+    "drive_status": null
   }
 }

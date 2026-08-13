@@ -98,6 +98,20 @@ def share_status(ctx, notebook_id, json_output, client_auth):
                     "access": status.access.name.lower(),
                     "view_level": status.view_level.name.lower(),
                     "share_url": status.share_url,
+                    # #2130. This payload is hand-built rather than routed
+                    # through ``_app.views.share_status_view``, so a field added
+                    # to ``ShareStatus`` stays invisible to CLI users until it is
+                    # listed here too — the same parity gap that hid two earlier
+                    # additions from ``source list --json``.
+                    "max_individuals_share_limit": status.max_individuals_share_limit,
+                    "is_public_sharing_allowed": status.is_public_sharing_allowed,
+                    # The verdict too, matching the MCP/REST view. It is a
+                    # property, so it would be dropped by any serialization that
+                    # walks dataclass fields — and re-deriving it here as
+                    # ``not is_public_sharing_allowed`` is the exact bug the
+                    # property exists to prevent, since that also fires on the
+                    # unknown case. Read it off the object instead.
+                    "is_public_sharing_denied": status.is_public_sharing_denied,
                     "shared_users": [
                         {
                             "email": u.email,
@@ -123,6 +137,27 @@ def share_status(ctx, notebook_id, json_output, client_auth):
                 f"[bold]View Level:[/bold] {_view_level_display(status.view_level)} "
                 "[dim](use 'share view-level' to change)[/dim]"
             )
+
+            # #2130. Only rendered when the backend actually stated them: a
+            # ``None`` means "no claim", and printing "Public Sharing: no" for a
+            # silent response would assert a policy denial that was never made.
+            if status.is_public_sharing_denied:
+                console.print(
+                    "[bold]Public Sharing:[/bold] [red]Not allowed by policy[/red] "
+                    "[dim](a 'share public --enable' call may not take effect)[/dim]"
+                )
+            elif status.is_public_sharing_allowed is True:
+                console.print("[bold]Public Sharing:[/bold] [green]Allowed[/green]")
+
+            # Deliberately NOT annotated with a "N of 1000 used" style count.
+            # ``shared_users`` includes the owner, and whether the owner counts
+            # against maxIndividualsShareLimit was never tested, so pairing the
+            # two numbers would invite a subtraction this project has not
+            # verified. Report the backend's stated ceiling and nothing more.
+            if status.max_individuals_share_limit is not None:
+                console.print(
+                    f"[bold]Collaborator Limit:[/bold] {status.max_individuals_share_limit}"
+                )
 
             # Display shared users
             if status.shared_users:

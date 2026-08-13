@@ -169,6 +169,7 @@ class TestNotebookList:
             "is_owner",
             "role",
             "created_at",
+            "last_viewed_at",
             "modified_at",
         ]
         assert data["notebooks"][0]["id"] == "nb_1"
@@ -368,6 +369,17 @@ class TestNotebookCreate:
         assert data["notebook"]["id"] == "new_nb_id"
         # One notebook shape across `create` / `list` / `use` --json (#2125).
         assert data["notebook"]["role"] == "owner"
+        # Exact key set, like the `list` and `use` envelopes: this is the third
+        # ``notebook_viewed_keys`` call site, and without a pin the splat could
+        # be dropped here with the whole suite still green (#2126).
+        assert set(data["notebook"]) == {
+            "id",
+            "title",
+            "role",
+            "created_at",
+            "last_viewed_at",
+            "modified_at",
+        }
         assert not mock_context_file.exists()
 
     def test_notebook_create_with_use_flag(self, runner, mock_auth, mock_context_file):

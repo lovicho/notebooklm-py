@@ -279,6 +279,7 @@ class TestUseCharacterization:
                 "is_owner": False,
                 "role": "viewer",
                 "created_at": "2024-02-01T00:00:00",
+                "last_viewed_at": None,
                 "modified_at": None,
             },
         }

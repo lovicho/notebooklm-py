@@ -55,6 +55,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 
+# Via the public ``notebooklm.types`` facade, not ``notebooklm.rpc.*`` — the
+# _app boundary lint (tests/_guardrails/test_app_boundary.py) requires RPC
+# enums to be consumed through their public re-export.
 from ..exceptions import (
     ArtifactTimeoutError,
     AuthError,
@@ -72,10 +75,6 @@ from ..exceptions import (
     ValidationError,
     WaitTimeoutError,
 )
-
-# Via the public ``notebooklm.types`` facade, not ``notebooklm.rpc.*`` — the
-# _app boundary lint (tests/_guardrails/test_app_boundary.py) requires RPC
-# enums to be consumed through their public re-export.
 from ..types import GrpcStatusCode, normalize_grpc_status, normalize_rpc_code
 from .source_mutations import SourceMutationError
 
@@ -133,8 +132,11 @@ class ErrorCategory(Enum):
     #: re-raises every infra signal (auth/rate-limit/server/network) UNWRAPPED,
     #: and a post-registration upload failure (``_source/upload.py``) does too
     #: (with ``source_id``/``stage`` attributes attached rather than a wrapper
-    #: type), so a ``SourceAddError`` is guaranteed to be a per-item input
-    #: failure.
+    #: type), so a ``SourceAddError`` reaching THIS category is a per-item input
+    #: failure. The guarantee is no longer carried by the type alone: an
+    #: UNCONFIRMED create (#2220) is also a ``SourceAddError`` but is diverted to
+    #: :attr:`RPC` before this branch, precisely because it is neither a rejected
+    #: input nor safe to isolate-and-continue.
     SOURCE_ADD = "source_add"
     #: A library error that fits none of the above (catch-all under
     #: ``NotebookLMError``).
@@ -215,6 +217,22 @@ class ClassifiedError:
     retriable: bool
 
 
+#: Remediation hint for an UNCONFIRMED create (#2220) — an error whose
+#: idempotency probe could not settle whether the write committed. It REPLACES
+#: the category hint in the MCP and REST projections, for two reasons: those
+#: errors are forced to :attr:`ErrorCategory.RPC`, whose hint is ``None`` (so a
+#: client would otherwise get "retriable: false" with no explanation at all),
+#: and the underlying exception is often a bare connection failure whose own
+#: message says nothing about a possible write. Same override shape the
+#: near-miss ``candidates`` use.
+UNCONFIRMED_HINT = (
+    "The outcome of this write is unknown — it may or may not have been created, "
+    "and no further attempt was made once the check came back inconclusive. "
+    "Reconcile against the notebook (or its source list) before retrying; "
+    "retrying blind can create a duplicate."
+)
+
+
 #: Categories for which a retry could plausibly succeed.
 _RETRIABLE_CATEGORIES = frozenset(
     {
@@ -288,6 +306,25 @@ def _category_for(exc: BaseException) -> ErrorCategory:
     first matching ``isinstance`` wins, so subclass branches MUST precede their
     bases.
     """
+    # --- UNCONFIRMED create: outcome unknown, dominates the type (#2220) ------
+    # An idempotency probe could not determine whether a create committed, so a
+    # write may be live. This is tested FIRST because the marker rides on the
+    # *underlying* exception type on the probe's transport branch — a
+    # ServerError / RateLimitError / NetworkError re-raised by the probe — and
+    # those otherwise classify as *retriable*, with a hint that says "retry
+    # after a short delay". The caller then retries the CREATE, not the probe,
+    # which is the duplicate this whole change exists to prevent.
+    #
+    # RPC is the honest landing spot: fatal in a batch add (stop, rather than
+    # issuing one more unconfirmed write per remaining item), not retriable, and
+    # no remediation hint to contradict the message. What is given up is the
+    # type-specific advice ("re-authenticate", "transient connectivity") in a
+    # doubly-exceptional case; the exception's own message still carries it, and
+    # "you may have written something and cannot tell" is the fact that must
+    # drive the caller's next move.
+    if getattr(exc, "unconfirmed", False):
+        return ErrorCategory.RPC
+
     # --- Class-sensitive specifics (must precede their bases) -----------------
     # Artifact timeout before the generic WaitTimeoutError umbrella.
     if isinstance(exc, ArtifactTimeoutError):
@@ -365,6 +402,29 @@ def _category_for(exc: BaseException) -> ErrorCategory:
     # add aborts for retry/backoff instead of masking a rate-limit/5xx as a per-item
     # error. Must precede the LIBRARY catch-all to keep its distinct 4xx category.
     if isinstance(exc, SourceAddError):
+        # An UNCONFIRMED create is neither of the two shapes below and must be
+        # tested first (#2220). Its idempotency probe could not determine whether
+        # the create committed, so the write may be live. Both other answers are
+        # actively wrong for it:
+        #
+        #   * SOURCE_ADD says "bad input, fix it and retry" (REST 422) and is
+        #     NON-fatal, so a batch add isolates the item and keeps going — one
+        #     unconfirmed write per remaining item, and a hint that invites the
+        #     manual re-add that duplicates.
+        #   * SERVER is reachable via the transient-cause branch below whenever
+        #     the probe's own failure happens to carry a 5xx / gRPC-14 rpc_code,
+        #     and it is *retriable* with the hint "retry after a short delay" —
+        #     advertising a retry for the one error whose message says the create
+        #     must not be retried, non-deterministically depending on whether the
+        #     decoder attached a code.
+        #
+        # RPC is the honest fit: fatal in a batch (stop, do not fire more
+        # unconfirmed writes), NOT retriable, no remediation hint that would
+        # contradict the message, and REST 502 rather than "your input was bad".
+        #
+        # (The marker itself is handled at the top of this function, which also
+        # covers the probe's transport branch. This comment stays here because
+        # the SourceAddError-specific stakes are what motivated it.)
         cause = getattr(exc, "cause", None)
         if isinstance(cause, RPCError) and _is_transient_rpc_code(_normalized_rpc_code(cause)):
             return ErrorCategory.SERVER

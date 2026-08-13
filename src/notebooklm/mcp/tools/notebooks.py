@@ -62,10 +62,11 @@ def register(mcp: Any) -> None:
             # the sibling create tool (``note_create``) and ``notebook_delete``,
             # which key the notebook by ``notebook_id`` rather than nesting the
             # record under a ``notebook`` key (#1540). The remaining Notebook
-            # fields (title, created_at, sources_count, is_owner, modified_at,
-            # role) — plus the ``role_label`` projection —
-            # stay at the top level so no metadata is dropped. The
-            # created_at/modified_at backfill (#1699) now lives in the
+            # fields (title, created_at, sources_count, is_owner, role,
+            # last_viewed_at and its deprecated ``modified_at`` alias) —
+            # plus the ``role_label`` projection — stay at the top level so
+            # no metadata is dropped. The created_at/last_viewed_at backfill
+            # (#1699) now lives in the
             # transport-neutral core (``execute_notebook_create``), so CLI / REST
             # / MCP all get populated timestamps from one place (#1705) — no
             # adapter-level re-read here.

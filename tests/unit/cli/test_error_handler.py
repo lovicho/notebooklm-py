@@ -660,3 +660,67 @@ class TestEmitCancelledAndExit:
         data = json.loads(captured.out)
         assert data["task_id"] == "task_abc"
         assert data["resume_hint"] == "notebooklm artifact poll task_abc"
+
+
+def test_unconfirmed_create_overrides_the_typed_branch_retry_advice(capsys):
+    """The CLI must not tell a user to retry an unresolved create (#2220).
+
+    ``handle_errors`` dispatches on exception TYPE, and a probe re-raises its
+    transport/auth failure unchanged — so a marked ``RateLimitError`` lands in
+    the rate-limit branch and is told "Retry after Ns", a marked ``AuthError``
+    is told to re-login and retry, a marked ``NetworkError`` to try again. Each
+    is the duplicate the marker exists to prevent. The CLI has its own
+    ``except`` ladder rather than routing through ``_app.errors.classify``, so
+    the classifier fix does not reach it.
+
+    The machine-readable ``code`` is overridden too, not merely annotated: a
+    script keying on ``RATE_LIMITED`` would otherwise back off and retry
+    exactly as the message tells it not to.
+    """
+    from notebooklm._idempotency import mark_unconfirmed
+
+    for error in (
+        RateLimitError("Too many requests", retry_after=30),
+        AuthError("Token expired"),
+        NetworkError("Connection failed"),
+    ):
+        with pytest.raises(SystemExit), handle_errors(json_output=True):
+            raise mark_unconfirmed(error)
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["code"] == "UNCONFIRMED_WRITE", f"{type(error).__name__} kept its own code"
+        assert data["unconfirmed"] is True
+        # The branch's own text carries the advice ("Retry after 30s"), so it
+        # must be REPLACED, not merely annotated — and ``retry_after`` is an
+        # instruction in machine-readable form, so it must not survive either.
+        # ``_output_error`` serializes ``extra`` but NOT ``hint``, which is why
+        # the hint is carried in ``extra`` for JSON.
+        assert "Retry after" not in data["message"]
+        assert "retry_after" not in data
+        assert "retrying blind can create a duplicate" in data["hint"]
+
+
+def test_unconfirmed_create_note_reaches_human_output(capsys):
+    """Text mode gets the same correction, appended rather than replacing."""
+    from notebooklm._idempotency import mark_unconfirmed
+
+    with pytest.raises(SystemExit), handle_errors():
+        raise mark_unconfirmed(NetworkError("Connection failed"))
+
+    out = capsys.readouterr()
+    combined = (out.out + out.err).lower()
+    assert "retrying blind can create a duplicate" in combined
+    # Once, not twice: text mode prints the hint after the message, so setting
+    # both would repeat the whole paragraph.
+    assert combined.count("retrying blind can create a duplicate") == 1
+    assert "could not be confirmed" in combined
+
+
+def test_ordinary_errors_keep_their_typed_branch_code(capsys):
+    """The override is opt-in — unmarked failures keep their own guidance."""
+    with pytest.raises(SystemExit), handle_errors(json_output=True):
+        raise RateLimitError("Too many requests", retry_after=30)
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["code"] == "RATE_LIMITED"
+    assert "unconfirmed" not in data

@@ -152,7 +152,9 @@ class TestRestSeamMatrix:
     """One representative REST adapter → client/service composition path."""
 
     @notebooklm_vcr.use_cassette("sources_add_url.yaml", allow_playback_repeats=True)
-    def test_url_add_crosses_rest_to_client_boundary(self, real_authed_client: TestClient) -> None:
+    def test_url_add_crosses_rest_to_client_boundary(
+        self, real_authed_client: TestClient, legacy_vcr_add_url_baseline
+    ) -> None:
         """Drive the route through the real client and project its decoded source."""
         resp = real_authed_client.post(
             f"/v1/notebooks/{_NB}/sources/url", json={"url": "https://example.com/x"}

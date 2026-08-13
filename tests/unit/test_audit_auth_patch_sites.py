@@ -230,9 +230,9 @@ def test_live_replacement_patch_contract_and_scorecard_are_exact(script):
     sites = script.collect_sites(REPO_ROOT / "tests", REPO_ROOT / "src/notebooklm/_auth")
     projection = script.build_projection(sites)
     assert projection["summary"]["TOTAL"] == {
-        "public": 132,
-        "private": 156,
-        "total": 288,
+        "public": 135,
+        "private": 157,
+        "total": 292,
     }
     relevant = {
         (row["module"], row["attribute"], row["idiom"]): row["count"]
@@ -286,7 +286,7 @@ def test_live_replacement_patch_contract_and_scorecard_are_exact(script):
             "monkeypatch.setattr",
         ): 2,
         ("browser_capture", "replace_captured_profile", "patch.object"): 1,
-        ("profile_migration", "FileLock", "monkeypatch.setattr"): 2,
+        ("profile_migration", "FileLock", "monkeypatch.setattr"): 5,
         ("profile_migration", "atomic_write_json", "monkeypatch.setattr"): 2,
         ("master_token", "MasterTokenFile", "monkeypatch.setattr"): 4,
         ("master_token", "_bootstrapper", "monkeypatch.setattr"): 2,

@@ -8,7 +8,7 @@ import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Final
 
 from .._row_adapters.artifacts import ArtifactRow
 from .._row_adapters.notes import NoteRow
@@ -155,7 +155,9 @@ class Artifact:
         id: Unique artifact identifier.
         title: Artifact title.
         kind: Artifact type as ArtifactType enum (str enum, comparable to strings).
-        status: Processing status (1=processing, 2=pending, 3=completed, 4=failed).
+        status: Processing status code — see :class:`ArtifactStatus` for the
+            code-to-meaning table. Prefer :attr:`status_str` or the ``is_*``
+            predicates over comparing the raw integer.
         created_at: When the artifact was created.
         url: Download URL (if available). For slide decks this is the PDF URL
             only — PPTX is fetched separately via ``download_slide_deck(output_format="pptx")``.
@@ -169,7 +171,7 @@ class Artifact:
     id: str
     title: str
     _artifact_type: int = field(repr=False)  # ArtifactTypeCode enum value
-    status: int  # 1=processing, 2=pending, 3=completed, 4=failed
+    status: int  # ArtifactStatus code; read via .status_str / .is_*, not by integer
     created_at: datetime | None = None
     url: str | None = None
     _variant: int | None = field(
@@ -292,7 +294,8 @@ class Artifact:
             id=row.id,
             title=title,
             _artifact_type=ArtifactTypeCode.MIND_MAP.value,
-            status=3,  # Mind maps are always "completed" once created
+            # Mind maps are always "completed" once created.
+            status=ArtifactStatus.COMPLETED.value,
             created_at=created_at,
             _variant=None,
         )
@@ -304,12 +307,18 @@ class Artifact:
 
     @property
     def is_processing(self) -> bool:
-        """Check if artifact is being generated (status=PROCESSING)."""
+        """Check if artifact is actively being generated (status=PROCESSING, code 2).
+
+        Distinct from :attr:`is_pending`, which reports the earlier
+        "row created, worker not started" phase. Before issue #2127 the two
+        wire codes were transposed, so this answered ``False`` for an artifact
+        that was in fact mid-generation.
+        """
         return self.status == ArtifactStatus.PROCESSING
 
     @property
     def is_pending(self) -> bool:
-        """Check if artifact is queued/transitional (status=PENDING)."""
+        """Check if artifact is queued and not yet started (status=PENDING, code 1)."""
         return self.status == ArtifactStatus.PENDING
 
     @property
@@ -322,7 +331,9 @@ class Artifact:
         """Get human-readable status string.
 
         Returns:
-            "in_progress", "pending", "completed", "failed", or "unknown".
+            "pending", "in_progress", "completed", "failed", "suggested",
+            "pending_review", or "unknown". See :class:`ArtifactStatus` for the
+            code-to-string table.
         """
         return artifact_status_to_str(self.status)
 
@@ -404,8 +415,74 @@ class GenerationState(str, Enum):
     FAILED = "failed"
     NOT_FOUND = "not_found"
     UNKNOWN = "unknown"
+    # Rare backend states, modeled so they stay distinguishable from UNKNOWN
+    # (issue #2127). Neither says generation finished, so :attr:`is_terminal` is
+    # False for both and every waiter keeps waiting — exactly as they behaved
+    # when both decoded to ``"unknown"``. That is a statement about how this
+    # library handles them, not a claim about what the backend means by code 6.
+    #
+    # SUGGESTED has no producer *today*: ``ArtifactListingService.list_raw``
+    # unconditionally sends the server-side ``NOT artifact.status =
+    # "ARTIFACT_STATUS_SUGGESTED"`` filter, and every row that reaches a poll
+    # comes from that one call, so code 5 cannot reach ``poll_status``. (The
+    # CREATE_ARTIFACT / RETRY_ARTIFACT kickoff parsers decode ``row[4]`` without
+    # going through ``list_raw``, but the backend does not answer those with a
+    # suggestion row.) It is modeled anyway as defence in depth: if the filter
+    # is ever dropped or the backend stops honouring it, a suggestion row
+    # surfaces as ``"suggested"`` rather than silently as ``"unknown"``. The
+    # filter's presence is itself pinned by
+    # ``tests/integration/test_artifacts_integration.py`` (exact LIST_ARTIFACTS
+    # params), so this member's premise cannot rot unnoticed.
+    SUGGESTED = "suggested"
+    # PENDING_REVIEW mirrors backend ``ARTIFACT_PENDING_REVIEW`` and is NOT
+    # related to PENDING above despite the shared prefix — that collision comes
+    # from the backend's own spelling, which we keep so the member stays
+    # greppable against the recovered enum dump. Semantics unconfirmed; see
+    # :class:`~notebooklm.rpc.types.ArtifactStatus`.
+    PENDING_REVIEW = "pending_review"
     # wait-only: emitted by wait_for_completion() on a sustained delisting
     REMOVED = "removed"
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether generation reached an end state and will not change again.
+
+        The reference definition of the terminal/still-running partition. The
+        REST poll route consults it via :attr:`GenerationStatus.is_terminal`,
+        and callers can use it instead of enumerating members themselves.
+        Anything *not* terminal means "keep waiting": that is why the rare
+        states added in #2127 (``SUGGESTED``, ``PENDING_REVIEW``) and the
+        long-standing ``UNKNOWN`` all answer ``False`` — none of them says
+        generation finished, so treating them as terminal would abandon a task
+        that is still running.
+
+        Two other sites classify terminality independently, both deliberately
+        and both pinned in agreement with this property by
+        ``tests/unit/test_generation_state.py``:
+
+        * the client-side poll loop stops on ``is_complete or is_failed``,
+          because ``REMOVED`` is terminal but is *synthesized by that loop* and
+          so can never arrive from ``poll_status``;
+        * ``_app.generate_retry.generation_outcome_from_status`` duck-types over
+          the ``is_*`` predicates so it can accept non-``GenerationStatus``
+          payloads, which rules out calling this property at all.
+
+        ``NOT_FOUND`` is deliberately non-terminal too, but it is *not*
+        interchangeable with the others: it is a transport-level absence (the
+        post-create lag, or a delisting) rather than a generation outcome, and
+        ``wait_for_completion`` escalates a sustained run of it to the terminal
+        ``REMOVED``. Consumers that must distinguish "absent" from "still
+        working" test :attr:`GenerationStatus.is_not_found` explicitly.
+
+        Defined so a member added later is non-terminal by default — the safe
+        side, since the cost of waiting on a finished task is a wasted poll
+        while the cost of finalizing a running one is a lost result.
+        """
+        return self in (
+            GenerationState.COMPLETED,
+            GenerationState.FAILED,
+            GenerationState.REMOVED,
+        )
 
     def __str__(self) -> str:
         # Keep str(member) == member.value (e.g. "completed", not
@@ -417,6 +494,22 @@ class GenerationState(str, Enum):
         # of a GenerationStatus dataclass renders identically to the old
         # plain-string field.
         return repr(self.value)
+
+
+#: The terminal members, derived from :attr:`GenerationState.is_terminal` so the
+#: partition is defined once.
+#:
+#: Lookup into this set is by *hash*, unlike every other ``is_*`` predicate on
+#: :class:`GenerationStatus` (which compare with ``==``). It still accepts a
+#: plain ``str`` status because ``str`` precedes ``Enum`` in ``GenerationState``'s
+#: MRO, so ``str.__hash__`` wins over ``Enum.__hash__`` — the latter hashes the
+#: member *name* (``"COMPLETED"``) and would break lookups by value. Reordering
+#: the bases would leave every ``==``-based predicate working and break only this
+#: one, so the mechanism is pinned directly in
+#: ``tests/unit/test_generation_state.py``, not just described here.
+_TERMINAL_GENERATION_STATES: Final[frozenset[GenerationState]] = frozenset(
+    state for state in GenerationState if state.is_terminal
+)
 
 
 def _status_from_code(
@@ -455,7 +548,7 @@ class GenerationStatus:
     """
 
     task_id: str  # Same as artifact_id - used for polling and becomes Artifact.id
-    # "pending", "in_progress", "completed", "failed", "not_found", "removed", "unknown".
+    # One of the :class:`GenerationState` values — see that enum for the full set.
     # Typed as GenerationState, but stays raw-string-permissive: instances built
     # with a plain str keep working (the .is_* predicates compare with ==).
     status: GenerationState
@@ -516,6 +609,22 @@ class GenerationStatus:
         callers that need to react differently can branch on this property.
         """
         return self.status == "removed"
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether generation ended — ``completed``, ``failed``, or ``removed``.
+
+        The one predicate to branch on for "should I keep polling?". Everything
+        else means keep waiting, including ``not_found`` (a transport-level
+        absence, not an outcome) and the rare ``suggested`` / ``pending_review``
+        states added in #2127.
+
+        Delegates to :attr:`GenerationState.is_terminal`, so a state added to
+        that enum later is non-terminal here too — the safe default. Like its
+        sibling predicates this compares by value, so it works on an instance
+        built with a plain ``str`` status.
+        """
+        return self.status in _TERMINAL_GENERATION_STATES
 
     @property
     def is_rate_limited(self) -> bool:

@@ -330,7 +330,9 @@ bounded store lock. `_auth/profile_migration.py` owns the path-shaped
 sanitization, only-if-absent promotion, and embed-before-scrub ordering;
 `LegacyAccountContext` owns the sibling file and lock. `LegacyPromotionScheduler` owns the
 canonical process one-shot registry and daemon workers. Reads only schedule and return; the
-process-default exit hook drains for two seconds per snapshot worker.
+process-default exit hook drains outstanding workers within one shared budget
+(30 seconds by default, configurable via `NOTEBOOKLM_PROMOTION_EXIT_TIMEOUT`),
+warning if any is still running when it expires.
 
 First-party app and CLI flows pass primitive account modes to `replace_profile_from_login` and
 consume `ReplaceResult`; `storage.replace_from_login` keeps its v0.x signature and projects that
@@ -361,9 +363,9 @@ token persistence; a missing-storage leader remains shielded to settlement
 before its bootstrap lock is released. At the extraction freeze the coordinator
 is 373 lines and the compatibility adapter is 463 lines.
 
-The current measured persistence boundary is 1,090 lines in `_auth/storage.py`, 419 in
+The current measured persistence boundary is 1,090 lines in `_auth/storage.py`, 602 in
 `_auth/profile_migration.py`, 876 in `_auth/profile_store.py`, 96 in
-`_auth/cookie_filter.py`, and 89 in `_auth/master_token_file.py` (2,570 total). `storage.py`
+`_auth/cookie_filter.py`, and 89 in `_auth/master_token_file.py` (2,753 total). `storage.py`
 remains the v0.x signature/result facade; the extracted owners do not create a second facade.
 
 `_auth/tokens.py` now owns the Phase 9 stored-auth composition: captured-inline/file sources,

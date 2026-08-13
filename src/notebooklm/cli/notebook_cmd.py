@@ -20,6 +20,7 @@ from .._app.notebooks import (
     execute_notebook_metadata,
     execute_notebook_rename,
 )
+from .._app.views import notebook_viewed_keys
 from ..types import share_permission_to_str
 from .auth_runtime import resolve_client_factory, with_client
 from .context import clear_context, get_current_notebook, set_current_notebook
@@ -65,7 +66,7 @@ def register_notebook_commands(cli):
                         "is_owner": nb.is_owner,
                         "role": share_permission_to_str(nb.role) if nb.role is not None else None,
                         "created_at": nb.created_at.isoformat() if nb.created_at else None,
-                        "modified_at": nb.modified_at.isoformat() if nb.modified_at else None,
+                        **notebook_viewed_keys(nb),
                     },
                     # "Access" (not "Owner") because the column now reports the
                     # caller's actual role — Owner / Editor / Viewer (#2125).
@@ -134,7 +135,7 @@ def register_notebook_commands(cli):
                                 share_permission_to_str(nb.role) if nb.role is not None else None
                             ),
                             "created_at": nb.created_at.isoformat() if nb.created_at else None,
-                            "modified_at": nb.modified_at.isoformat() if nb.modified_at else None,
+                            **notebook_viewed_keys(nb),
                         }
                     }
                     # When --use switched the active context, surface the new

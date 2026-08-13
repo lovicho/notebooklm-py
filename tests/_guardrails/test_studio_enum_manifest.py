@@ -34,16 +34,26 @@ pytestmark = pytest.mark.repo_lint
 #
 # Every ``int``-valued ``Enum`` defined in ``notebooklm.rpc.types`` is pinned to
 # its exact ``{member_name: value}`` map, INCLUDING value-aliases like
-# ``QuizQuantity.MORE`` and ``ArtifactTypeCode.QUIZ_FLASHCARD`` (the map is built
-# from ``__members__``, so aliases are frozen too — an alias whose wire value
-# drifted independently would otherwise slip past the gate).
+# ``ArtifactTypeCode.QUIZ_FLASHCARD`` (the map is built from ``__members__``, so
+# aliases are frozen too — an alias whose wire value drifted independently would
+# otherwise slip past the gate).
 #
 # To change a value here you MUST edit this snapshot in the SAME PR — that diff
 # line is the deliberate, reviewed acknowledgement that a wire contract moved.
 # ---------------------------------------------------------------------------
 
 _RPC_ENUM_SNAPSHOT: dict[str, dict[str, int]] = {
-    "ArtifactStatus": {"PROCESSING": 1, "PENDING": 2, "COMPLETED": 3, "FAILED": 4},
+    # #2127: 1/2 were transposed (1 read as PROCESSING, 2 as PENDING) and 0/5/6
+    # were absent. Corrected against the backend enum dump + two live traces.
+    "ArtifactStatus": {
+        "UNKNOWN": 0,
+        "PENDING": 1,
+        "PROCESSING": 2,
+        "COMPLETED": 3,
+        "FAILED": 4,
+        "SUGGESTED": 5,
+        "PENDING_REVIEW": 6,
+    },
     # google.rpc.Code, as embedded at index 5 of a wrb.fr entry. Not our
     # numbering to choose — these are the canonical gRPC statuses, so a diff
     # here means either a typo or that the backend stopped speaking gRPC codes.
@@ -98,7 +108,7 @@ _RPC_ENUM_SNAPSHOT: dict[str, dict[str, int]] = {
         "SCIENTIFIC": 11,
     },
     "QuizDifficulty": {"EASY": 1, "MEDIUM": 2, "HARD": 3},
-    "QuizQuantity": {"FEWER": 1, "STANDARD": 2, "MORE": 2},  # MORE = value-alias of STANDARD
+    "QuizQuantity": {"FEWER": 1, "STANDARD": 2, "MORE": 3},
     "ShareAccess": {"RESTRICTED": 0, "ANYONE_WITH_LINK": 1},
     "SharePermission": {"OWNER": 1, "EDITOR": 2, "VIEWER": 3, "_REMOVE": 4},
     "ShareViewLevel": {"FULL_NOTEBOOK": 0, "CHAT_ONLY": 1},
@@ -110,6 +120,31 @@ _RPC_ENUM_SNAPSHOT: dict[str, dict[str, int]] = {
         "READY": 2,
         "ERROR": 3,
         "PREPARING": 5,
+    },
+    # #2111 — SourceSettings.userDriveSourceStatus. UNKNOWN(-1) is a client
+    # sentinel; 1-5 are the backend UserDriveSourceStatus values (bound in
+    # tests/_guardrails/_wire_contract.py::ENUM_BINDINGS). Backend 0
+    # (UNSPECIFIED) is deliberately unmodelled — see ENUM_GAPS.
+    "DriveSourceStatus": {
+        "UNKNOWN": -1,
+        "INACCESSIBLE": 1,
+        "SYNCING": 2,
+        "ACTIVE": 3,
+        "DELETED": 4,
+        "GEN_AI_ACCESS_DENIED": 5,
+    },
+    # #2122 — POLL_RESEARCH task_info[2] / the START_*_RESEARCH mode param.
+    # UNKNOWN(-1) is a client sentinel; 1-6 are the backend DiscoveryMode
+    # values (bound in tests/_guardrails/_wire_contract.py::ENUM_BINDINGS).
+    # UNSPECIFIED(0) is deliberately unmodelled (ENUM_GAPS).
+    "DiscoveryMode": {
+        "UNKNOWN": -1,
+        "DEFAULT_LLM_SEARCH": 1,
+        "RAW_SEARCH": 2,
+        "CURIOUS_SEARCH": 3,
+        "CURIOUS_RAW_SEARCH": 4,
+        "DEEP_RESEARCH": 5,
+        "LITE_LLM_SEARCH": 6,
     },
     "VideoFormat": {"EXPLAINER": 1, "BRIEF": 2, "CINEMATIC": 3, "SHORT": 4},
     "VideoStyle": {

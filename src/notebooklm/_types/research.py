@@ -17,9 +17,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
+
+from ..rpc.types import DiscoveryMode
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +214,11 @@ class ResearchSource:
     research_task_id: str | None = None
     report_markdown: str = ""
     source_ordinal: int | None = None
+    #: ``DiscoveredSource.hint`` — the backend's own one-line explanation of
+    #: why it surfaced this source (#2122). ``""`` when the row carried none;
+    #: live-populated on every fast-research web row observed, and absent on
+    #: the deep-research report row.
+    hint: str = ""
 
     @classmethod
     def from_public_dict(cls, source: Mapping[str, Any]) -> ResearchSource:
@@ -221,6 +228,7 @@ class ResearchSource:
         research_task_id_raw = source.get("research_task_id")
         report_markdown_raw = source.get("report_markdown", "")
         source_ordinal_raw = source.get("source_ordinal")
+        hint_raw = source.get("hint", "")
 
         return cls(
             url=url_raw if isinstance(url_raw, str) else "",
@@ -231,6 +239,7 @@ class ResearchSource:
             else None,
             report_markdown=report_markdown_raw if isinstance(report_markdown_raw, str) else "",
             source_ordinal=source_ordinal_raw if type(source_ordinal_raw) is int else None,
+            hint=hint_raw if isinstance(hint_raw, str) else "",
         )
 
     @property
@@ -254,6 +263,8 @@ class ResearchSource:
             public["report_markdown"] = self.report_markdown
         if self.source_ordinal is not None:
             public["source_ordinal"] = self.source_ordinal
+        if self.hint:
+            public["hint"] = self.hint
         return public
 
 
@@ -305,6 +316,69 @@ class ResearchTask:
     # for a web search. Also omitted from the public dict shapes for the same
     # byte-stability reason as ``status_code``.
     source_type: int | None = None
+    # The four always-populated task-level slots #2122 recovered. Like
+    # ``status_code`` / ``source_type`` above they are deliberately absent from
+    # :meth:`to_public_dict` / :meth:`_to_task_dict` so the CLI ``--json`` shape
+    # stays byte-stable; the MCP ``research_status`` tool and the REST status
+    # route surface them from these attributes instead.
+    #
+    # ``discovery_mode`` is the mode the run is executing under
+    # (``task_info[2]``), echoed back from the start params — so a poll can
+    # confirm a run is deep rather than the caller having to remember it.
+    discovery_mode: DiscoveryMode | None = None
+    # ``created_at`` / ``updated_at`` are ``task_data[3]`` / ``task_data[2]``
+    # (that order is not a typo — see ``ResearchTaskRow._UPDATED_AT_POS``).
+    # Together they make a run's age and time-in-flight reportable. NOTE both
+    # take part in ``__eq__``/``__hash__`` like every field above, so two polls
+    # of one in-flight task do NOT compare equal (``updated_at`` advances
+    # between them). Same deliberate choice the block above makes for
+    # ``status_code``/``source_type``: a task carrying different metadata is a
+    # different observation. Nothing in this client compares tasks.
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    # ``task_data[4]`` — the opaque account id the run belongs to. Two live
+    # accounts produced two distinct, internally-constant values, which is what
+    # makes it account-scoped rather than a constant.
+    #
+    # Deliberately NOT forwarded to the MCP tool or the REST route, unlike its
+    # three siblings above: it identifies the *account*, not the run, so it is
+    # of no use to an agent deciding what to do next, and account identifiers
+    # are the last thing worth copying into an agent's context by default. It
+    # stays on the Python object for diagnostics.
+    account_id: str | None = None
+
+    @property
+    def duration(self) -> timedelta | None:
+        """Time between :attr:`created_at` and :attr:`updated_at`, else ``None``.
+
+        The backend advances ``updated_at`` while a run is in flight, so on an
+        in-flight task this is how long it has been running as of this poll,
+        and on a settled one how long the run took (6s on the live fast run in
+        #2122, 5m43s on the live deep run). Whether ``updated_at`` stops
+        advancing once a run settles was NOT observed — only one
+        in-flight-to-settled transition was captured per run.
+
+        ``None`` when either timestamp is missing, and also when the interval
+        is **negative**. A negative duration is not a real outcome: it means
+        the two positional slots have been read the wrong way round, which is
+        this decode's most fragile claim (the issue text had them reversed and
+        only live polling settled it). Returning ``None`` keeps a future slot
+        swap from surfacing as a negative ``duration_seconds`` in the MCP tool
+        and the REST route, where an agent would act on it.
+        """
+        if self.created_at is None or self.updated_at is None:
+            return None
+        elapsed = self.updated_at - self.created_at
+        if elapsed < timedelta(0):
+            logger.warning(
+                "research task %r reports updated_at (%s) BEFORE created_at (%s); "
+                "reporting duration=None — the POLL_RESEARCH timestamp slots may have moved",
+                self.task_id,
+                self.updated_at.isoformat(),
+                self.created_at.isoformat(),
+            )
+            return None
+        return elapsed
 
     @property
     def termination_reason(self) -> ResearchTerminationReason | None:

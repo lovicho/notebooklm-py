@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from notebooklm._types.artifacts import Artifact, GenerationState, GenerationStatus
-from notebooklm._types.chat import AskResult, ChatSettings
+from notebooklm._types.chat import AskResult, ChatSettings, ConversationTurnKey
 from notebooklm._types.common import AccountLimits, UserSettings
 from notebooklm._types.notebooks import Notebook, PromptSuggestion
 from notebooklm._types.notes import Note
@@ -303,6 +303,7 @@ class FakeChat:
             turn_number=1,
             is_follow_up=conversation_id is not None,
             raw_response='[["wrb.fr", ... internal wire blob ...]]',
+            turn_key=self._s.chat_turn_key,
         )
 
     async def set_mode(self, notebook_id: str, mode: Any) -> None:
@@ -622,9 +623,19 @@ class FakeClient:
         self.sources_store: dict[str, dict[str, Source]] = {}
         self.notes_store: dict[str, dict[str, Note]] = {}
         self.artifacts_store: dict[str, dict[str, Artifact]] = {}
-        self.poll_states: dict[tuple[str, str], GenerationState] = {}
+        # ``Any``, not ``GenerationState``: the poll route reads predicates off
+        # the status object, and ``GenerationStatus.status`` is documented
+        # raw-string-permissive. Typing this loosely lets a test hand the route
+        # a plain ``str`` — the same guarantee ``retry_status`` below already
+        # gives the retry route.
+        self.poll_states: dict[tuple[str, str], Any] = {}
         self.public_shares: dict[str, bool] = {}
         self.share_view_levels: dict[str, ShareViewLevel] = {}
+        #: #2130 — per-notebook ``maxIndividualsShareLimit`` /
+        #: ``isPublicSharingAllowed``. Unset means the backend made no claim, so
+        #: the default matches the real parser's ``None``.
+        self.share_limits: dict[str, int | None] = {}
+        self.public_sharing_allowed: dict[str, bool | None] = {}
         self.shared_users: dict[str, dict[str, SharedUser]] = {}
         self.fulltext_store: dict[tuple[str, str], str] = {}
         self.guide_store: dict[tuple[str, str], SourceGuide] = {}
@@ -664,6 +675,9 @@ class FakeClient:
         self.download_bytes: bytes = b"FAKE-ARTIFACT-BYTES"
         self.download_return_path: str | None = None
         self.chat_error: Exception | None = None
+        # ConversationTurnKey handed back on the next ask (#2122). ``None`` is
+        # the default because most streams a test builds carry no key.
+        self.chat_turn_key: ConversationTurnKey | None = None
         self.last_share_notify: bool | None = None
         self.last_configure: dict[str, Any] | None = None
         self.last_get_settings: str | None = None
@@ -740,4 +754,6 @@ class FakeClient:
             share_url=f"https://notebooklm.google.com/notebook/{notebook_id}"
             if is_public
             else None,
+            max_individuals_share_limit=self.share_limits.get(notebook_id),
+            is_public_sharing_allowed=self.public_sharing_allowed.get(notebook_id),
         )

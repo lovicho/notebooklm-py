@@ -242,7 +242,13 @@
     },
     {
       "attribute": "FileLock",
-      "count": 2,
+      "count": 5,
+      "idiom": "monkeypatch.setattr",
+      "module": "profile_migration"
+    },
+    {
+      "attribute": "_CONTEXT_SCRUB_LOCK_TIMEOUT_SECONDS",
+      "count": 1,
       "idiom": "monkeypatch.setattr",
       "module": "profile_migration"
     },
@@ -477,9 +483,9 @@
   ],
   "summary": {
     "TOTAL": {
-      "private": 156,
-      "public": 132,
-      "total": 288
+      "private": 157,
+      "public": 135,
+      "total": 292
     },
     "account": {
       "private": 2,
@@ -537,9 +543,9 @@
       "total": 15
     },
     "profile_migration": {
-      "private": 0,
-      "public": 4,
-      "total": 4
+      "private": 1,
+      "public": 7,
+      "total": 8
     },
     "profile_store": {
       "private": 27,

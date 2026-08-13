@@ -34,11 +34,16 @@ This module is transport-neutral — no ``click`` / ``rich`` / ``cli`` /
 from __future__ import annotations
 
 import contextlib
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal, NoReturn, Protocol
 
 from ..exceptions import ValidationError
+from ..types import discovery_mode_to_str
+
+logger = logging.getLogger(__name__)
 
 # ===========================================================================
 # research status
@@ -82,6 +87,57 @@ class ResearchStatusResult:
     termination_reason: str | None = None
     reason_message: str | None = None
     hint: str | None = None
+    # Always-populated task metadata recovered by #2122, carried through from
+    # the matching ``ResearchTask`` attributes. Like ``status_code`` above they
+    # stay OFF ``public_dict`` (the byte-stable CLI ``--json`` payload) and are
+    # surfaced by the MCP tool / REST route from these fields instead.
+    #
+    # ``discovery_mode`` is the string label (``default_llm_search`` /
+    # ``deep_research`` / …) rather than the raw code: an agent branching on
+    # ``5`` is the failure mode ``_app.views`` exists to prevent. ``None`` when
+    # the poll made no mode claim.
+    discovery_mode: str | None = None
+    # ISO-8601 strings, not ``datetime`` — every consumer of this result
+    # serializes it, and ``ResearchStatusResult`` is the transport-neutral
+    # projection boundary. ``None`` when the poll carried no timestamp.
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    @property
+    def duration_seconds(self) -> float | None:
+        """Seconds between :attr:`created_at` and :attr:`updated_at`.
+
+        DERIVED rather than stored, mirroring ``ResearchTask.duration``: three
+        independent fields could disagree, and a hand-built or faked instance
+        (``tests/server/fakes.py`` builds these) could carry timestamps six
+        seconds apart alongside a ``duration_seconds`` of 999. ``None`` when
+        either timestamp is missing or the interval is negative — the same
+        slot-swap guard ``ResearchTask.duration`` applies, re-derived here
+        because this projection holds the ISO strings, not the datetimes.
+
+        It WARNS on the negative case rather than dropping it silently, and
+        that warning is not redundant with ``ResearchTask.duration``'s: this
+        projection is built from the timestamps directly, so on the MCP/REST
+        path ``ResearchTask.duration`` is never called and its warning never
+        fires. Without this one, the surface where an agent actually consumes
+        the value would be the surface with no diagnostic at all.
+        """
+        if self.created_at is None or self.updated_at is None:
+            return None
+        elapsed = (
+            datetime.fromisoformat(self.updated_at) - datetime.fromisoformat(self.created_at)
+        ).total_seconds()
+        if elapsed < 0:
+            logger.warning(
+                "research task %r reports updated_at (%s) BEFORE created_at (%s); "
+                "reporting duration_seconds=None — the POLL_RESEARCH timestamp slots "
+                "may have moved",
+                self.task_id,
+                self.updated_at,
+                self.created_at,
+            )
+            return None
+        return elapsed
 
 
 def _classify_status_kind(status_val: str) -> ResearchStatusKind:
@@ -127,6 +183,13 @@ async def poll_and_classify(
         termination_reason=reason.value if reason is not None else None,
         reason_message=status.reason_message,
         hint=status.hint,
+        discovery_mode=(
+            discovery_mode_to_str(status.discovery_mode)
+            if status.discovery_mode is not None
+            else None
+        ),
+        created_at=status.created_at.isoformat() if status.created_at is not None else None,
+        updated_at=status.updated_at.isoformat() if status.updated_at is not None else None,
     )
 
 
@@ -136,16 +199,38 @@ async def poll_importable_research(
     """Poll a research run and return its ``(importable sources, report)``, or raise.
 
     The single shared importable-state guard for the "import a completed run's
-    found sources" flow — driven by BOTH the MCP ``research_import`` tool and the
-    REST ``POST .../research/{run_id}/import`` route so the ladder cannot drift
-    between the two adapters.
+    found sources" flow — driven by the MCP ``research_import`` tool, the REST
+    ``POST .../research/{run_id}/import`` route, and (through the pure
+    :func:`classify_importable_research` half) the CLI ``research import``
+    command, so the ladder cannot drift between adapters.
 
     Polls FOR THE REQUESTED ``run_id`` (via :func:`poll_and_classify`, which
     forwards it to ``client.research.poll`` as the task discriminator) so the
     returned sources belong to that run — never the notebook's current (possibly
-    different) research run's sources. Every non-importable state raises the
-    public :class:`~notebooklm.exceptions.ValidationError` (each adapter maps it
-    to its own surface + status), so an unfinished / failed / empty run is never
+    different) research run's sources; then hands the snapshot to
+    :func:`classify_importable_research`, which owns every accept/refuse rule.
+
+    The ``run`` noun is surface-neutral (the MCP tool documents it as the
+    ``task_id``); the message names no adapter-specific route or tool so the one
+    string reads cleanly on both surfaces.
+    """
+    status = await poll_and_classify(client, notebook_id, run_id)
+    return classify_importable_research(status, run_id, notebook_id=notebook_id)
+
+
+def classify_importable_research(
+    status: ResearchStatusResult, run_id: str, *, notebook_id: str
+) -> tuple[list[dict[str, Any]], str]:
+    """Return a polled run's ``(importable sources, report)``, or raise.
+
+    The pure half of :func:`poll_importable_research`: every accept/refuse rule
+    lives here so an adapter that has *already* polled (the CLI ``research
+    import`` command, which resolves a bare "current run" from the same poll it
+    classifies) reuses the ladder instead of re-deriving a third copy of it.
+
+    Every non-importable state raises the public
+    :class:`~notebooklm.exceptions.ValidationError` (each adapter maps it to its
+    own surface + status), so an unfinished / failed / empty run is never
     imported as a partial success:
 
     * ``not_found`` — the pinned run is not among the polled runs (nothing to
@@ -163,12 +248,7 @@ async def poll_importable_research(
     caller doing cited-only selection (:func:`~notebooklm.research.select_cited_sources`)
     can match citations against it without a second poll; :func:`poll_sources_for_import`
     delegates here and drops the report for callers that import everything.
-
-    The ``run`` noun is surface-neutral (the MCP tool documents it as the
-    ``task_id``); the message names no adapter-specific route or tool so the one
-    string reads cleanly on both surfaces.
     """
-    status = await poll_and_classify(client, notebook_id, run_id)
     if status.status == "not_found":
         raise ValidationError(
             f"Research run {run_id!r} is not among notebook {notebook_id}'s research "
@@ -261,22 +341,34 @@ async def import_research_sources(
     sources: Sequence[Any],
     *,
     allow_duplicate: bool = False,
+    max_elapsed: float | None = None,
 ) -> ResearchImportOutcome:
     """Import a completed run's sources idempotently, reporting skips.
 
     Drives the timeout-tolerant ``client.research.import_sources_with_verification``
     (which pre-filters requested sources whose URL already exists in the
     notebook unless ``allow_duplicate`` is true) and lifts its ``already_present``
-    side channel into a typed result, so every adapter (the MCP tool today, a
-    REST route tomorrow) surfaces the same idempotency contract without
-    re-implementing URL dedup. The first three arguments are passed positionally
+    side channel into a typed result, so every adapter that wants the idempotency
+    contract gets it without re-implementing URL dedup: the MCP ``research_import``
+    tool and the CLI ``research import`` / ``research wait --import-all``. The REST
+    import route landed but deliberately does NOT come through here — it stays on
+    the one-shot ``client.research.import_sources`` so a synchronous web request
+    cannot block on a multi-minute reconcile loop, and so returns no
+    ``already_present`` split. The first three arguments are passed positionally
     to match the underlying method's call shape.
+
+    ``max_elapsed`` bounds the underlying **retry** loop (the IMPORT_RESEARCH RPC
+    commonly runs past the client timeout on deep payloads, so it is retried with
+    reconciliation). Forwarded only when given, so an adapter that does not expose
+    a knob keeps the library default rather than having one imposed here.
     """
+    bound = {} if max_elapsed is None else {"max_elapsed": max_elapsed}
     imported = await client.research.import_sources_with_verification(
         notebook_id,
         task_id,
         sources,
         allow_duplicate=allow_duplicate,
+        **bound,
     )
     already_present = list(getattr(imported, "already_present", []) or [])
     return ResearchImportOutcome(
@@ -543,6 +635,7 @@ __all__ = [
     "ResearchWaitPlan",
     "ResearchWaitResult",
     "cancel_research",
+    "classify_importable_research",
     "execute_research_wait",
     "import_research_sources",
     "poll_and_classify",

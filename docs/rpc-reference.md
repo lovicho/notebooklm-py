@@ -96,6 +96,7 @@ Internal integer codes returned by `GET_NOTEBOOK` / `LIST_SOURCES` and consumed 
 | 3 | `PDF` | PDF upload |
 | 4 | `PASTED_TEXT` | Inline pasted text |
 | 5 | `WEB_PAGE` | Web URL source |
+| 6 | `POWERPOINT` | PowerPoint upload (`.pptx`) |
 | 8 | `MARKDOWN` | Markdown file |
 | 9 | `YOUTUBE` | YouTube URL |
 | 10 | `MEDIA` | Audio / video upload |
@@ -107,7 +108,39 @@ Internal integer codes returned by `GET_NOTEBOOK` / `LIST_SOURCES` and consumed 
 
 > Codes outside this map are surfaced as `SourceType.UNKNOWN` and emit `UnknownTypeWarning` on first occurrence so unmapped types don't crash callers.
 
-> **Code `14` is overloaded** (live-captured #1828/#1832): the backend returns `14` for a native Google Sheet *and* for a Drive-hosted PDF. Drive sources carry no URL (`metadata[0]/[5]/[7]` are all null), so the two are disambiguated by the MIME at `metadata[19]` (fallback `metadata[9][2]`): `application/vnd.google-apps.spreadsheet` → `GOOGLE_SPREADSHEET`, `application/pdf` → `PDF`. See `_disambiguate_type_code` in `src/notebooklm/_types/sources.py`.
+> **Code `14` is overloaded** (live-captured #1828/#1832): the backend returns `14` for a native Google Sheet *and* for a Drive-hosted PDF. Drive sources carry no URL (`metadata[5]/[7]` are null and `metadata[0]` holds the Drive metadata block, not a URL — see `SourceRow.drive_document_id`), so the two are disambiguated by the MIME at `metadata[19]` (fallback `metadata[9][2]`): `application/vnd.google-apps.spreadsheet` → `GOOGLE_SPREADSHEET`, `application/pdf` → `PDF`. See `_disambiguate_type_code` in `src/notebooklm/_types/sources.py`.
+
+### Source Settings Block (`source[3]`)
+
+`Source.settings` (`SourceSettings`) carries **two independent status codes**, and
+they answer different questions:
+
+| Index | Proto tag | Field | Decoded as |
+|-------|-----------|-------|------------|
+| 1 | 2 | `status` | `SourceStatus` — NotebookLM's own ingestion pipeline (`SourceRow.status`) |
+| 3 | 4 | `userDriveSourceStatus` | `DriveSourceStatus` — Drive-side health, Drive-backed rows only (`SourceRow.drive_status`) |
+
+Shapes observed across 409 live source rows (2026-08-07 audit): `[null, 2]` ×402,
+`[null, 2, null, 3]` ×4 (all Drive-backed, all `ACTIVE`), and
+`[null, 2, [null,null,null,[]]]` ×3.
+
+| Code | `DriveSourceStatus` | Backend member |
+|------|---------------------|----------------|
+| 0 | *(normalized to `None`)* | `DRIVE_SOURCE_STATUS_UNSPECIFIED` |
+| 1 | `INACCESSIBLE` | `DRIVE_SOURCE_STATUS_INACCESSIBLE` |
+| 2 | `SYNCING` | `DRIVE_SOURCE_STATUS_SYNCING` |
+| 3 | `ACTIVE` | `DRIVE_SOURCE_STATUS_ACTIVE` |
+| 4 | `DELETED` | `DRIVE_SOURCE_STATUS_DELETED` |
+| 5 | `GEN_AI_ACCESS_DENIED` | `DRIVE_SOURCE_STATUS_GEN_AI_ACCESS_DENIED` |
+
+> Index 3 is absent on 405/409 rows — and proto3 omits zero-valued fields, so an
+> absent slot means "no Drive claim", not "not a Drive source". The backend's
+> `0` means the same thing, so the decoder normalizes it to `None` rather than
+> modelling it (recorded in `ENUM_GAPS`). Only `ACTIVE` has
+> been observed live; the degraded members come from the backend enum recovered
+> from the official Android app (`docs/mobile/enums.txt`) and are pinned in
+> `tests/_guardrails/_wire_contract.py`. A populated-but-unmapped code decodes to
+> `DriveSourceStatus.UNKNOWN` (never `None`) and warns once (#2111).
 
 ---
 
@@ -831,6 +864,55 @@ Chat queries use a **separate streaming endpoint**, not batchexecute:
 POST /_/LabsTailwindUi/data/google.internal.labs.tailwind.orchestration.v1.LabsTailwindOrchestrationService/GenerateFreeFormStreamed
 ```
 
+#### Streamed response envelope (`GenerateFreeFormStreamedResponse`)
+
+Each `wrb.fr` frame's inner JSON decodes to this envelope. Chunks arrive
+**cumulatively** — every chunk carries the answer text so far.
+
+| Index | Proto tag | Field | Decoded as |
+|-------|-----------|-------|------------|
+| 0 | 1 | `answer` (`AnswerResponse`) | `AnswerRow` |
+| 4 | 5 | `isFinalResponse` | `StreamEnvelopeRow.is_final_response` |
+
+`isFinalResponse` is `true` on **exactly the last chunk** — `false` on every
+other one, across a 5-chunk and a 6-chunk live stream (#2122) and on all 9 asks
+of the 2026-08-07 audit. `parse_streaming_chat_response` uses it to select the
+answer; the historical longest-wins heuristic is the fallback, and logs a
+`WARNING` when it fires. Heartbeat frames decode to `[]` and answer `false`.
+
+#### `AnswerResponse.conversationTurnKey` (`answer_row[2]`)
+
+Populated on every chunk of every ask. `SubmitFeedbackRequest.conversationTurnKey`
+(tag 1) is the only consumer of this message in the recovered schema. Surfaced
+as `AskResult.turn_key`.
+
+| Index | Proto tag | Proto name | Public attribute | Live observation |
+|-------|-----------|------------|------------------|------------------|
+| 0 | 1 | `sessionId` | `session_id` | Mixed — see below. The same slot `AnswerRow.server_conversation_id` reads |
+| 1 | 2 | `conversationId` | `turn_id` | A **different** UUID on each turn — identifies the turn, not the conversation |
+| 2 | 3 | `fieldType` | `turn_code` | `2187103311` / `3083048340` / `2502166488` — one per turn, constant across that turn's chunks |
+
+> **Slot 0 keeps its proto name because the evidence about it is mixed.** A
+> live two-turn probe (2026-08-13) saw the `hPTbtc`-resolved conversation id
+> here, identical on both turns. This repo's own recorded cassettes show it
+> **differing** from the recorded `hPTbtc` id in 4/4 chat captures
+> (`chat_ask.yaml`: slot 0 is `cf23c9a5-…`, `hPTbtc` returns `bc0666c8-…`). It
+> is the same slot issue #659 established is a per-stream identifier — `khqZz`
+> returns 0 turns for it, and replaying it as `params[4]` produces a ghost
+> turn. So nothing is claimed for it, `ask()` still resolves its conversation
+> id through `hPTbtc`, and callers should use `AskResult.conversation_id`.
+>
+> **Slot 1 does NOT keep its proto name**, because `conversationId` contradicts
+> every observation: it changes per turn. `fieldType` is likewise the schema
+> extractor's placeholder for a name it could not recover, and the observed
+> values are not type tags — so `turn_code` is carried verbatim and not
+> interpreted. The wire↔attribute mapping is pinned in
+> `tests/_guardrails/_wire_contract.py`.
+>
+> **There is no per-turn delete RPC to address with this key.**
+> `DeleteChatTurnsRequest` takes `requestContext` / `chatSessionId` /
+> `deleteAllHistory` — it deletes whole histories and carries no turn key.
+
 ### RPC: RENAME_NOTEBOOK (s0tc2d) - Rename Only
 
 **Source:** `_notebooks.py::rename()`
@@ -1146,7 +1228,7 @@ result = [
         title,            # [0][1]
         artifact_type,    # [0][2]
         None,             # [0][3]
-        status_code,      # [0][4]: 1=in_progress in both captures
+        status_code,      # [0][4]: 1 in both captures = ARTIFACT_STATUS_INITIALIZED ("pending")
         # ... additional artifact metadata slots; first row len was 20
     ]
 ]
@@ -1315,7 +1397,7 @@ params = [
 
 #### Quiz (Type 4, Variant 2)
 
-**Source:** `_artifacts.py::generate_quiz()`
+**Source:** `_artifact/payloads.py::build_quiz_artifact_params()`
 
 ```python
 params = [
@@ -1341,7 +1423,7 @@ params = [
                 None,
                 None,
                 None,
-                [quantity_code, difficulty_code],  # quantity: 1=FEWER, 2=STANDARD
+                [quantity_code, difficulty_code],  # quantity: 1=FEWER, 2=STANDARD, 3=MORE
             ],                                     # difficulty: 1=EASY, 2=MEDIUM, 3=HARD
         ],                            # [9]
     ],
@@ -1350,7 +1432,7 @@ params = [
 
 #### Flashcards (Type 4, Variant 1)
 
-**Source:** `_artifacts.py::generate_flashcards()`
+**Source:** `_artifact/payloads.py::build_flashcards_artifact_params()`
 
 ```python
 params = [
@@ -1375,9 +1457,9 @@ params = [
                 None,
                 None,
                 None,
-                [difficulty_code, quantity_code],  # Note: reversed order from quiz!
-            ],
-        ],                            # [9]
+                [quantity_code, difficulty_code],  # Same order as quiz (#2116).
+            ],                                     # quantity: 1=FEWER, 2=STANDARD, 3=MORE
+        ],                            # [9]         # difficulty: 1=EASY, 2=MEDIUM, 3=HARD
     ],
 ]
 ```
@@ -1543,14 +1625,46 @@ params = [
     'NOT artifact.status = "ARTIFACT_STATUS_SUGGESTED"',
 ]
 
-# Response contains artifacts array with status:
-# status = 1 → Processing
-# status = 2 → Pending
-# status = 3 → Completed
+# Response contains artifacts array with an ArtifactStatus code:
+# status = 0 → Unknown
+# status = 1 → Pending    (ARTIFACT_STATUS_INITIALIZED — queued, worker not started)
+# status = 2 → In progress (ARTIFACT_STATUS_PROCESSING — actively generating)
+# status = 3 → Completed  (ARTIFACT_STATUS_READY)
 # status = 4 → Failed
+# status = 5 → Suggested  (excluded by the filter above)
+# status = 6 → ARTIFACT_PENDING_REVIEW (semantics unconfirmed; never observed here)
+# Codes 1 and 2 were transposed in this client before #2127.
 ```
 
-**Python API Note:** `artifacts.list()` also fetches mind maps from GET_NOTES_AND_MIND_MAPS and includes them as Artifact objects (type=5). This provides a unified list of all AI-generated content. Mind maps with status=2 (deleted) are filtered out.
+**Quiz/flashcards options are echoed back (#2195).** The server stores the
+generation options and returns them on every listing, inside the same type-4
+options block that carries the variant and the free-text prompt:
+
+```python
+row[9][1][0]   # variant: 1=flashcards, 2=quiz, 4=interactive mind map
+row[9][1][2]   # free-text prompt
+row[9][1][6]   # flashcards [quantity, difficulty] — null on a quiz row
+row[9][1][7]   # quiz       [quantity, difficulty] — null on a flashcards row
+```
+
+Positions follow `AppArtifactGenerationOptions` in `docs/mobile/schema.proto`
+(`flashcardsGenerationOptions` = tag 7, `quizGenerationOptions` = tag 8), and
+each pair is `[quantity, difficulty]` — the same order both builders send. Read
+them through `ArtifactRow.quiz_options` / `ArtifactRow.flashcards_options`, which
+return a named `QuizOptionPair` rather than a positional tuple.
+
+This is the **only** client-side check on the option pair that does not depend
+on a fixture we wrote ourselves, which is why #2116 (a transposed flashcards
+pair) and #2117 (`MORE` aliased to `STANDARD`) both shipped unnoticed. Live
+observations worth knowing:
+
+* an omitted option message echoes back as `null`, and a `[0, 0]`
+  (proto3 `*_UNSPECIFIED`) pair echoes back as `[]` — both are accepted and
+  generate normally, but what the server then chose is not observable; and
+* the VCR tier cannot pin any of this: the `freq` matcher compares request
+  bodies shape-only, so `[1,3]`, `[3,1]` and `[null,null]` are identical to it.
+
+**Python API Note:** `artifacts.list()` also fetches mind maps from GET_NOTES_AND_MIND_MAPS and includes them as Artifact objects (type=5). This provides a unified list of all AI-generated content. Mind maps with status=2 (deleted) are filtered out — note that this is the *note* row's own status field, unrelated to the `ArtifactStatus` table above.
 
 ---
 
@@ -1869,10 +1983,41 @@ await rpc_call(
 #         ],
 #         # ... more users
 #     ],
-#     [true],  # [1]: is_public - [true] or [false]
-#     1000     # [2]: unknown constant (ignore)
+#     [true],  # [1]: publicSettings (tag 2) - [isPubliclyReadable, isDiscoverable]
+#     1000,    # [2]: maxIndividualsShareLimit (tag 3)
+#     true,    # [3]: isPublicSharingAllowed (tag 4)
+#     null,    # [4]: null on every row observed
+#     null,    # [5]: null on every row observed
+#     [3, true, true],  # [6]: tag 7 - UNNAMED, deliberately unread
+#     false    # [7]: tag 8 - UNNAMED, deliberately unread
 # ]
 ```
+
+**Response fields (`GetProjectDetailsResponse`).** The shape above is the full
+live response, identical on 10/10 notebooks sampled 2026-08. Index 2 was
+documented as "unknown constant (ignore)" until #2130 — it is the enforced
+collaborator cap.
+
+| Index | Proto tag | Field | Decoded as |
+|-------|-----------|-------|------------|
+| 0 | 1 | *(shared-user rows)* | `ShareStatus.shared_users` — not declared in the mobile `GetProjectDetailsResponse`, which has no tag 1; see `_wire_contract.py::UNMAPPED` |
+| 1 | 2 | `publicSettings` | `ShareStatus.is_public` (via `ProjectPublicSettings.isPubliclyReadable`) |
+| 2 | 3 | `maxIndividualsShareLimit` | `ShareStatus.max_individuals_share_limit` |
+| 3 | 4 | `isPublicSharingAllowed` | `ShareStatus.is_public_sharing_allowed` |
+| 6 | 7 | *(unnamed)* | **unread** — live `[3, true, true]` |
+| 7 | 8 | *(unnamed)* | **unread** — live `false` |
+
+> Tags 7 and 8 are populated on every live row but the recovered mobile schema
+> declares only tags 2-4, so nothing names them. Exposing them would mean
+> inventing a field name, so they are recorded as deliberately-undecoded in
+> `tests/_guardrails/_wire_contract.py::UNREAD_SHARE_STATUS_SLOTS` rather than
+> surfaced. `test_unread_share_status_slots_stay_undecoded` enforces that record
+> — a constant that starts reading slot 6 or 7 fails the guardrail (#2130).
+>
+> Both decoded fields are **tri-state**: `None` means the response made no claim
+> (short responses are real — the pinned golden capture is three elements long)
+> and is never collapsed into `0` / `False`. `ProjectPublicSettings.isDiscoverable`
+> (tag 2 of the inner block) remains unread.
 
 ### RPC: SHARE_NOTEBOOK (QDyure)
 
@@ -2212,14 +2357,12 @@ await rpc_call(
 #     [
 #         task_id,              # [0]: str — the poll/import/cancel handle
 #         task_info,            # [1]: see below
-#         updated_like,         # [2]: [seconds, nanos], 9/9 rows — advanced across
-#                               #      all 3 within-cassette repeated-row transitions
-#         created_like,         # [3]: [seconds, nanos], 9/9 rows — constant across
-#                               #      all 4 repeated-row transitions
-#         stable_id,            # [4]: str in 6/9 rows, always '400237754469' — one
-#                               #      capture environment, so "not task-scoped" is
-#                               #      supported (3 cassettes, both modes) but the
-#                               #      ownership reading is NOT. Unread.
+#         updated_at,           # [2]: [seconds, nanos] — LAST-UPDATE time. Read as
+#                               #      ResearchTask.updated_at (#2122).
+#         created_at,           # [3]: [seconds, nanos] — CREATION time. Read as
+#                               #      ResearchTask.created_at (#2122).
+#         account_id,           # [4]: str — the account the run belongs to. Read as
+#                               #      ResearchTask.account_id (#2122).
 #     ],
 #     ...
 # ]
@@ -2231,7 +2374,8 @@ await rpc_call(
 #     discovery_mode,           # [2]: DiscoveryMode — 1 = DEFAULT_LLM_SEARCH (6/6
 #                               #      fast rows), 5 = DEEP_RESEARCH (3/3 deep rows).
 #                               #      The same enum the start params carry, so mode
-#                               #      is two-sided confirmable. Unread today.
+#                               #      is two-sided confirmable. Read as
+#                               #      ResearchTask.discovery_mode (#2122).
 #     sources_and_summary,      # [3]: [[sources], summary_text] — None until results
 #     status_code,              # [4]: see the status-code table below
 #     deep_run_block,           # [5]: DEEP ONLY (3/3 deep rows, 0/6 fast):
@@ -2253,6 +2397,9 @@ await rpc_call(
 #
 # A deep row is the SAME row type carrying three more populated slots, so a
 # reader that stops at [3] silently drops them (46 source rows captured):
+#   [2]  DiscoveredSource.hint — the backend's one-line "why this source" note.
+#        Live #2122: populated on 10/10 fast rows; the deep report row is null.
+#        Read as ResearchSource.hint
 #   [4]  unpopulated in every captured row
 #   [5]  favicon URL — 25/46 rows, every value a `t*.gstatic.com/faviconV2?…`
 #        `type=FAVICON` URL; unread
@@ -2282,6 +2429,32 @@ await rpc_call(
 # - For deep research, sources parsed from poll() carry `research_task_id`, which is
 #   later used by IMPORT_RESEARCH.
 ```
+
+#### Task-level metadata (`task[2]` / `[3]` / `[4]`, `task_info[2]`) — #2122
+
+These four always-populated slots were decoded in #2122. The two timestamps are
+`[seconds, nanos]` pairs; only the seconds are decoded, matching every other
+timestamp read in this client.
+
+| Slot | Meaning | Surfaced as |
+|------|---------|-------------|
+| `task[2]` | last-update time | `ResearchTask.updated_at` |
+| `task[3]` | creation time | `ResearchTask.created_at` |
+| `task[4]` | owning account id (opaque string) | `ResearchTask.account_id` |
+| `task_info[2]` | `DiscoveryMode` the run executes under | `ResearchTask.discovery_mode` |
+
+> **`task[2]` is update and `task[3]` is create** — the reverse of the labels in
+> issue #2122. Established the only way that distinguishes them: polling one
+> live run twice, 7.6s apart, `[2]` advanced while `[3]` held the value both
+> slots shared on the first poll. Reproduced on a second account, and
+> corroborated by 9/9 cassette task rows (`[2]` advanced across all 3
+> within-cassette repeated-row transitions; `[3]` was constant across all 4).
+>
+> **`task[4]` is account-scoped**, which the cassettes alone could not show —
+> all of them carry the same `400237754469`. A second live account produced
+> `838504205497`, each value constant across every task and poll of its account.
+> Whether it names the run's *starter* or the notebook's *owner* is **not**
+> established: both were the same account in both probes.
 
 #### Task status codes (`task_info[4]`)
 
@@ -2638,9 +2811,9 @@ propagates as `RateLimitError` / `RPCError`; a null result raises
 Retry a failed Studio artifact in place — the equivalent of the NotebookLM web
 UI "Retry" button. The failed artifact is **not** deleted first; the same
 `artifact_id` is preserved and the artifact moves from `failed` back to
-`in_progress`, so existing `poll_status()` / `wait_for_completion()` flows keep
-working against it. Captured/validated across video, audio, and infographic
-artifacts (issue #1319).
+`pending` (re-queued), so existing `poll_status()` / `wait_for_completion()`
+flows keep working against it. Captured/validated across video, audio, and
+infographic artifacts (issue #1319).
 
 ```python
 params = [
@@ -2670,10 +2843,11 @@ await rpc_call(
 
 **Response:** payload index `0` is a standard artifact row (positionally
 identical to a `LIST_ARTIFACTS` row): `row[0]` is the same `artifact_id`
-(returned as the task id) and `row[4] == 1` (`PROCESSING` → `in_progress`).
+(returned as the task id) and `row[4] == 1` (`ARTIFACT_STATUS_INITIALIZED` →
+`"pending"`; this was mislabelled `PROCESSING`/`in_progress` before #2127).
 
 Contract (ADR-0019 "async kickoff"): an accepted retry returns
-`GenerationStatus(status="in_progress")`; a synchronous server refusal
+`GenerationStatus(status="pending")`; a synchronous server refusal
 (`USER_DISPLAYABLE_ERROR` — rate limit, quota, or non-retryable artifact)
 **raises** the underlying `RateLimitError` / `RPCError`; a null / missing-id
 result raises `ArtifactFeatureUnavailableError`. A retry may still fail again
@@ -2784,6 +2958,92 @@ await rpc_call(
 ```
 
 **Note:** This is the dedicated RPC method for getting suggested report formats. Previously `ACT_ON_SOURCES` with `"suggested_report_formats"` command was attempted but it doesn't work correctly.
+
+---
+
+## Rejection Frames: `google.rpc.Status` at `wrb.fr` index 5
+
+**Verified 2026-08-13** (live probe + a sweep of all 141 cassettes).
+
+When a `batchexecute` RPC is rejected, the server answers with a `wrb.fr` frame
+whose *result* slot (index 2) is `null` and whose index 5 carries a
+JSON-array-encoded [`google.rpc.Status`](https://github.com/googleapis/googleapis/blob/master/google/rpc/status.proto).
+That is a **public** Google type, not a Tailwind message, so it is absent from
+`docs/mobile/schema.proto` and its positions are the proto tags minus one:
+
+| Index | `google.rpc.Status` field | Observed |
+|-------|---------------------------|----------|
+| 0 | `code` (tag 1) | Yes — see the table below |
+| 1 | `message` (tag 2) | **Never populated.** See "The reason gap" |
+| 2 | `details` (tag 3) | Yes — the `UserDisplayableError` block |
+
+Observed codes:
+
+| Payload | RPC | Where |
+|---------|-----|-------|
+| `[3]` INVALID_ARGUMENT | `CREATE_ARTIFACT` (`R7cb6c`) | Live 2026-08-13: audio overview on a source-less notebook |
+| `[3]` INVALID_ARGUMENT | streamed chat | `tests/cassettes/chat_ask_oversized_rejection.yaml` (#1472) |
+| `[3]` INVALID_ARGUMENT | `SHARE_NOTEBOOK` (`QDyure`) | `tests/cassettes/cli_share_add.yaml`, `cli_share_remove.yaml` — swallowed; the flow reports success |
+| `[3]` INVALID_ARGUMENT | `SHARE_ARTIFACT` (`RGP97b`) | `tests/cassettes/notebooks_share.yaml` — swallowed; the flow reports success |
+| `[5]` NOT_FOUND | `CREATE_ARTIFACT`, `RETRY_ARTIFACT`, `REVISE_SLIDE`, `GET_NOTEBOOK` | Live 2026-08-13 (unknown notebook / artifact id); #114 / #294 |
+| `[13]` INTERNAL | `REMOVE_RECENTLY_VIEWED` (`fejl7e`) | `tests/cassettes/notebooks_remove_from_recent.yaml` — treated as a **successful** no-op |
+| `[8, null, [[…UserDisplayableError…]]]` | any | The rate-limit / quota shape |
+
+A sweep of all 141 cassettes found 397 `wrb.fr` frames, only 5 of them
+null-result — and all 5 carried one of the shapes above. Four are `batchexecute`
+RPCs, across three method ids (`SHARE_NOTEBOOK` ×2, `SHARE_ARTIFACT`,
+`REMOVE_RECENTLY_VIEWED`); the fifth is the streamed-chat `[3]` from #1472,
+which carries no rpc id and is decoded by `_chat/wire.py`, not `decode_response`.
+
+**Open question.** Only `REMOVE_RECENTLY_VIEWED`'s tolerance has ever been
+reasoned about (a cosmetic no-op). Whether the two share rejections are benign
+or a refusal being reported as a successful share is unresolved and is *not*
+answered here.
+
+Byte-count framing note: the live `CREATE_ARTIFACT` rejection bodies declare
+chunk lengths two higher than the chunks actually are (`104` for 102 chars,
+`25` for 23), consistently across independent captures. `parse_chunked_response`
+is deliberately tolerant of that and counts it via `byte_count_mismatch_total`.
+
+### The reason gap
+
+`google.rpc.Status.message` is the one slot in this envelope where the *server*
+could state a human-readable reason. **No captured frame has ever populated
+it**: the bare rejections are length-1 arrays, and the recorded
+`UserDisplayableError` sample holds `null` there with an int-only detail body.
+
+So every rejection sentence this client prints today is **client-authored** —
+including "API rate limit or quota exceeded. Please wait before retrying.",
+which is a client guess at what a `UserDisplayableError` means, not something
+the server said. The decoder reads the `message` slot defensively (a non-empty
+string only) and leads with it when one ever arrives, but until then the guess
+is the ceiling. Do not describe this path as "carrying the server's error text"
+(#2188).
+
+### `allow_null` and status-tagged nulls
+
+`allow_null=True` means "an empty payload is an acceptable outcome". It used to
+also swallow a null the server had *tagged with a rejection*, which is how
+`generate_audio` came to report "Audio generation is unavailable" for a live
+INVALID_ARGUMENT. Callers that want the server's status instead pass
+`raise_on_null_status=True` (`CREATE_ARTIFACT`, `RETRY_ARTIFACT`,
+`REVISE_SLIDE` do — all three live-verified above). It is opt-in rather than
+blanket because three *other* RPCs are recorded answering a status on flows
+this client reports as successful (the table above); flipping them all at once
+would change behaviour nobody has evidence about. A swallowed status now logs
+at DEBUG, so the remaining cases are findable.
+
+### Artifact failures have no reason at all
+
+`Artifact` in `docs/mobile/schema.proto` has **no error or failure field**. An
+artifact accepted at create time that later transitions to
+`ARTIFACT_STATUS_FAILED` therefore carries nothing to explain itself: no cassette
+contains a status-4 row, and a live sweep of 27 notebooks / 99 rows found index 3
+holding `sources` and index 5 holding `null` on both real FAILED artifacts. The
+existence of `RETRY_ARTIFACT` (`Rytqqe`) is consistent with the backend not
+persisting a reason — retry is offered because the resource remembers nothing.
+Downstream, `_app/generate_retry.py` falls back to a generic
+`"{Type} generation failed"`, which is the honest ceiling for that path.
 
 ---
 

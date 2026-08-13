@@ -226,7 +226,9 @@ _REEXPORTED_RPC_ENUMS = [
     "AudioLength",
     "ChatGoal",
     "ChatResponseLength",
+    "DiscoveryMode",
     "DriveMimeType",
+    "DriveSourceStatus",
     "ExportType",
     "InfographicDetail",
     "InfographicOrientation",
@@ -267,6 +269,8 @@ _TOP_LEVEL_TYPE_EXPORTS = [
     "Collection",
     "ConnectionLimits",
     "ConversationTurn",
+    "ConversationTurnKey",
+    "DiscoveryMode",
     "DriveMimeType",
     "ExportType",
     "GenerationState",
@@ -383,6 +387,10 @@ _TOP_LEVEL_EXCEPTION_EXPORTS = [
 ]
 
 _TYPES_PRIVATE_HELPER_SEAMS = [
+    # Routed through the facade for ``_app.source_add``'s path heuristic: the
+    # ``_app`` boundary lint forbids importing the private ``_types`` sibling
+    # that declares it (#2202).
+    "_PATH_SHAPED_FILE_EXTENSIONS",
     "_SOURCE_TYPE_COMPAT_MAP",
     "_datetime_from_timestamp",
     "_extract_artifact_url",
@@ -510,6 +518,7 @@ def test_rpc_helper_reexports_are_canonical_identities() -> None:
     assert public_types.artifact_status_to_str is rpc_types.artifact_status_to_str
     assert public_types.source_status_to_str is rpc_types.source_status_to_str
     assert public_types.share_permission_to_str is rpc_types.share_permission_to_str
+    assert public_types.drive_source_status_to_str is rpc_types.drive_source_status_to_str
 
 
 def test_types_non_all_facade_attributes_are_frozen() -> None:

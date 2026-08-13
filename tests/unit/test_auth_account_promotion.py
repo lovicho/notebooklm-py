@@ -681,6 +681,58 @@ class TestAllThreeEntryPathsReachTheOneShot:
         assert not _scheduler()._workers_for_tests()
 
 
+def test_an_unfinished_exit_drain_actually_reaches_the_users_stderr(tmp_path: Path) -> None:
+    """The whole fix is a log line, so prove it survives interpreter shutdown.
+
+    A unit test can assert ``drain`` calls ``logger.warning``, and still leave
+    #2223 fully regressed: ``logging`` registers its own ``atexit`` shutdown at
+    import time, so whether our hook runs *before* handlers are torn down is a
+    LIFO ordering property of the real interpreter, not of the function. If
+    that ordering ever changes, or the logger loses its default WARNING floor,
+    the user is back to complete silence with every other test still green.
+
+    So this spawns a real process, leaves a promotion permanently stuck, and
+    asserts the warning is on stderr after it exits.
+    """
+    home = tmp_path / "home"
+    profile = home / "profiles" / "default"
+    profile.mkdir(parents=True)
+    storage = profile / "storage_state.json"
+    storage.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+
+    env = {
+        **os.environ,
+        "NOTEBOOKLM_HOME": str(home),
+        "PYTHONPATH": str(_SRC_ROOT),
+        "NOTEBOOKLM_PROMOTION_EXIT_TIMEOUT": "0.2",
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import threading\n"
+            "from pathlib import Path\n"
+            "from notebooklm._auth.profile_migration import LegacyPromotionScheduler\n"
+            "from notebooklm._auth.profile_store import ProfileStore\n"
+            "class Stuck:\n"
+            "    def promote(self, store):\n"
+            "        threading.Event().wait(120)\n"
+            f"store = ProfileStore(Path({str(storage)!r}))\n"
+            "LegacyPromotionScheduler.process_default().schedule(store, Stuck())\n",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "was still running when the shared" in result.stderr, (
+        "the exit drain gave up without telling the user anything: " + repr(result.stderr)
+    )
+    assert str(storage) in result.stderr, "the warning must name the profile at risk"
+
+
 def test_short_lived_process_still_lands_the_durable_promotion(tmp_path: Path) -> None:
     """A real process must migrate and scrub before it exits.
 

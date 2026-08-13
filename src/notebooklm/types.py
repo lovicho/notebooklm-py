@@ -25,6 +25,7 @@ from ._types.chat import (
     ChatReference,
     ChatSettings,
     ConversationTurn,
+    ConversationTurnKey,
 )
 from ._types.collections import Collection
 from ._types.common import (
@@ -35,6 +36,17 @@ from ._types.common import (
     RpcTelemetryEvent,
     UnknownTypeWarning,
     UserSettings,
+)
+from ._types.documents import (
+    BlockKind,
+    BlockStyle,
+    DocumentAnnotation,
+    DocumentBlock,
+    ListInfo,
+    ListStyle,
+    StructuredDocument,
+    TextSpan,
+    utf16_len,
 )
 from ._types.labels import Label
 from ._types.mind_maps import MindMap, MindMapKind
@@ -88,12 +100,15 @@ from .exceptions import (
 
 # Re-export enums from rpc/types.py for convenience
 from .rpc.types import (
+    SOURCE_STATUS_LABELS,
     ArtifactStatus,
     AudioFormat,
     AudioLength,
     ChatGoal,
     ChatResponseLength,
+    DiscoveryMode,
     DriveMimeType,
+    DriveSourceStatus,
     ExportType,
     InfographicDetail,
     InfographicOrientation,
@@ -110,6 +125,8 @@ from .rpc.types import (
     VideoFormat,
     VideoStyle,
     artifact_status_to_str,
+    discovery_mode_to_str,
+    drive_source_status_to_str,
     share_permission_to_str,
     source_status_to_str,
 )
@@ -154,6 +171,14 @@ GrpcStatusCode = _GrpcStatusCode
 normalize_grpc_status = _normalize_grpc_status
 normalize_rpc_code = _normalize_rpc_code
 
+# The local-file extension policy, routed through this facade for the ``_app``
+# layer for the same reason as the gRPC table above: the boundary lint
+# (``tests/_guardrails/test_app_boundary.py``) forbids ``_app`` from importing
+# private siblings such as ``notebooklm._types``, and the transport-neutral
+# ``source add`` path heuristic needs the derived set. Internal plumbing, so
+# intentionally absent from ``__all__``.
+_PATH_SHAPED_FILE_EXTENSIONS = _source_types._PATH_SHAPED_FILE_EXTENSIONS
+
 # Guards the ``ResearchSourceInput`` import from being removed as unused:
 # ``typing.get_type_hints(CitedSourceSelection)`` needs it in this facade's
 # globals after ``CitedSourceSelection.__module__`` is rewritten below.
@@ -184,7 +209,17 @@ __all__ = [
     "Label",
     "Collection",
     "ConversationTurn",
+    "ConversationTurnKey",
     "ChatReference",
+    "BlockKind",
+    "BlockStyle",
+    "DocumentAnnotation",
+    "DocumentBlock",
+    "ListInfo",
+    "ListStyle",
+    "StructuredDocument",
+    "TextSpan",
+    "utf16_len",
     "AskResult",
     "ChatMode",
     "ChatSettings",
@@ -245,12 +280,17 @@ __all__ = [
     "DriveMimeType",
     "ExportType",
     "SourceStatus",
+    "DriveSourceStatus",
+    "DiscoveryMode",
     "ShareAccess",
     "ShareViewLevel",
     "SharePermission",
     # Helper functions
     "artifact_status_to_str",
+    "discovery_mode_to_str",
+    "drive_source_status_to_str",
     "share_permission_to_str",
+    "SOURCE_STATUS_LABELS",
     "source_status_to_str",
 ]
 
@@ -277,6 +317,7 @@ for _public_moved_type in (
     ChatSettings,
     Collection,
     ConversationTurn,
+    ConversationTurnKey,
     GenerationState,
     GenerationStatus,
     Label,

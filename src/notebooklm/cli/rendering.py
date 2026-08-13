@@ -300,6 +300,7 @@ def get_source_type_display(source_type: str) -> str:
         "pdf": "📄 PDF",
         "pasted_text": "📝 Pasted Text",
         "docx": "📝 DOCX",
+        "powerpoint": "📊 PowerPoint",
         "web_page": "🌐 Web Page",
         "markdown": "📝 Markdown",
         "youtube": "🎬 YouTube",

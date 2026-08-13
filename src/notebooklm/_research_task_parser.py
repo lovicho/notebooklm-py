@@ -257,6 +257,7 @@ def _parse_source_row(
             result_type=result_type,
             research_task_id=task_id,
             source_ordinal=row.source_ordinal,
+            hint=row.hint,
         )
 
     report = source_report
@@ -292,6 +293,8 @@ def parse_research_task_models(result: Any) -> list[ResearchTask]:
         sources_data, summary_opt = _extract_sources_and_summary(task_info)
         status_code = _extract_status_code(task_info)
         source_type = _extract_source_type(task_info)
+        discovery_mode = ResearchTaskInfoRow.discovery_mode(task_info)
+        task_row = ResearchTaskRow(task_data)
 
         parsed_sources: list[ResearchSource] = []
         report = ""
@@ -319,6 +322,14 @@ def parse_research_task_models(result: Any) -> list[ResearchTask]:
                 # Search source (1=web, 2=drive) backing the source-specific
                 # remediation hint on a terminal run (issue #1964).
                 source_type=source_type,
+                # Always-populated task metadata recovered by #2122: the mode
+                # the run is executing under, its create/update times, and the
+                # account it belongs to. Every one of these is a soft read —
+                # a poll that omits them still yields a usable task.
+                discovery_mode=discovery_mode,
+                created_at=task_row.created_at,
+                updated_at=task_row.updated_at,
+                account_id=task_row.account_id,
             )
         )
 

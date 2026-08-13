@@ -145,9 +145,14 @@ def validate_add_research_flags(*, import_all: bool, cited_only: bool, no_wait: 
     if cited_only and not import_all:
         raise ValidationError("--cited-only requires --import-all")
     if no_wait and import_all:
+        # Both follow-ups are named because they differ in kind, not just in
+        # spelling: ``research wait --import-all`` blocks until the run lands,
+        # ``research import`` refuses a run that has not (#2206). Pointing only
+        # at the blocking one left ``--no-wait`` with no non-blocking route.
         raise ValidationError(
-            "--import-all requires --wait (the default) or a separate "
-            "'research wait --import-all' after --no-wait."
+            "--import-all requires --wait (the default), or after --no-wait a "
+            "separate 'research wait --import-all' (blocks) or 'research import' "
+            "(imports an already-completed run, never blocks)."
         )
 
 

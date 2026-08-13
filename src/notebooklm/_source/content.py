@@ -7,8 +7,10 @@ import logging
 import reprlib
 from typing import Any, Literal
 
+from .._row_adapters.documents import build_document
 from .._row_adapters.sources import SourceFulltextRow, SourceGuideRow
 from .._runtime.contracts import RpcCaller
+from .._types.documents import StructuredDocument
 from .._types.research import SourceGuide
 from .._types.sources import _disambiguate_type_code, _pdf_url_title_fallback
 from ..rpc import RPCMethod
@@ -76,6 +78,7 @@ class SourceContentRenderer:
         source_type = None
         url = None
         content = ""
+        document = StructuredDocument()
 
         # All positional knowledge for the ``GET_SOURCE`` envelope (descriptor
         # row, metadata, HTML / text blocks) lives in ``SourceFulltextRow`` (the
@@ -116,6 +119,16 @@ class SourceContentRenderer:
                 )
             url = _extract_source_url(metadata, allow_bare_http=False)
 
+        # Parse the document tree (#2128) regardless of which rendering the
+        # caller asked for. The response carries it either way — the two
+        # ``output_format`` values pick which *legacy flat* rendition fills
+        # ``content``, not which parts of the payload exist — so gating the
+        # parse on the text branch would leave a markdown caller unable to
+        # resolve citation offsets against a tree that was right there.
+        content_blocks = fulltext_row.text_content_blocks
+        if content_blocks is not None:
+            document = build_document(content_blocks)
+
         if output_format == "markdown":
             # An absent HTML rendition legitimately means "no markdown
             # rendition" (warned + empty below).
@@ -129,13 +142,13 @@ class SourceContentRenderer:
                     source_id,
                     source_type,
                 )
-        else:
+        elif content_blocks is not None:
             # An absent text block legitimately means "no text content"
-            # (empty content + warning).
-            content_blocks = fulltext_row.text_content_blocks
-            if content_blocks is not None:
-                texts = self.extract_all_text(content_blocks)
-                content = "\n".join(texts)
+            # (empty content + warning). ``content`` stays the flat legacy
+            # rendering — byte-identical, so no existing caller moves — while
+            # ``document`` above retains the structure and offsets.
+            texts = self.extract_all_text(content_blocks)
+            content = "\n".join(texts)
 
         if not content:
             self._logger.warning(
@@ -156,12 +169,24 @@ class SourceContentRenderer:
             _type_code=source_type,
             url=url,
             char_count=len(content),
+            document=document,
         )
 
     def extract_all_text(
         self, data: builtins.list[Any], max_depth: int = 100
     ) -> builtins.list[str]:
-        """Recursively extract all text strings from nested arrays."""
+        """Recursively extract all text strings from nested arrays.
+
+        The **legacy** flat rendering behind :attr:`SourceFulltext.content`.
+        It is deliberately frozen: every string in traversal order, structure
+        and offsets discarded, so existing callers see byte-identical output.
+        The joins its caller applies insert separators the backend's character
+        ranges never accounted for, which is why no citation offset can be used
+        against the result (#2128). The offset-bearing parse of the same tree is
+        :func:`notebooklm._row_adapters.documents.build_document`, surfaced as
+        :attr:`SourceFulltext.document`; prefer it for anything that needs to
+        know *where* text sits.
+        """
         if max_depth <= 0:
             self._logger.warning("Max recursion depth reached in text extraction")
             return []

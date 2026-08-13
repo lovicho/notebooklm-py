@@ -1198,7 +1198,9 @@ reports still make sense:
   `_auth/profile_migration.py` owns legacy two-read account resolution, typed sanitization,
   only-if-absent embed-before-scrub promotion, sibling `context.json.lock` cleanup, the canonical
   once-per-path daemon scheduler, and post-login/account-write reconciliation. Per-RPC reads do not
-  wait for promotion; the exit hook drains for two seconds per snapshot worker.
+  wait for promotion; the exit hook drains outstanding workers within one
+  shared budget (30 seconds by default, configurable) and warns if any
+  outlives it.
   `_auth/storage.py` retains the remint and raw-signature compatibility seams, the minted
   snapshot/error adapter, and token policies. Minted input is frozen before path/lock work: the live jar is copied with the raw
   master-token serializer fields (including `same_site="None"`, not the filtering/SameSite-lossy
@@ -1353,7 +1355,9 @@ gate their writes correctly.
   the in-band/legacy/in-band anti-race sequence and a lossless raw compatibility projection;
   promotion remains only-if-absent and embed-before-scrub. The context owner retains its separate
   10-second `FileLock` and public atomic JSON write. Reads schedule canonical once-per-path daemon
-  workers without waiting, and the process exit hook drains for two seconds per snapshot worker.
+  workers without waiting, and the process exit hook drains them within one shared
+  budget (30 seconds by default, configurable), warning if any is still running
+  when it expires.
   Login reconciles only after `APPLIED` and outside the profile lock; account write and clear keep
   their distinct scrub ordering. `_auth/storage.py` remains the v0.x signature/result facade. The
   measured boundary is 1,150 storage + 311 migration + 794 store + 96 filter = 2,351 lines. Loader,

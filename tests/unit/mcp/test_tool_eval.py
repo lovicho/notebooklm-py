@@ -31,8 +31,16 @@ pytest.importorskip("fastmcp")
 #: to ~36.0k). Move these DOWN as the surface gets leaner; a rise means
 #: description/param bloat that must be justified, not rubber-stamped.
 SCHEMA_CHAR_BUDGET = (
-    39_100  # total serialized inputSchema + description chars (current 39_081; +19 slack)
+    39_370  # total serialized inputSchema + description chars (current 39_349; +21 slack)
 )
+# #2111 (Drive-backed source health) added `drive_status_label` to the `source_list`
+# / `source_read` roster descriptions plus the two sentences an agent needs to act on
+# it: that it is a SEPARATE axis from `status_label`, and that a deleted/unshared
+# Drive file keeps reading `status_label="ready"` because ingestion did finish. That
+# is the whole point of the field — emitting it without saying what it means would
+# leave the signal as invisible in practice as it was on the wire. Net 39_081 ->
+# 39_349 (+268) after trimming the first draft (~+516) by half. Ratcheted UP to
+# 39_370, keeping the ~20-char slack convention.
 # #1964 (Drive research termination reasons, merged to main independently of this
 # ratchet) added `research_status`'s `termination_reason` field + docstring
 # paragraph explaining the no_results/cancelled/unknown split — genuine new

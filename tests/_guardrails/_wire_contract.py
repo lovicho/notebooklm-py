@@ -48,11 +48,23 @@ from dataclasses import dataclass
 #: select the wire copy.
 WIRE = "orchestration.v1"
 SOURCE_SETTINGS = "tailwind.v1/source_settings"
+#: ``GET_SHARE_STATUS`` decodes the sharing service's ``GetProjectDetailsResponse``,
+#: which lives in its own package rather than the ``orchestration.v1`` wire section.
+SHARING = "labs_tailwind_sharing_service"
+#: ``ProjectPublicSettings`` (the nested ``publicSettings`` block) is declared in
+#: the shared projects package, not alongside the sharing service RPC.
+SHARING_COMMON = "common.protos/projects.pb.dart"
 #: Placeholder ``cls`` for constants declared at module scope rather than on a class.
 MODULE_LEVEL = "<module>"
 # Must include the package prefix: `tailwind_doc.pb.dart` alone also matches the
 # persistence copy of the same message, which carries different tags.
 DOC = "orchestration.v1/tailwind_doc.pb.dart"
+# ``TextStyle`` / ``ParagraphStyle`` / ``BulletInfo`` live in the sibling
+# ``_common`` file. The distinction is load-bearing, not cosmetic: the
+# persistence copy of ``BulletInfo`` numbers ``nestingLevel`` 1 where the wire
+# copy numbers it 3, so a missing section hint would assert against the wrong
+# tags and pass for the wrong reason.
+DOC_COMMON = "orchestration.v1/tailwind_doc_common.pb.dart"
 
 
 @dataclass(frozen=True)
@@ -140,6 +152,20 @@ MAPPINGS: tuple[Mapping, ...] = (
         section=SOURCE_SETTINGS,
         note="the documented source[3][1] descent",
     ),
+    Mapping(
+        "sources",
+        "SourceRow",
+        "_DRIVE_STATUS_INNER_POS",
+        "SourceSettings",
+        "userDriveSourceStatus",
+        section=SOURCE_SETTINGS,
+        note=(
+            "#2111 — the sibling of status in the same settings block. "
+            "Live: 4/409 source rows carry settings=[null,2,null,3] (all "
+            "Drive-backed, all DRIVE_SOURCE_STATUS_ACTIVE); the other 405 "
+            "omit the slot. Read by SourceRow.drive_status."
+        ),
+    ),
     # ---- Source row: SourceMetadata ---------------------------------------
     Mapping(
         "sources", "SourceRow", "_META_TYPE_POS", "SourceMetadata", "originalSourceContentType"
@@ -147,13 +173,15 @@ MAPPINGS: tuple[Mapping, ...] = (
     Mapping(
         "sources",
         "SourceRow",
-        "_META_BARE_URL_POS",
+        "_META_GOOGLE_DOCS_POS",
         "SourceMetadata",
         "googleDocsMetadata",
         note=(
-            "MISLEADING NAME: index 0 is googleDocsMetadata, not a bare URL. The "
-            "url_allow_bare_http branch that reads it as a str is dead — real "
-            "metadata[0] is null 3076/3116 and a list 40/3116, never a str."
+            "renamed from _META_BARE_URL_POS in #2113 — index 0 is "
+            "googleDocsMetadata, not a bare URL. The url_allow_bare_http branch "
+            "that reads it as a str is dead: real metadata[0] is null 3076/3116 "
+            "and a list 40/3116, never a str. The list case is the Drive "
+            "documentId block read by SourceRow.drive_document_id."
         ),
     ),
     Mapping("sources", "SourceRow", "_META_URL_POS", "SourceMetadata", "webpageMetadata"),
@@ -163,6 +191,28 @@ MAPPINGS: tuple[Mapping, ...] = (
         "_META_DRIVE_DESCRIPTOR_POS",
         "SourceMetadata",
         "googleDriveSourceMetadata",
+    ),
+    # ---- Source row: the Drive documentId slot (#2113) ---------------------
+    Mapping(
+        "sources",
+        "SourceRow",
+        "_DRIVE_DOCUMENT_ID_POS",
+        "GoogleDriveSourceMetadata",
+        "documentId",
+        note=(
+            "one constant indexes BOTH Drive blocks: GoogleDocsSourceMetadata "
+            "(metadata[0]) and GoogleDriveSourceMetadata (metadata[9]) each "
+            "declare documentId as tag 1, so both read index 0. Asserted here "
+            "against the Drive copy; the Docs copy is checked by "
+            "test_google_docs_document_id_shares_the_drive_tag."
+        ),
+    ),
+    Mapping(
+        "sources",
+        "SourceRow",
+        "_DRIVE_DESCRIPTOR_MIME_POS",
+        "GoogleDriveSourceMetadata",
+        "mimeType",
     ),
     # ---- Artifact row: Artifact -------------------------------------------
     Mapping("artifacts", "ArtifactRow", "_ID_POS", "Artifact", "artifactId"),
@@ -182,28 +232,287 @@ MAPPINGS: tuple[Mapping, ...] = (
     ),
     Mapping("artifacts", "ArtifactRow", "_INFOGRAPHIC_METADATA_POS", "Artifact", "infographic"),
     Mapping("artifacts", "ArtifactRow", "_SLIDE_DECK_METADATA_POS", "Artifact", "slides"),
-    # Known-wrong: these two name fields that do not exist. Index 3 is
-    # `sources` (repeated message) and index 5 is `isPubliclyReadable` (bool).
-    # `failed_error_text` is consequently dead code that always returns None.
+    # ---- Inside the AppArtifact options block (#2195) ----------------------
     Mapping(
         "artifacts",
         "ArtifactRow",
-        "_ERROR_TEXT_POS",
-        "Artifact",
-        "sources",
-        known_bad="#2134",
-        note="constant claims 'failed-artifact error text'; the field is `sources`",
+        "_GENERATION_OPTIONS_POS",
+        "AppArtifact",
+        "generationOptions",
+        note="the data[9][1] descent shared by variant, generation_prompt and the option pairs",
     ),
     Mapping(
         "artifacts",
         "ArtifactRow",
-        "_ERROR_PAYLOAD_POS",
-        "Artifact",
-        "isPubliclyReadable",
-        known_bad="#2134",
-        note="constant claims 'nested error payload'; the field is `isPubliclyReadable`",
+        "_APP_TYPE_POS",
+        "AppArtifactGenerationOptions",
+        "appType",
+        note=(
+            "ArtifactRow.variant. AppType: 1=FLASHCARDS, 2=QUIZ, 4=MINDMAP "
+            "(docs/mobile/enums.txt), matching the variant codes the payload "
+            "builders send."
+        ),
+    ),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_FLASHCARDS_OPTIONS_POS",
+        "AppArtifactGenerationOptions",
+        "flashcardsGenerationOptions",
+        note=(
+            "#2195 — live-verified: a FEWER(1)+HARD(3) flashcards request echoes "
+            "back data[9][1][6] == [1, 3] while data[9][1][7] stays null."
+        ),
+    ),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_QUIZ_OPTIONS_POS",
+        "AppArtifactGenerationOptions",
+        "quizGenerationOptions",
+        note=(
+            "#2195 — the quiz sibling, live-verified the same way: a "
+            "FEWER(1)+HARD(3) quiz request echoes back data[9][1][7] == [1, 3]."
+        ),
+    ),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_OPTION_QUANTITY_POS",
+        "QuizGenerationOptions",
+        "questionQuantity",
+        note=(
+            "one constant indexes BOTH option messages: FlashcardsGenerationOptions "
+            "declares cardQuantity at the same tag 1. Asserted here against the quiz "
+            "copy; the flashcards copy is checked by "
+            "test_flashcards_option_pair_shares_the_quiz_tags."
+        ),
+    ),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_OPTION_DIFFICULTY_POS",
+        "QuizGenerationOptions",
+        "quizDifficulty",
+        note="likewise shared with FlashcardsGenerationOptions.flashcardsDifficulty (tag 2).",
     ),
     # ---- Answer row: AnswerResponse / TailwindDoc -------------------------
+    # ---- Citation + TailwindDoc tree (#2120, #2128) ------------------------
+    # Every one of these was UNMAPPED or absent before #2120. Recovering the
+    # ``tailwind_doc`` section of the schema is what turned the citation
+    # descent from guesswork into an assertion — and it is what showed the
+    # fragment's elements sit one level below ``Citation.fragment``, which was
+    # the whole of the truncation bug.
+    Mapping("chat", "CitationDetail", "_FRAGMENT_POS", "Citation", "fragment", section=DOC),
+    Mapping(
+        "chat",
+        "CitationDetail",
+        "_SOURCE_ID_POS",
+        "Citation",
+        "sourceAttribution",
+        section=DOC,
+    ),
+    Mapping(
+        "chat",
+        "CitationDetail",
+        "_FRAGMENT_ELEMENTS_POS",
+        "TailwindDocFragment",
+        "elements",
+        section=DOC,
+        note=(
+            "the second level of the descent: Citation.fragment is a message, "
+            "and stopping at it yields a 1-element wrapper — the #2120 defect"
+        ),
+    ),
+    Mapping(
+        "chat",
+        "CitationDetail",
+        "_FRAGMENT_RANGE_START_POS",
+        "Range",
+        "startIndex",
+        section=DOC,
+    ),
+    Mapping("chat", "CitationDetail", "_FRAGMENT_RANGE_END_POS", "Range", "endIndex", section=DOC),
+    Mapping("documents", "DocumentBodyRow", "_CONTENT_POS", "Body", "content", section=DOC),
+    Mapping(
+        "documents",
+        "DocumentBodyRow",
+        "_ANNOTATIONS_POS",
+        "Body",
+        "inlineObjectLocations",
+        section=DOC,
+    ),
+    Mapping(
+        "documents",
+        "StructuralElementRow",
+        "_START_POS",
+        "StructuralElement",
+        "startIndex",
+        section=DOC,
+    ),
+    Mapping(
+        "documents",
+        "StructuralElementRow",
+        "_END_POS",
+        "StructuralElement",
+        "endIndex",
+        section=DOC,
+    ),
+    Mapping(
+        "documents",
+        "StructuralElementRow",
+        "_PARAGRAPH_POS",
+        "StructuralElement",
+        "paragraph",
+        section=DOC,
+    ),
+    Mapping(
+        "documents", "StructuralElementRow", "_TABLE_POS", "StructuralElement", "table", section=DOC
+    ),
+    Mapping(
+        "documents", "StructuralElementRow", "_IMAGE_POS", "StructuralElement", "image", section=DOC
+    ),
+    Mapping(
+        "documents",
+        "StructuralElementRow",
+        "_CODE_BLOCK_POS",
+        "StructuralElement",
+        "codeBlock",
+        section=DOC,
+    ),
+    Mapping(
+        "documents",
+        "StructuralElementRow",
+        "_A2UI_BLOCK_POS",
+        "StructuralElement",
+        "a2uiBlock",
+        section=DOC,
+    ),
+    Mapping(
+        "documents",
+        "StructuralElementRow",
+        "_THOUGHT_POS",
+        "StructuralElement",
+        "thought",
+        section=DOC,
+    ),
+    Mapping(
+        "documents",
+        "StructuralElementRow",
+        "_FUNCTION_CALL_POS",
+        "StructuralElement",
+        "functionCall",
+        section=DOC,
+    ),
+    Mapping(
+        "documents",
+        "StructuralElementRow",
+        "_FUNCTION_RESPONSE_POS",
+        "StructuralElement",
+        "functionResponse",
+        section=DOC,
+    ),
+    Mapping(
+        "documents",
+        "StructuralElementRow",
+        "_HORIZONTAL_RULE_POS",
+        "StructuralElement",
+        "horizontalRule",
+        section=DOC,
+    ),
+    Mapping("documents", "TableRow", "_TABLE_ROWS_POS", "Table", "tableRows", section=DOC),
+    Mapping("documents", "TableRow", "_ROW_START_POS", "TableRow", "startIndex", section=DOC),
+    Mapping("documents", "TableRow", "_ROW_END_POS", "TableRow", "endIndex", section=DOC),
+    Mapping("documents", "TableRow", "_ROW_CELLS_POS", "TableRow", "tableCells", section=DOC),
+    Mapping("documents", "TableRow", "_CELL_START_POS", "TableCell", "startIndex", section=DOC),
+    Mapping("documents", "TableRow", "_CELL_END_POS", "TableCell", "endIndex", section=DOC),
+    Mapping("documents", "TableRow", "_CELL_CONTENT_POS", "TableCell", "content", section=DOC),
+    Mapping("documents", "ParagraphRow", "_ELEMENTS_POS", "Paragraph", "elements", section=DOC),
+    Mapping("documents", "ParagraphRow", "_STYLE_POS", "Paragraph", "paragraphStyle", section=DOC),
+    Mapping(
+        "documents", "ParagraphRow", "_BULLET_INFO_POS", "Paragraph", "bulletInfo", section=DOC
+    ),
+    Mapping(
+        "documents",
+        "ParagraphRow",
+        "_NAMED_STYLE_POS",
+        "ParagraphStyle",
+        "namedStyleType",
+        section=DOC_COMMON,
+    ),
+    Mapping(
+        "documents",
+        "ParagraphElementRow",
+        "_START_POS",
+        "ParagraphElement",
+        "startIndex",
+        section=DOC,
+    ),
+    Mapping(
+        "documents",
+        "ParagraphElementRow",
+        "_END_POS",
+        "ParagraphElement",
+        "endIndex",
+        section=DOC,
+    ),
+    Mapping(
+        "documents",
+        "ParagraphElementRow",
+        "_TEXT_RUN_POS",
+        "ParagraphElement",
+        "textRun",
+        section=DOC,
+    ),
+    Mapping("documents", "TextRunRow", "_CONTENT_POS", "TextRun", "content", section=DOC),
+    Mapping("documents", "TextRunRow", "_STYLE_POS", "TextRun", "textStyle", section=DOC),
+    Mapping("documents", "TextRunRow", "_BOLD_POS", "TextStyle", "bold", section=DOC_COMMON),
+    Mapping("documents", "TextRunRow", "_ITALIC_POS", "TextStyle", "italic", section=DOC_COMMON),
+    Mapping(
+        "documents",
+        "TextRunRow",
+        "_UNDERLINE_POS",
+        "TextStyle",
+        "underline",
+        section=DOC_COMMON,
+    ),
+    Mapping("documents", "TextRunRow", "_URL_POS", "TextStyle", "url", section=DOC_COMMON),
+    Mapping(
+        "documents",
+        "BulletInfoRow",
+        "_NESTING_LEVEL_POS",
+        "BulletInfo",
+        "nestingLevel",
+        section=DOC_COMMON,
+    ),
+    Mapping(
+        "documents",
+        "AnnotationEntryRow",
+        "_OBJECT_ID_POS",
+        "AnnotationMapEntry",
+        "objectId",
+        section=DOC,
+        note=(
+            "objectId is tag 1 and contentRange tag 2 — the order #2120's issue "
+            "body transcribed the other way round; the live capture matches the "
+            "schema, and the id is what joins an annotation to its citation"
+        ),
+    ),
+    Mapping(
+        "documents",
+        "AnnotationEntryRow",
+        "_RANGE_POS",
+        "AnnotationMapEntry",
+        "contentRange",
+        section=DOC,
+    ),
+    Mapping(
+        "documents", "AnnotationEntryRow", "_OBJECT_ID_VALUE_POS", "ObjectId", "id", section=DOC
+    ),
+    Mapping(
+        "documents", "AnnotationEntryRow", "_RANGE_START_POS", "Range", "startIndex", section=DOC
+    ),
+    Mapping("documents", "AnnotationEntryRow", "_RANGE_END_POS", "Range", "endIndex", section=DOC),
     Mapping("chat", "AnswerRow", "_TEXT_POS", "AnswerResponse", "response"),
     Mapping("chat", "AnswerRow", "_CONV_BLOCK_POS", "AnswerResponse", "conversationTurnKey"),
     Mapping("chat", "AnswerRow", "_TYPE_BLOCK_POS", "AnswerResponse", "responseDoc"),
@@ -215,6 +524,18 @@ MAPPINGS: tuple[Mapping, ...] = (
         "objects",
         section=DOC,
         note="nested inside responseDoc, not a top-level AnswerResponse index",
+    ),
+    Mapping(
+        "chat",
+        "AnswerRow",
+        "_DOC_BODY_POS",
+        "TailwindDoc",
+        "body",
+        section=DOC,
+        note=(
+            "nested inside responseDoc; the answer's own document body, whose "
+            "annotation map anchors each citation to a range of the answer (#2120)"
+        ),
     ),
     Mapping(
         "chat",
@@ -241,9 +562,80 @@ MAPPINGS: tuple[Mapping, ...] = (
     Mapping("notes", "NoteRow", "_CONTENT_POS", "ProjectNote", "content"),
     Mapping("notes", "NoteRow", "_INNER_CONTENT_POS", "ProjectNote", "content"),
     Mapping("notes", "NoteRow", "_INNER_TITLE_POS", "ProjectNote", "name"),
+    Mapping(
+        "chat",
+        "StreamEnvelopeRow",
+        "_IS_FINAL_RESPONSE_POS",
+        "GenerateFreeFormStreamedResponse",
+        "isFinalResponse",
+        note=(
+            "#2122 — the backend's explicit end-of-stream marker, previously "
+            "unread while the parser inferred the answer with a longest-wins "
+            "heuristic. Live: false on every chunk but the last and true on "
+            "exactly the last, across a 5-chunk and a 6-chunk stream."
+        ),
+    ),
+    # ---- Chat: ConversationTurnKey (inside AnswerResponse tag 3) -----------
+    # The three slots of the key at ``answer_row[2]``. Slot 0 keeps its proto
+    # name on the public type; slot 1 does NOT, because its proto name
+    # contradicts every observation. See ``ConversationTurnKey``'s docstring.
+    Mapping(
+        "chat",
+        "AnswerRow",
+        "_TURN_KEY_SESSION_ID_POS",
+        "ConversationTurnKey",
+        "sessionId",
+        note=(
+            "#2122 — surfaced as ConversationTurnKey.session_id, under its proto "
+            "name because the evidence about what it holds is mixed: a live "
+            "two-turn probe saw the hPTbtc-resolved conversation id here, while "
+            "this repo's 4 recorded chat cassettes show it differing from the "
+            "recorded hPTbtc id. It is the same slot AnswerRow."
+            "server_conversation_id reads, which #659 established is a "
+            "per-stream id. Nothing is claimed for it"
+        ),
+    ),
+    Mapping(
+        "chat",
+        "AnswerRow",
+        "_TURN_KEY_TURN_ID_POS",
+        "ConversationTurnKey",
+        "conversationId",
+        note=(
+            "#2122 — surfaced as ConversationTurnKey.turn_id, NOT under its "
+            "proto name: live, this slot held a DIFFERENT uuid on each of two "
+            "turns of one conversation, so it identifies the turn"
+        ),
+    ),
+    Mapping(
+        "chat",
+        "AnswerRow",
+        "_TURN_KEY_TURN_CODE_POS",
+        "ConversationTurnKey",
+        "fieldType",
+        note=(
+            "#2122 — surfaced as ConversationTurnKey.turn_code and NOT "
+            "interpreted. The extractor's `fieldType` label is a placeholder "
+            "name, and the observed values (2187103311 / 3083048340 / "
+            "2502166488 — one per turn, constant across that turn's chunks) are "
+            "not type tags. Carried verbatim so the key can be rebuilt."
+        ),
+    ),
     # ---- Research: DiscoveredSource ---------------------------------------
     Mapping("research", "ResearchResultRow", "_URL_POS", "DiscoveredSource", "sourceUrl"),
     Mapping("research", "ResearchResultRow", "_TITLE_POS", "DiscoveredSource", "title"),
+    Mapping(
+        "research",
+        "ResearchResultRow",
+        "_HINT_POS",
+        "DiscoveredSource",
+        "hint",
+        note=(
+            "#2122 — the backend's one-line 'why this source' note. Live: "
+            "populated on 10/10 fast-research rows; the deep-research report "
+            "row leaves it null"
+        ),
+    ),
     Mapping("research", "ResearchResultRow", "_RESULT_TYPE_POS", "DiscoveredSource", "corpusType"),
     # ---- Notebooks: PromptSuggestion --------------------------------------
     Mapping("notebooks", "PromptSuggestionRow", "_TITLE_POS", "PromptSuggestion", "title"),
@@ -274,6 +666,54 @@ MAPPINGS: tuple[Mapping, ...] = (
         tag=3,
         note="maxSourcesPerProject — name unrecovered; verified live on both transports",
     ),
+    # ---- Share status: GetProjectDetailsResponse (#2130) -------------------
+    # GET_SHARE_STATUS decodes the sharing service's GetProjectDetailsResponse.
+    # Live shape, identical on 10/10 notebooks in a 2026-08 sweep:
+    #   [[<user rows>], null, 1000, true, null, null, [3, true, true], false]
+    Mapping(
+        "sharing",
+        "ShareStatus",
+        "_PUBLIC_BLOCK_POS",
+        "GetProjectDetailsResponse",
+        "publicSettings",
+        section=SHARING,
+        note="the long-standing data[1] descent, now named",
+    ),
+    Mapping(
+        "sharing",
+        "ShareStatus",
+        "_IS_PUBLIC_INNER_POS",
+        "ProjectPublicSettings",
+        "isPubliclyReadable",
+        section=SHARING_COMMON,
+        note="the inner data[1][0] flag behind ShareStatus.is_public",
+    ),
+    Mapping(
+        "sharing",
+        "ShareStatus",
+        "_MAX_SHARE_LIMIT_POS",
+        "GetProjectDetailsResponse",
+        "maxIndividualsShareLimit",
+        section=SHARING,
+        note=(
+            "#2130 — live 1000 on 10/10 notebooks sampled. Previously read by "
+            "nobody and described in the parser docstring as the bare literal "
+            "1000. Read by ShareStatus.max_individuals_share_limit."
+        ),
+    ),
+    Mapping(
+        "sharing",
+        "ShareStatus",
+        "_PUBLIC_SHARING_ALLOWED_POS",
+        "GetProjectDetailsResponse",
+        "isPublicSharingAllowed",
+        section=SHARING,
+        note=(
+            "#2130 — live true on 10/10 notebooks sampled. The tenant/policy "
+            "gate on making a notebook public. Read by "
+            "ShareStatus.is_public_sharing_allowed."
+        ),
+    ),
 )
 
 
@@ -294,12 +734,11 @@ _ENVELOPE = (
 
 UNMAPPED: tuple[Unmapped, ...] = (
     # sources.py
-    # NOTE: _META_BARE_URL_POS is now a real mapping (see MAPPINGS) — index 0 is
-    # SourceMetadata.googleDocsMetadata, not a bare URL.
+    # NOTE: _META_GOOGLE_DOCS_POS (index 0) is a real mapping (see MAPPINGS) —
+    # it is SourceMetadata.googleDocsMetadata, not a bare URL.
     Unmapped("sources", "SourceRow", "_META_TIMESTAMP_POS", _UNRECOVERED),
     Unmapped("sources", "SourceRow", "_META_YOUTUBE_POS", _UNRECOVERED),
     Unmapped("sources", "SourceRow", "_META_MIME_POS", _UNRECOVERED),
-    Unmapped("sources", "SourceRow", "_DRIVE_DESCRIPTOR_MIME_POS", _NESTED_LOCAL),
     Unmapped(
         "sources",
         "SourceRow",
@@ -382,32 +821,26 @@ UNMAPPED: tuple[Unmapped, ...] = (
         "_STATUS_POS",
         "google.rpc.Status envelope, not a Tailwind message",
     ),
+    Unmapped(
+        "chat",
+        "ErrorPayloadRow",
+        "_MESSAGE_POS",
+        "google.rpc.Status.message (tag 2 -> index 1) — a PUBLIC google/rpc/status.proto "
+        "field, not a Tailwind one, so mobile/schema.proto cannot check it. Its two "
+        "siblings in the same envelope ARE live-confirmed (code at index 0: [3] / [5] "
+        "live from CREATE_ARTIFACT 2026-08-13, [13] in notebooks_remove_from_recent.yaml; "
+        "details at index 2: the recorded UserDisplayableError block). The message slot "
+        "itself has NEVER been observed populated — see #2188",
+    ),
     Unmapped("chat", "ErrorPayloadRow", "_ENTRIES_POS", "google.rpc.Status envelope"),
-    Unmapped("chat", "TextLeafRow", "_TEXT_POS", _NESTED_LOCAL),
     Unmapped("chat", "CitationRow", "_CHUNK_BLOCK_POS", _NESTED_LOCAL),
     Unmapped("chat", "CitationRow", "_DETAIL_POS", _NESTED_LOCAL),
-    Unmapped("chat", "CitationDetail", "_SCORE_POS", _NESTED_LOCAL),
     Unmapped(
         "chat",
         "CitationDetail",
-        "_ANSWER_RANGE_POS",
-        "reads Citation tag 4; live-confirmed to carry the fragment's SOURCE-side "
-        "union range, not an answer-text range as the field name claims — see #2120",
+        "_SCORE_POS",
+        "reads Citation tag 3, which the recovered schema does not name",
     ),
-    Unmapped(
-        "chat",
-        "CitationDetail",
-        "_PASSAGES_POS",
-        "reads the fragment message (a 1-element list), so the passage loop can "
-        "never iterate — see #2120",
-    ),
-    Unmapped("chat", "CitationDetail", "_SOURCE_ID_POS", _NESTED_LOCAL),
-    Unmapped("chat", "CitationDetail", "_ANSWER_RANGE_START_POS", _NESTED_LOCAL),
-    Unmapped("chat", "CitationDetail", "_ANSWER_RANGE_END_POS", _NESTED_LOCAL),
-    Unmapped("chat", "PassageRow", "_PASSAGE_DATA_POS", _NESTED_LOCAL),
-    Unmapped("chat", "PassageRow", "_START_POS", _NESTED_LOCAL),
-    Unmapped("chat", "PassageRow", "_END_POS", _NESTED_LOCAL),
-    Unmapped("chat", "PassageRow", "_TEXT_PAYLOAD_POS", _NESTED_LOCAL),
     # notes.py
     Unmapped("notes", "NoteRow", "_STATUS_POS", "reads the NoteOrStatus wrapper, not ProjectNote"),
     Unmapped("notes", "NoteRow", "_INNER_META_POS", _NESTED_LOCAL),
@@ -416,6 +849,7 @@ UNMAPPED: tuple[Unmapped, ...] = (
     # research.py
     Unmapped("research", "ResearchTaskRow", "_ID_POS", _SHAPE_UNKNOWN),
     Unmapped("research", "ResearchTaskRow", "_INFO_POS", _SHAPE_UNKNOWN),
+    Unmapped("research", "ResearchTaskRow", "_TS_SECONDS_POS", _NESTED_LOCAL),
     Unmapped("research", "ResearchTaskInfoRow", "_QUERY_TEXT_POS", _SHAPE_UNKNOWN),
     Unmapped("research", "ResearchTaskInfoRow", "_QUERY_SOURCE_TYPE_POS", _SHAPE_UNKNOWN),
     Unmapped("research", "ResearchTaskInfoRow", "_SOURCES_POS", _NESTED_LOCAL),
@@ -458,10 +892,56 @@ UNMAPPED: tuple[Unmapped, ...] = (
         "against the proto — but the wire carries 5 elements and the live value "
         "(1=free / 2=Pro) matches _types/common.py on both transports.",
     ),
+    # sharing.py (#2130)
+    Unmapped(
+        "sharing",
+        "ShareStatus",
+        "_USERS_POS",
+        f"{_NO_SUCH_FIELD} the web GET_SHARE_STATUS response carries the shared-user "
+        "rows at index 0 (proto tag 1), but the recovered mobile "
+        "GetProjectDetailsResponse declares only tags 2-4 — it has no tag 1 at all. "
+        "The slot is unambiguous live (every row is [email, permission, [], "
+        "[name, avatar]]) and has been decoded correctly since the first release, "
+        "so this is a naming gap in the mobile schema, not a suspect read. "
+        "Recorded honestly rather than mapped to a field that does not exist.",
+    ),
 )
+
+#: ``GET_SHARE_STATUS`` slots that are POPULATED on every live response and
+#: deliberately left undecoded, so a future reader does not mistake the silence
+#: for "we checked and there is nothing there" (#2130).
+#:
+#: Not :data:`UNMAPPED` — that registry is keyed by an existing constant, and the
+#: whole point here is that no constant exists. Indices 4 and 5 are omitted: they
+#: are ``null`` on every row observed, so there is nothing to explain.
+UNREAD_SHARE_STATUS_SLOTS: dict[int, str] = {
+    6: (
+        "proto tag 7 — live [3, true, true] on 10/10 notebooks sampled 2026-08. "
+        "GetProjectDetailsResponse declares no tag 7, so nothing in the recovered "
+        "schema names it and its semantics are unresolved. Surfacing it would mean "
+        "inventing a field name, which is the exact defect class this registry "
+        "exists to catch, so #2130 left it undecoded on purpose."
+    ),
+    7: (
+        "proto tag 8 — live false on 10/10 notebooks sampled 2026-08. Unnamed in "
+        "the recovered schema for the same reason as tag 7, and a lone constant "
+        "false carries no signal a caller could act on. Left undecoded."
+    ),
+}
 
 
 PINNED: tuple[Pinned, ...] = (
+    Pinned(
+        "chat",
+        "CitationDetail",
+        "_FRAGMENT_RANGE_POS",
+        3,
+        "Citation tag 4 — the cited fragment's SOURCE-side character range",
+        "live-confirmed on two independent captures: for every citation the value "
+        "equals the union of that fragment's own element ranges, and on a "
+        "536-character answer one citation reported [1130, 1695] — so it cannot be "
+        "the answer-text range this client documented it as until #2120",
+    ),
     Pinned(
         "artifacts",
         "ArtifactRow",
@@ -489,6 +969,53 @@ PINNED: tuple[Pinned, ...] = (
         "ChatHistoryMessage tag 3 — role, values {1, 2}",
         "56/56 turns populated; role 1 rows carry userQueryText (tag 4) and role 2 "
         "rows carry actOnSourcesResponse (tag 5), 28/28 each",
+    ),
+    Pinned(
+        "research",
+        "ResearchTaskRow",
+        "_UPDATED_AT_POS",
+        2,
+        "POLL_RESEARCH task row — last-update time, [seconds, nanos]",
+        "#2122 live: polled one run twice, 7.6s apart; this slot advanced with "
+        "the second poll while _CREATED_AT_POS held the first poll's value. "
+        "Reproduced on two accounts. Corroborated by the repo's cassettes: 9/9 "
+        "task rows, advanced across all 3 within-cassette repeated-row "
+        "transitions. #2122's issue text labels these two slots the other way "
+        "round; the wire does not",
+    ),
+    Pinned(
+        "research",
+        "ResearchTaskRow",
+        "_CREATED_AT_POS",
+        3,
+        "POLL_RESEARCH task row — creation time, [seconds, nanos]",
+        "#2122 live: constant across both polls of one run on two accounts, "
+        "and equal to _UPDATED_AT_POS on the first poll. Cassettes: constant "
+        "across all 4 repeated-row transitions in 9/9 rows",
+    ),
+    Pinned(
+        "research",
+        "ResearchTaskRow",
+        "_ACCOUNT_ID_POS",
+        4,
+        "POLL_RESEARCH task row — opaque account id owning the run",
+        "#2122 live: '400237754469' for one account and '838504205497' for a "
+        "second, each constant across every task and poll of that account. Two "
+        "accounts with two distinct stable values is what upgrades this from "
+        "'a constant' (all of the repo's cassettes carry the first value) to "
+        "'account-scoped'. Whether it names the run's starter or the notebook's "
+        "owner is NOT established — both were the same account in both probes",
+    ),
+    Pinned(
+        "research",
+        "ResearchTaskInfoRow",
+        "_DISCOVERY_MODE_POS",
+        2,
+        "POLL_RESEARCH task_info — DiscoveryMode the run is executing under",
+        "Two-sided: it echoes the value the START_*_RESEARCH params carry at "
+        "the same enum. Live #2122: 1 (DEFAULT_LLM_SEARCH) on every fast run, "
+        "on two accounts; cassettes: 1 on 6/6 fast rows and 5 (DEEP_RESEARCH) "
+        "on 3/3 deep rows",
     ),
     Pinned(
         "research",
@@ -529,13 +1056,71 @@ ENUM_BINDINGS: dict[str, tuple[str, dict[int, str]]] = {
             5: "SOURCE_STATUS_TENTATIVE",
         },
     ),
+    # rpc/types.py::DriveSourceStatus (#2111). Only ACTIVE has been observed on
+    # the wire; the rest are bound from the recovered backend enum, which is
+    # exactly what this table is for — the binding is the evidence, not a live
+    # sighting. UNKNOWN(-1) is a client sentinel, declared in
+    # ``_CLIENT_SYNTHETIC_VALUES``.
+    "DriveSourceStatus": (
+        "UserDriveSourceStatus",
+        {
+            1: "DRIVE_SOURCE_STATUS_INACCESSIBLE",
+            2: "DRIVE_SOURCE_STATUS_SYNCING",
+            3: "DRIVE_SOURCE_STATUS_ACTIVE",
+            4: "DRIVE_SOURCE_STATUS_DELETED",
+            5: "DRIVE_SOURCE_STATUS_GEN_AI_ACCESS_DENIED",
+        },
+    ),
+    # rpc/types.py::DiscoveryMode (#2122). 1 and 5 are live-observed on both
+    # the request and the response side; the rest are bound from the recovered
+    # backend enum. UNKNOWN(-1) is a client sentinel, declared in
+    # ``_CLIENT_SYNTHETIC_VALUES``; UNSPECIFIED(0) is deliberately unmodelled
+    # and declared in ``ENUM_GAPS``.
+    "DiscoveryMode": (
+        "DiscoveryMode",
+        {
+            1: "DEFAULT_LLM_SEARCH",
+            2: "RAW_SEARCH",
+            3: "CURIOUS_SEARCH",
+            4: "CURIOUS_RAW_SEARCH",
+            5: "DEEP_RESEARCH",
+            6: "LITE_LLM_SEARCH",
+        },
+    ),
     "ArtifactStatus": (
         "ArtifactStatus",
         {
+            0: "ARTIFACT_STATUS_UNKNOWN",
             1: "ARTIFACT_STATUS_INITIALIZED",
             2: "ARTIFACT_STATUS_PROCESSING",
             3: "ARTIFACT_STATUS_READY",
             4: "ARTIFACT_STATUS_FAILED",
+            5: "ARTIFACT_STATUS_SUGGESTED",
+            6: "ARTIFACT_PENDING_REVIEW",
+        },
+    ),
+    # rpc/types.py::QuizQuantity. Shared by quiz AND flashcards; the two backend
+    # enums (``QuizGenerationOptions.QuestionQuantity`` and
+    # ``FlashcardsGenerationOptions.CardQuantity``) declare identical values, so
+    # binding to either one gates both. #2117 landed precisely because these
+    # values were pinned to a snapshot without ever being bound to the backend:
+    # ``MORE`` sat at 2 as a documented "API limitation" while the backend has
+    # always declared it as 3.
+    "QuizQuantity": (
+        "QuizGenerationOptions_QuestionQuantity",
+        {
+            1: "QUESTION_QUANTITY_FEWER",
+            2: "QUESTION_QUANTITY_STANDARD",
+            3: "QUESTION_QUANTITY_MORE",
+        },
+    ),
+    # rpc/types.py::QuizDifficulty, the sibling of the pair above.
+    "QuizDifficulty": (
+        "QuizGenerationOptions_QuizDifficulty",
+        {
+            1: "QUIZ_DIFFICULTY_EASY",
+            2: "QUIZ_DIFFICULTY_MEDIUM",
+            3: "QUIZ_DIFFICULTY_HARD",
         },
     ),
     # _types/sources.py::_SOURCE_TYPE_CODE_MAP
@@ -548,6 +1133,7 @@ ENUM_BINDINGS: dict[str, tuple[str, dict[int, str]]] = {
             3: "SOURCE_CONTENT_TYPE_PDF",
             4: "SOURCE_CONTENT_TYPE_TEXT",
             5: "SOURCE_CONTENT_TYPE_URL",
+            6: "SOURCE_CONTENT_TYPE_POWERPOINT",
             8: "SOURCE_CONTENT_TYPE_MARKDOWN",
             9: "SOURCE_CONTENT_TYPE_YOUTUBE_VIDEO",
             10: "SOURCE_CONTENT_TYPE_AUDIO",
@@ -563,22 +1149,33 @@ ENUM_BINDINGS: dict[str, tuple[str, dict[int, str]]] = {
 #: Enum members our client cannot express today. Each entry is a real backend
 #: value that maps to "unknown" (or worse) in this client.
 ENUM_GAPS: dict[str, tuple[tuple[int, str, str], ...]] = {
+    "DriveSourceStatus": (
+        (
+            0,
+            "DRIVE_SOURCE_STATUS_UNSPECIFIED",
+            "#2111 — deliberately unmodelled. It means 'no claim', which is what "
+            "an absent slot already means, so SourceRow.drive_status normalizes "
+            "an explicit 0 to None rather than giving one state two "
+            "representations. proto3 omits the zero default, so the wire almost "
+            "never carries it in the first place.",
+        ),
+    ),
+    "DiscoveryMode": (
+        (
+            0,
+            "DISCOVERY_MODE_UNSPECIFIED",
+            "#2122 — deliberately unmodelled, for the same reason as "
+            "DRIVE_SOURCE_STATUS_UNSPECIFIED above: it means 'no claim', which "
+            "is what an absent slot already means, so "
+            "ResearchTaskInfoRow.discovery_mode normalizes an explicit 0 to "
+            "None rather than giving one state two representations.",
+        ),
+    ),
     "SourceStatus": (
         (0, "SOURCE_STATUS_UNSPECIFIED", "#2124 — fails closed as UNKNOWN"),
         (4, "SOURCE_STATUS_PENDING_DELETION", "#2124 — fails closed as UNKNOWN"),
     ),
-    "ArtifactStatus": (
-        (0, "ARTIFACT_STATUS_UNKNOWN", "#2127"),
-        (5, "ARTIFACT_STATUS_SUGGESTED", "#2127"),
-        (6, "ARTIFACT_PENDING_REVIEW", "#2127 — state discovered only in the object store"),
-    ),
     "SourceType": (
-        (
-            6,
-            "SOURCE_CONTENT_TYPE_POWERPOINT",
-            "LIVE BUG: a valid .pptx uploads, reaches READY, decodes to code 6, and "
-            "falls through to SourceType.UNKNOWN with the spurious upgrade warning",
-        ),
         (
             7,
             "SOURCE_CONTENT_TYPE_GOOGLE_SHEET",

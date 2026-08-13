@@ -58,12 +58,12 @@ splits):
    rename/delete must update the allowlist).
 
 The ceilings below were *measured*, not estimated. To regenerate them (the
-``> 1000`` filter must track ``MODULE_SIZE_BUDGET`` below)::
+``> 1500`` filter must track ``MODULE_SIZE_BUDGET`` below)::
 
     python -c "from pathlib import Path; src=Path('src/notebooklm'); \
         [print(f\"{len(p.read_text(encoding='utf-8').splitlines()):>6}  {p.relative_to(src).as_posix()}\") \
          for p in sorted(src.rglob('*.py')) \
-         if len(p.read_text(encoding='utf-8').splitlines()) > 1000]"
+         if len(p.read_text(encoding='utf-8').splitlines()) > 1500]"
 
 Line counting uses ``str.splitlines()`` to match the diagnostic in
 ``scripts/audit_test_suite.py`` (``big_files``), so the two never disagree.
@@ -79,12 +79,27 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src" / "notebooklm"
 
-# Any *new* module is forbidden from exceeding this many lines: a round 1000-line
+# Any *new* module is forbidden from exceeding this many lines: a round 1500-line
 # cap that new work must come in at/under or split before merge. The allowlist
 # below is the *complete* set of modules over budget today, so the gate is green
-# on main. (Raised from 900 once the sub-1000 modules — ``_chat/api.py``,
-# ``_research.py``, ``cli/source_cmd.py`` — were trimmed below the round cap.)
-MODULE_SIZE_BUDGET = 1000
+# on main. (Raised from 900 -> 1000 once ``_chat/api.py``, ``_research.py`` and
+# ``cli/source_cmd.py`` were trimmed below the round cap.)
+#
+# Raised 1000 -> 1500 because the headroom left under the old cap had shrunk to
+# the point where ordinary feature work tripped it. The concrete case:
+# ``cli/session_cmd.py`` sat at 999 on main, and #2192 — a bug fix to
+# ``Notebook.is_owner`` that merely rendered a role — pushed it to 1006 and
+# failed all 15 test-matrix jobs. It was resolved by extracting the ``use``
+# one-row table into ``cli/_session_render.py``, which was a genuine improvement,
+# but the gate fired on a module the PR was not about.
+#
+# NOTE the trigger is 7 lines, not 1: this gate rejects only ``n > budget``, and
+# ``test_ratchet_checks_detect_their_offending_shapes`` pins that exactly-at-budget
+# passes. A 999-line module absorbs one more line and stays green. An earlier draft
+# of this comment claimed a one-line failure; that was wrong (caught in review) and
+# is corrected here rather than quietly dropped, because the false version overstated
+# the case for weakening the cap by 500 lines.
+MODULE_SIZE_BUDGET = 1500
 
 # Every module currently over budget, pinned at its ratchet ceiling. These are
 # the only sanctioned exceedances; the map can only shrink and ceilings can only
@@ -101,7 +116,7 @@ MODULE_SIZE_BUDGET = 1000
 # ``# sanctioned merge (ADR-0033)`` naming the absorbed modules and the PR.
 # That annotation is what distinguishes a sanctioned merge from ordinary
 # growth; an unannotated raise is the thing this comment forbids. After the
-# entry lands it is shrink-only like every other, the 1000-line budget is
+# entry lands it is shrink-only like every other, :data:`MODULE_SIZE_BUDGET` is
 # unchanged, and un-merged ``_auth`` modules stay under it. No other directory
 # has this exception.
 #
@@ -135,212 +150,56 @@ ALLOWLISTED_CEILINGS: dict[str, int] = {
     # must be public so callers catch it), then 1599 -> 1575 after the private
     # response-preview helper moved to its credential-redaction home (#2132).
     "exceptions.py": 1575,
-    # sanctioned merge (ADR-0033) — the `_auth` persistence merge: the seam that
-    # was spelled as three cap-split files becomes one deep module.
-    # ``_auth/storage_writer.py`` (981) and ``_auth/storage_transaction.py``
-    # (183) were absorbed in full and reduced to re-export shims in the
-    # same change; the merged module carries the lock primitives, the bounded acquire,
-    # the transaction template, the snapshot types, the CAS/merge math and the
-    # seven intent writers. Pinned at its MEASURED post-merge LOC (a sanctioned
-    # entry is a pin, not a budget: shrink-locked from here on). Later sanctioned
-    # merges into this same module (the write-time cookie-filter relocation and the
-    # account-record relocation) raise it under their own fresh annotations.
-    #
-    # sanctioned template adoption (ADR-0033 decision 1, third class) — PR 1.2
-    # 2149 -> 2183. ADR-0031 Stage 3 finished here: the last three writers still
-    # hand-rolling the four-step lock preamble (``replace_from_remint``,
-    # ``replace_from_login``, ``persist_minted_jar``) now route through
-    # ``in_storage_transaction``. This class has NO donor — the growth is
-    # intra-module, because a template call site plus its ``body`` closure header
-    # and explicit success return cost more lines than the inline preamble they
-    # replace (measured precedent: #2152 grew the same code by 22 lines while
-    # converting three writers). The evidence the duplication really went is
-    # test_storage_transaction_ratchet's ``_UNCONVERTED``, which this commit takes
-    # to EMPTY — so this class is now exhausted for this module.
-    #
-    # sanctioned merge (ADR-0033) — the write-time cookie-filter relocation, the
-    # SECOND sanctioned consolidation into this module (PR 4.2): 2183 -> 2416.
-    # DONOR: ``_auth/_browser_cookie_filter.py``, 233 -> 29 (-204), reduced to a
-    # re-export shim in the same commit. This is the donor-shrinking relocation
-    # class, not the intra-module template class above: the filter
-    # (``filter_storage_state_cookies_by_domain_policy`` + its value-free
-    # malformed-row diagnostics) is write-time policy that only wore a
-    # ``browser_`` name because the capture arms were its first callers — three
-    # of its six call sites are the intent writers here, each of which reached
-    # it through a function-local import that this commit deletes.
-    #
-    # The +233 exceeds the donor's -204 by 29 lines, and the gap is deliberate,
-    # not slop: this PR's other half is the ADR-0033 D3 comment correction. The
-    # old prose framed the writer's filter pass as "idempotent with the call
-    # above" — i.e. as redundancy, the exact reading that would get one of the
-    # two passes deleted. Both are required (the capture-side pass feeds
-    # ``heal_captured_state``; the writer's is ADR-0029's entry-path-independent
-    # guarantee), so each now states its own reason, and the merged module gains
-    # a labelled section header explaining why write-time policy lives here.
-    # No behaviour changed: same function objects, same ``notebooklm.auth``
-    # logger (both modules bound it by NAME, so no log-emission point moved).
-    # Pinned at its MEASURED post-relocation LOC; shrink-locked from here on.
-    # PR 5.2's account-record relocation, annotated below, is the last raise.
-    #
-    # RATCHETED DOWN 2419 -> 2412 by PR 5.1 (the account-read write-timing
-    # move). ``update_account_metadata`` lost its ``deadline_seconds``
-    # parameter and the paragraph justifying it: the only caller that ever
-    # passed one was ``account.promote_legacy_account``, which shortened the
-    # lock deadline to 2s purely because it ran inside a per-RPC READ. It no
-    # longer runs there, so the override had no caller and its rationale had
-    # become false. This is an ordinary shrink, not a sanctioned class — the
-    # ratchet demanded it, and the ground is now locked.
-    #
-    # sanctioned merge (ADR-0033) — the account-record relocation, the THIRD
-    # and LAST planned consolidation into this module (PR 5.2): 2412 -> 3102.
-    # DONOR: ``_auth/account.py``, 980 -> 355 (-625). This is the
-    # donor-shrinking relocation class (the same one PR 4.2 used), not the
-    # intra-module template class: ``account.py`` was two modules wearing one
-    # name. The NETWORK identity half — ``enumerate_accounts``,
-    # ``_probe_authuser``, ``extract_email_from_html``, the ``authuser`` wire
-    # formatters, and ``repair_account_metadata_from_playwright_storage``,
-    # which recomposes over both halves — stayed there and is now the whole
-    # file. The account RECORD half (readers, ``_sanitize_legacy_account_record``,
-    # the detached promotion one-shot with its ``atexit`` drain,
-    # ``write_account_metadata`` / ``clear_account_metadata``, and the sibling
-    # ``context.json`` scrub) is persistence: same document, same lock, driving
-    # the two in-band account writers already here.
-    #
-    # The evidence the split was structural and not cosmetic: it cost a
-    # BIDIRECTIONAL function-local import pair — 3 ``from . import storage``
-    # sites in ``account.py``, 5 ``from . import account as _account`` sites
-    # here — and this commit deletes all 8, leaving one module-scope edge
-    # (``account`` -> ``storage``) in a single direction. (Note for the record:
-    # the governing plan said "8 sites, verified exact" and was RIGHT; a
-    # mid-flight recount that reported 4 had missed the parenthesised
-    # multi-line ``from . import (\\n    account as _account,\\n)`` spelling.)
-    #
-    # +690 here against the donor's -625 leaves a 65-line gap, and like PR 4.2's
-    # 29 it is deliberate: the ``SECTION 7b`` banner and the module-docstring
-    # entry that say WHY persistence code lives beside the writers, eight new
-    # ``__all__`` entries, the ``atexit``-registration-moved-modules paragraph
-    # (the single riskiest thing in the move — see ``_drain_promotions_at_exit``),
-    # and the ``_drop_legacy_account_key`` note explaining why the ONE writer
-    # here that does not touch ``storage_state.json`` uses the guarded public
-    # ``atomic_write_json`` and a ``filelock`` sibling lock. No behaviour
-    # changed: same function objects, same ``notebooklm.auth`` logger (both
-    # modules bound it by NAME), same facade names at the same identities.
-    #
-    # RATCHETED DOWN 3102 -> 2829 by ADR-0034 PR4: process/OS lock mechanics,
-    # bounded retry, the raw-key thread-lock registry, and warning-once state
-    # moved to the dependency-bottom ``_auth/storage_lock.py`` owner. Storage
-    # retains only the v0.x wrappers, secure-parent policy, and transaction
-    # routing. This is an ordinary shrink pin with zero banked slack.
-    #
-    # RATCHETED DOWN 2829 -> 2563 by ADR-0034 PR5: the deterministic snapshot/CAS
-    # merge and permanent no-baseline overlay moved to the dependency-bottom
-    # ``_auth/cookie_merge.py`` leaf. Storage keeps the blocking transaction,
-    # corruption and logging policy, compatibility adapters, and sole raw write.
-    # This is another ordinary shrink pin with zero banked slack; the new leaf
-    # remains under the ordinary 1000-line budget and has no exemption here.
-    #
-    # RATCHETED DOWN 2563 -> 2329 by ADR-0034 PR6: the sealed typed commit spine,
-    # path-owned cookie transactions, document reads, and common bounded-lock
-    # template moved to ``credential_io.py`` and ``profile_store.py``. Storage
-    # keeps v0.x policy/adapters and five temporarily adapted profile writers.
-    # Both new owners remain under the ordinary budget with no exemption.
-    #
-    # RATCHETED DOWN 2329 -> 2210 by ADR-0034 PR7A: typed in-band account
-    # read/update/clear policy moved into ``ProfileStore`` while storage keeps
-    # only the raw compatibility adapters and legacy reconciliation/scrub.
-    #
-    # RATCHETED DOWN 2210 -> 1905 by ADR-0034 PR7B: the raw capture/domain
-    # filter moved to ``cookie_filter.py`` and browser/remint destination carry,
-    # bounded transaction, and commit moved into ``ProfileStore``. Storage keeps
-    # the exact v0.x adapter and the login/minted-session writers.
-    #
-    # RATCHETED DOWN 1905 -> 1771 by ADR-0034 PR7C: login/import filtering,
-    # required-cookie gating, directive-specific namespace construction, backup,
-    # and commit moved into ``ProfileStore``. Storage keeps the exact v0.x adapter
-    # and post-success legacy reconciliation; minted-session replacement remains.
-    #
-    # RATCHETED DOWN 1771 -> 1683 by ADR-0034 PR7D: minted-session snapshot and
-    # error projection remain here while the owner/filter/document/commit body
-    # moved to ``ProfileStore``.
-    #
-    # RATCHETED DOWN 1683 -> 1150 by ADR-0034 PR8: lossless legacy-account
-    # resolution, context I/O, promotion lifecycle, and post-write reconciliation
-    # moved to the ordinary-budget ``_auth/profile_migration.py`` owner.
-    # RATCHETED DOWN 1150 -> 1131 by ADR-0034 PR11B: token credential
-    # encoding, secure-parent preparation, lock ownership, and commit moved to
-    # the path-owned ``MasterTokenFile``.
-    # RATCHETED DOWN 1127 -> 1090 by #2172 B3: first-party login/remint callers
-    # moved to native results, and the remaining projections were isolated as
-    # exhaustive v0.x compatibility maps while historical module prose moved to
-    # the architecture docs.
-    "_auth/storage.py": 1090,
-    # sanctioned merge (ADR-0033) — the `_auth` load-composition merge:
-    # ``_auth/browser_cookie_recovery.py`` (142) was absorbed in full and reduced
-    # to a re-export shim in the same change. It held the captured-cookie
-    # ``validate`` / ``heal`` / ``validate_with_recovery`` seam, which existed in
-    # its own file only so this module stayed under the budget — reached through
-    # a 4-line pass-through that lazily imported back into the leaf while the
-    # leaf imported this module at module scope (a two-node cycle). The merged
-    # module also gains the single load -> heal -> retry composition the two
-    # public load wrappers used to spell out (net of the copy deleted from
-    # ``_auth/tokens.py``). Pinned at its MEASURED post-merge LOC (a sanctioned
-    # entry is a pin, not a budget: shrink-locked from here on).
-    #
-    # DEFERRED, and the deferral is a real constraint on whoever picks it up:
-    # the plan wanted this module's deps record to land in the SAME change,
-    # because a pin leaves zero headroom. It cannot. The deps record exists to
-    # retire the 11 module-scope patch-protocol aliases, and the 87-test PSIDTS
-    # suite patches exactly those aliases — so landing it requires editing the
-    # suite that pins the #2061 decline->retry contract, which this change was
-    # required to leave untouched. The hard constraint wins. Consequence: a
-    # later deps-record change must NET-SHRINK this module (a deps dataclass
-    # plus threading against ~20 deleted alias lines is roughly neutral), or it
-    # needs an ADR-0033 amendment — the template-adoption class does not reach
-    # new structure. A call-time ``heal`` seam already exists on
-    # ``load_with_recovery`` / ``load_session_jar`` as the first step.
-    # RATCHETED DOWN 1222 -> 1214 by #2172 B3: stale compatibility-result prose
-    # now describes the native CookieMergeResult actually consumed here.
-    "_auth/psidts_recovery.py": 1214,
-    # sanctioned merge (ADR-0033) — the `_auth` token-route fold: ``_auth/headers.py``
-    # (68 lines, one function — ``_resolve_token_route_kwargs`` — whose only three
-    # call sites are the token-fetch entry points here) was absorbed in full and
-    # DELETED in the same change, so the donor is gone entirely. The same PR also
-    # colocated the cold-start fallback sequence (``_cold_fallbacks``) and landed
-    # the refresh deps record, which is why the fold and that work had to ship
-    # together: a sanctioned entry is a pin, not a budget, so it leaves ZERO
-    # headroom and the module may cross the 1000-line budget only ONCE. Pinned at
-    # its MEASURED post-PR LOC; shrink-locked from here on.
-    #
-    # The ladder-alignment change (cold start reordered to ADR-0030's L2.5 → L3
-    # → L4) landed net-neutral at the then-current pin. Phase 12A moved its
-    # operation-scoped control flow behind ``ColdRecoveryCoordinator`` while
-    # retaining this module's late-bound callback composition and exact public
-    # adapters. Phase 12B then replaced the legacy cookie-saver adapter with a
-    # direct typed ``ProfileStore`` merge, shrinking the measured module by a
-    # further five lines; freeze all saved ground immediately.
-    "_auth/refresh.py": 1184,
-    # sanctioned merge (ADR-0033) — the `_auth` browser-cluster merge (PR 4.1):
-    # ``_auth/browser_state_validation.py`` (56) and ``_auth/login_wait_trace.py``
-    # (181) were absorbed in full and reduced to re-export shims in the same
-    # change. Both existed only to keep this file under the budget — the capture
-    # core was already the sole consumer of each (the validation bridge's two
-    # callers and the tracing's three call sites are all in this module), which is
-    # why the leaves failed the deletion test. ``browser_launch_errors.py`` is NOT
-    # part of this merge: ``classify_launch_failure`` has a second, independent
-    # consumer in ``cli/services/login/master_token.py``, so it stays a real leaf.
-    # Pinned at its MEASURED post-merge LOC (a sanctioned entry is a pin, not a
-    # budget: shrink-locked from here on, and the plan schedules no further growth
-    # of this module).
-    # RATCHETED DOWN 1251 -> 1225 by #2172 B3: capture now consumes native
-    # ReplaceResult directly and duplicated historical module prose was folded
-    # into the architecture documentation.
-    "_auth/browser_capture.py": 1225,
-    # ``mcp/tools/sources.py`` was allowlisted at 1020 (over the 1000-line budget after
-    # #1871's shared source-policy wiring + the await_upload era). #1890 folded
+    # ``mcp/tools/sources.py`` was allowlisted at 1020 (over the then-1000-line budget
+    # after #1871's shared source-policy wiring + the await_upload era). #1890 folded
     # source_add_and_wait + source_upload_bytes BACK into source_add — removing the two
     # tool bodies (and ``_add_source_to_wait_on``) drained it to ~970 LOC, back UNDER the
-    # 1000 budget, so its exemption is dropped (one-way ratchet). The module is now gated
+    # budget, so its exemption is dropped (one-way ratchet). The module is now gated
     # by MODULE_SIZE_BUDGET like any other; keep it there.
+    #
+    # The four ``_auth`` modules that used to be listed here did NOT lose their ratchet
+    # when the budget rose 1000 -> 1500. They moved to :data:`SHRINK_LOCKED_CEILINGS`
+    # below, which preserves ADR-0033's shrink-lock guarantee independently of the
+    # global budget. This map is only for modules genuinely OVER budget.
+}
+
+
+# ADR-0033 shrink locks that must survive a budget raise.
+#
+# ADR-0033 requires every sanctioned ``_auth`` consolidation to stay **shrink-locked at
+# its measured pin** from the moment it lands. That guarantee was originally carried by
+# :data:`ALLOWLISTED_CEILINGS`, which only works while the pin sits above the budget.
+# When the budget rose 1000 -> 1500 all four fell under it, and simply dropping them
+# would have handed 275-410 lines of unratcheted growth back to modules that were
+# deliberately drained — silently repealing ADR-0033 as a side effect of an ADR-0008
+# change. (Caught in review on the budget-raise PR; the first draft did exactly that.)
+#
+# So the lock moved here instead. Same ratchet semantics as ALLOWLISTED_CEILINGS — may
+# not grow past the pin, must tighten when it shrinks — but deliberately NOT subject to
+# ``test_budget_is_below_every_allowlisted_ceiling``, because these pins are *below* the
+# budget by design. That is the whole point: a module can be under the global budget and
+# still be forbidden from re-accreting.
+#
+# DO NOT raise a pin to make room for new code. Split, or take the ADR-0033 sanctioned
+# route (which requires the ``# sanctioned merge (ADR-0033)`` annotation naming donor
+# and PR). DO lower a pin when a module shrinks — the gate prints the exact value.
+#
+# The arcs these pins lock in, for context on why they are worth keeping:
+#     _auth/storage.py           3102 -> 1090   (ADR-0034 PR4..PR11B, #2172 B3)
+#     _auth/browser_capture.py   1251 -> 1225   (ADR-0033 PR4.1, #2172 B3)
+#     _auth/psidts_recovery.py   1222 -> 1214   (ADR-0033 load-composition merge)
+#     _auth/refresh.py           1184           (ADR-0033 token-route fold)
+# The per-module "sanctioned merge" / "RATCHETED DOWN" annotations are preserved in this
+# file's git history at the commit that raised the budget.
+#
+# Note ``_auth/storage.py`` is *also* pinned at 1090 by
+# ``tests/_guardrails/test_auth_profile_document_boundary.py``, for a different reason
+# (a consumer boundary). Both are deliberate; a shrink there updates both.
+SHRINK_LOCKED_CEILINGS: dict[str, int] = {
+    "_auth/browser_capture.py": 1225,
+    "_auth/psidts_recovery.py": 1214,
+    "_auth/refresh.py": 1184,
+    "_auth/storage.py": 1090,
 }
 
 
@@ -454,6 +313,53 @@ def test_allowlisted_ceilings_ratchet_down() -> None:
     )
 
 
+def test_shrink_locked_modules_do_not_exceed_their_pin() -> None:
+    """ADR-0033 sanctioned modules must not re-accrete, budget raise or not.
+
+    These pins sit *below* :data:`MODULE_SIZE_BUDGET` on purpose. Without this
+    check, raising the global budget would silently repeal ADR-0033's shrink-lock
+    guarantee for every already-consolidated ``_auth`` module — which is exactly
+    what the first draft of the 1000 -> 1500 raise did.
+    """
+    grown = _grown_offenders(_measure_all(), SHRINK_LOCKED_CEILINGS)
+    assert grown == {}, (
+        "ADR-0033 shrink-locked module(s) grew past their pin. These are locked "
+        "BELOW the global budget deliberately — being under MODULE_SIZE_BUDGET is "
+        "not permission to grow. Split, or take the sanctioned-merge route with its "
+        f"annotation {{path: (current, pin)}}: {grown}"
+    )
+
+
+def test_shrink_locked_ceilings_ratchet_down() -> None:
+    """A shrunk shrink-locked module must tighten its pin to the new count."""
+    slack = _slack_offenders(_measure_all(), SHRINK_LOCKED_CEILINGS)
+    assert slack == {}, (
+        "ADR-0033 shrink-locked module(s) shrank below their pin — lower each pin in "
+        "SHRINK_LOCKED_CEILINGS to the 'current' value to lock the saved ground. Do "
+        "NOT delete the entry: unlike ALLOWLISTED_CEILINGS these pins are meant to "
+        f"live below the budget: {slack}"
+    )
+
+
+def test_shrink_locked_entries_are_disjoint_and_not_stale() -> None:
+    """The two ceiling maps must not overlap, and neither may go stale.
+
+    An overlap would mean one module answers to two pins that can drift apart;
+    a stale path can never trip any check, silently weakening the gate.
+    """
+    overlap = sorted(set(SHRINK_LOCKED_CEILINGS) & set(ALLOWLISTED_CEILINGS))
+    assert overlap == [], (
+        "Module(s) appear in BOTH ALLOWLISTED_CEILINGS and SHRINK_LOCKED_CEILINGS. "
+        "A module is either over budget (allowlist) or shrink-locked under it — "
+        f"never both: {overlap}"
+    )
+    missing = _stale_entries(_measure_all(), SHRINK_LOCKED_CEILINGS)
+    assert missing == [], (
+        "Shrink-locked path(s) no longer exist under src/notebooklm/ (renamed or "
+        f"deleted). Update SHRINK_LOCKED_CEILINGS: {missing}"
+    )
+
+
 def test_allowlist_has_no_stale_entries() -> None:
     """Every allowlisted path must still exist under ``src/notebooklm/``.
 
@@ -542,7 +448,7 @@ def test_credential_store_and_migration_modules_use_the_ordinary_budget() -> Non
     assert {path: measured[path] for path in leaves} == {
         "_auth/credential_io.py": 23,
         "_auth/master_token_file.py": 89,
-        "_auth/profile_migration.py": 419,
+        "_auth/profile_migration.py": 602,
         "_auth/profile_store.py": 876,
     }
     assert (
@@ -550,7 +456,7 @@ def test_credential_store_and_migration_modules_use_the_ordinary_budget() -> Non
         + measured["_auth/profile_store.py"]
         + measured["_auth/cookie_filter.py"]
         + measured["_auth/profile_migration.py"]
-        == 2481
+        == 2664
     )
     synthetic = dict.fromkeys(leaves, MODULE_SIZE_BUDGET + 1)
     assert _over_budget_offenders(synthetic, {}, MODULE_SIZE_BUDGET) == synthetic

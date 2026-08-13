@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -31,7 +32,7 @@ from notebooklm._app.research import (
     validate_research_wait_flags,
 )
 from notebooklm.exceptions import ValidationError
-from notebooklm.types import ResearchSource, ResearchStatus, ResearchTask
+from notebooklm.types import DiscoveryMode, ResearchSource, ResearchStatus, ResearchTask
 
 
 def _task(
@@ -44,6 +45,9 @@ def _task(
     report: str = "",
     status_code: int | None = None,
     source_type: int | None = None,
+    discovery_mode: DiscoveryMode | None = None,
+    created_at: datetime | None = None,
+    updated_at: datetime | None = None,
 ) -> ResearchTask:
     coerced = tuple(ResearchSource.from_public_dict(s) for s in (sources or []))
     return ResearchTask(
@@ -55,6 +59,9 @@ def _task(
         report=report,
         status_code=status_code,
         source_type=source_type,
+        discovery_mode=discovery_mode,
+        created_at=created_at,
+        updated_at=updated_at,
     )
 
 
@@ -639,3 +646,94 @@ async def test_import_research_sources_plain_list_return_has_empty_already_prese
     assert outcome.already_present == []
     _, kwargs = client.research.import_sources_with_verification.await_args
     assert kwargs == {"allow_duplicate": True}
+
+
+# ===========================================================================
+# Run metadata carried onto the shared MCP/REST view (#2122)
+# ===========================================================================
+
+_CREATED = datetime(2026, 8, 13, 11, 12, 58, tzinfo=timezone.utc)
+_UPDATED = datetime(2026, 8, 13, 11, 13, 5, tzinfo=timezone.utc)
+
+
+async def test_poll_projects_run_metadata_for_the_transports() -> None:
+    client = _client(
+        poll=_task(
+            status=ResearchStatus.COMPLETED,
+            query="AI research",
+            discovery_mode=DiscoveryMode.DEEP_RESEARCH,
+            created_at=_CREATED,
+            updated_at=_UPDATED,
+        )
+    )
+    result = await poll_and_classify(client, "nb_1")
+
+    # The LABEL, not the raw 5 — an agent must not have to know the enum.
+    assert result.discovery_mode == "deep_research"
+    assert result.created_at == "2026-08-13T11:12:58+00:00"
+    assert result.updated_at == "2026-08-13T11:13:05+00:00"
+    assert result.duration_seconds == 7.0
+
+
+async def test_poll_reports_absent_run_metadata_as_none() -> None:
+    """Most of these are optional on the wire; absence must not fabricate."""
+    client = _client(poll=_task(status=ResearchStatus.IN_PROGRESS, query="q"))
+    result = await poll_and_classify(client, "nb_1")
+
+    assert result.discovery_mode is None
+    assert result.created_at is None
+    assert result.updated_at is None
+    assert result.duration_seconds is None
+
+
+async def test_run_metadata_stays_off_the_byte_stable_public_dict() -> None:
+    """``public_dict`` is the CLI ``--json`` payload emitted verbatim, so the
+    task-level additions deliberately do not appear there (matching
+    ``status_code`` / ``source_type``)."""
+    client = _client(
+        poll=_task(
+            status=ResearchStatus.COMPLETED,
+            discovery_mode=DiscoveryMode.DEFAULT_LLM_SEARCH,
+            created_at=_CREATED,
+            updated_at=_UPDATED,
+        )
+    )
+    result = await poll_and_classify(client, "nb_1")
+
+    assert "discovery_mode" not in result.public_dict
+    assert "created_at" not in result.public_dict
+    assert "updated_at" not in result.public_dict
+
+
+async def test_source_hint_does_reach_the_public_source_dicts() -> None:
+    """Unlike the task-level fields, the per-source hint rides the existing
+    conditional-key convention (``source_ordinal`` / ``report_markdown``), so
+    it reaches the CLI, MCP and REST source payloads alike."""
+    client = _client(
+        poll=_task(
+            status=ResearchStatus.COMPLETED,
+            sources=[
+                {"url": "http://example.com/1", "title": "S1", "hint": "why this one"},
+                {"url": "http://example.com/2", "title": "S2"},
+            ],
+        )
+    )
+    result = await poll_and_classify(client, "nb_1")
+
+    assert result.sources[0]["hint"] == "why this one"
+    assert "hint" not in result.sources[1]
+
+
+async def test_unmappable_discovery_mode_reaches_the_transports_as_unknown() -> None:
+    """The adapter's UNKNOWN-vs-None distinction has to survive projection.
+
+    ``None`` means "the poll made no mode claim"; ``"unknown"`` means "the
+    backend named a mode this client cannot read" — i.e. Google added a mode
+    and the enum needs updating. If both projected to ``null`` the drift signal
+    would die at the transport boundary, one layer short of the operator.
+    """
+    client = _client(
+        poll=_task(status=ResearchStatus.COMPLETED, discovery_mode=DiscoveryMode.UNKNOWN)
+    )
+    result = await poll_and_classify(client, "nb_1")
+    assert result.discovery_mode == "unknown"

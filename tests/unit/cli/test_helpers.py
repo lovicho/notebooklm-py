@@ -18,7 +18,7 @@ import notebooklm.cli.helpers as helpers_module
 import notebooklm.cli.rendering as rendering_module
 import notebooklm.cli.research_import as research_import_module
 import notebooklm.cli.runtime as runtime_module
-from notebooklm import Artifact
+from notebooklm import Artifact, SourceType
 from notebooklm.cli.helpers import (
     clear_context,
     cli_name_to_artifact_type,
@@ -153,6 +153,11 @@ class TestGetSourceTypeDisplay:
 
     def test_markdown(self):
         assert get_source_type_display("markdown") == "📝 Markdown"
+
+    def test_powerpoint(self):
+        """A mapped type must not render through the unknown fallback (#2137)."""
+        assert get_source_type_display(SourceType.POWERPOINT) == "📊 PowerPoint"
+        assert "❓" not in get_source_type_display("powerpoint")
 
     def test_google_spreadsheet(self):
         assert get_source_type_display("google_spreadsheet") == "📊 Google Sheets"

@@ -5,6 +5,7 @@ import reprlib
 from typing import Any
 
 from ._idempotency import idempotent_create
+from ._idempotency import mark_unconfirmed as _unconfirmed
 from ._notebook_metadata import (
     NotebookMetadataService,
     NotebookSourceLister,
@@ -531,9 +532,22 @@ class NotebooksAPI:
         # uniqueness should embed a UUID in the title.
         try:
             baseline_ids = {nb.id for nb in await self.list()}
-        except Exception:
-            logger.debug(
-                "create: baseline list() failed; falling back to empty baseline",
+        except Exception as exc:
+            # WARNING, not DEBUG (#2220 parity with the source paths, #2204):
+            # the ``notebooklm`` logger defaults to WARNING, so a DEBUG record
+            # here is discarded before any handler sees it and the call silently
+            # proceeds with the empty-baseline limitation described above live.
+            #
+            # Swallowing is still right at *baseline* time — nothing has been
+            # written yet, so degrading is safe and failing here would break
+            # creates that would otherwise have succeeded. The probe below runs
+            # after a create that may already have committed and therefore has
+            # no such freedom; that asymmetry is the whole shape of #2220.
+            logger.warning(
+                "create: baseline list() failed (%s); falling back to an empty baseline, so "
+                "a pre-existing notebook with this title could be mistaken for one this "
+                "call created",
+                type(exc).__name__,
                 exc_info=True,
             )
             baseline_ids = set()
@@ -563,14 +577,15 @@ class NotebooksAPI:
             # connectivity recovers) before retrying the create.
             #
             # Other exception types (decoding errors, unexpected RPC
-            # failures, programming bugs) are still treated as "probe
-            # could not confirm a match" — those signal that the probe
-            # path itself is broken in a way that wouldn't be fixed by a
-            # retry, so falling through to None preserves the existing
-            # contract of "best-effort probe".
+            # failures, programming bugs) propagate too, as of #2220. They
+            # signal that the probe path itself is broken — which is exactly
+            # when its protection matters most, because "broken probe" is
+            # indistinguishable from "the create did not land". The old
+            # best-effort contract returned ``None`` there and let the create
+            # be re-issued on no evidence.
             try:
                 current = await self.list()
-            except (AuthError, RateLimitError, ServerError, NetworkError):
+            except (AuthError, RateLimitError, ServerError, NetworkError) as exc:
                 # Transport- and auth-level probe failures must propagate.
                 # Silently returning None here lets ``idempotent_create``
                 # re-issue the create on top of a broken probe, which is
@@ -579,13 +594,44 @@ class NotebooksAPI:
                     "create: probe list() failed with transport/auth error; "
                     "propagating so the caller can avoid a duplicate-resource retry"
                 )
+                # Mark it UNCONFIRMED before it goes (#2220 review): the create
+                # may already have committed and this probe could not say, which
+                # is the same predicament as the decode branch below. Without the
+                # marker a ServerError/RateLimitError here classifies as the
+                # *retriable* SERVER/RATE_LIMITED with the hint "retry after a
+                # short delay" — and the caller retries the ADD, not the probe.
+                # The underlying type is left intact, so "re-authenticate" /
+                # "connectivity" remain readable in the message.
+                _unconfirmed(exc)
                 raise
-            except Exception:
-                logger.debug(
-                    "create: probe list() failed with non-transport error; treating as no match",
+            except Exception as exc:
+                # Propagate, do not retry (#2220). ``notebooks.create`` is the
+                # fourth instance of the probe-then-create pattern the issue
+                # names three of; leaving it swallowing would split the very
+                # uniformity that argument rests on. ``RPCError`` matches what
+                # the ambiguity branch below already raises, so no call site's
+                # ``except`` clause changes meaning.
+                logger.warning(
+                    "create: probe list() failed with a non-transport error (%s); the "
+                    "create cannot be confirmed, so it will not be retried",
+                    type(exc).__name__,
                     exc_info=True,
                 )
-                return None
+                raise _unconfirmed(
+                    RPCError(
+                        # Action first — the MCP/REST surfaces truncate messages at
+                        # 300 characters, which cut the closing instruction off.
+                        "UNRESOLVED — do not blindly retry; check your notebook list "
+                        f"first. Cannot confirm notebook with title {title!r}: the "
+                        "create failed at the transport level and may or may not have "
+                        "committed, and the idempotency probe that would settle it "
+                        f"failed too ({type(exc).__name__}). No FURTHER attempt was made, "
+                        "because retrying on an unanswered probe is how duplicates "
+                        "happen — but an earlier attempt in this call may also have "
+                        "committed.",
+                        method_id=RPCMethod.CREATE_NOTEBOOK.value,
+                    )
+                ) from exc
             matches = [nb for nb in current if nb.id not in baseline_ids and nb.title == title]
             if len(matches) == 1:
                 # ``matches`` is a list of typed ``Notebook`` objects (NOT a raw
@@ -598,11 +644,13 @@ class NotebooksAPI:
                 # Ambiguous: more than one new notebook with this title
                 # appeared during the call. We cannot safely pick one;
                 # surface the situation so the caller can resolve it.
-                raise RPCError(
-                    f"Cannot disambiguate notebook with title {title!r}: "
-                    f"probe found {len(matches)} new notebooks with this title "
-                    "after a transport failure. Resolve manually before retrying.",
-                    method_id=RPCMethod.CREATE_NOTEBOOK.value,
+                raise _unconfirmed(
+                    RPCError(
+                        f"Cannot disambiguate notebook with title {title!r}: "
+                        f"probe found {len(matches)} new notebooks with this title "
+                        "after a transport failure. Resolve manually before retrying.",
+                        method_id=RPCMethod.CREATE_NOTEBOOK.value,
+                    )
                 )
             return None
 

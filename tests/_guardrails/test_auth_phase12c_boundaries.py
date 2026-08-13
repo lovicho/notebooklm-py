@@ -40,7 +40,7 @@ _MODULE_HASHES = {
     "keepalive.py": "505cfcf1d093d7aea2f26c2b7745a27ed8f7b51698e1bebdc3fafe4d6f78f065",
     "master_token.py": "2e1bc5d80ace5cd0cc5eddac9df54a7a33db9f33fc7b182050f6d3d94e027bd0",
     "master_token_types.py": "7ff6d938d34c22351783ba23396f2dff5403f0cc1455dd96595f0e91f3b8c863",
-    "profile_migration.py": "e05ab27dc40378d75323f3ffbd234861c69adbc0bf3653c13fc463f922f33b99",
+    "profile_migration.py": "ec44ca45ee226cb35e6f8049ab3a01068da0275969dca25c9f7bf802767db596",
     "profile_store.py": "26d63e626a6bf5333bb5e73f371177bff7c41baa6e11206ae8fbe5151a65b793",
     "psidts_recovery.py": "cde36fed0fcdc319a3e1d3a165c33d2a05385141b318667d4ce8c2c54ff7e51f",
     "recovery.py": "b396b441096ef4a4a961cccec8bf846eeb5aa1e11848927d1e3de8118e55e1e1",

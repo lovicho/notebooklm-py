@@ -740,6 +740,22 @@ def register_file_routes(mcp: FastMCP, config: FileTransferConfig) -> None:
                                 "retry cleanly."
                             ),
                         )
+                    # An UNCONFIRMED registration (#2220) reaches neither branch
+                    # above: its idempotency probe could not say whether the
+                    # register committed, so there is no ``source_id`` to name —
+                    # and the "your file uploaded" note below would be flatly
+                    # false, because registration failed BEFORE the resumable
+                    # upload started. Worse, it invites the retry that duplicates.
+                    if getattr(exc, "unconfirmed", False):
+                        return _upstream_error_response(
+                            exc,
+                            note=(
+                                "Nothing was uploaded. The source registration could "
+                                "not be confirmed, so it may or may not exist — check "
+                                "the notebook's source list before retrying, or a "
+                                "retry may add it twice."
+                            ),
+                        )
                     return _upstream_error_response(
                         exc,
                         note="Your file uploaded, but adding it as a source failed "

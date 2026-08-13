@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 import click
 import httpx
 
+from .._app.views import notebook_viewed_keys
 from ..auth import MasterTokenError as _MasterTokenError
 from ..exceptions import AuthError, NotebookNotFoundError
 from ..paths import get_storage_path
@@ -542,7 +543,7 @@ def register_session_commands(cli):
                         "is_owner": nb.is_owner,
                         "role": role_label,
                         "created_at": nb.created_at.isoformat() if nb.created_at else None,
-                        "modified_at": nb.modified_at.isoformat() if nb.modified_at else None,
+                        **notebook_viewed_keys(nb),
                     },
                 }
             )

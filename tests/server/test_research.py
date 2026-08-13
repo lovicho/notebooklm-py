@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 
-from notebooklm._types.research import ResearchStart, ResearchStatus, ResearchTask
+from notebooklm._types.research import (
+    ResearchSource,
+    ResearchStart,
+    ResearchStatus,
+    ResearchTask,
+)
+from notebooklm.types import DiscoveryMode
 
 from .fakes import FakeClient
 
@@ -315,3 +322,43 @@ def test_status_route_omits_explanation_on_success(
     assert body["termination_reason"] == "completed"
     assert body["reason_message"] is None
     assert body["hint"] is None
+
+
+# --- run metadata on the status payload (#2122) ------------------------------
+
+
+def test_status_reports_run_metadata(authed_client: TestClient, fake_client: FakeClient) -> None:
+    resp = authed_client.post("/v1/notebooks/nb-1/research", json={"query": "topic"})
+    poll_id = resp.json()["poll_id"]
+    fake_client.research_tasks[("nb-1", poll_id)] = ResearchTask(
+        task_id=poll_id,
+        status=ResearchStatus.COMPLETED,
+        query="topic",
+        sources=(ResearchSource(url="https://a.example", title="A", hint="why this one"),),
+        discovery_mode=DiscoveryMode.DEEP_RESEARCH,
+        created_at=datetime(2026, 8, 13, 11, 12, 58, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 13, 11, 13, 5, tzinfo=timezone.utc),
+    )
+
+    body = authed_client.get(f"/v1/notebooks/nb-1/research/{poll_id}").json()
+
+    assert body["discovery_mode"] == "deep_research"
+    assert body["created_at"] == "2026-08-13T11:12:58+00:00"
+    assert body["updated_at"] == "2026-08-13T11:13:05+00:00"
+    assert body["duration_seconds"] == 7.0
+    assert body["sources"][0]["hint"] == "why this one"
+
+
+def test_status_run_metadata_is_null_when_absent(
+    authed_client: TestClient, fake_client: FakeClient
+) -> None:
+    resp = authed_client.post("/v1/notebooks/nb-1/research", json={"query": "topic"})
+    poll_id = resp.json()["poll_id"]
+    fake_client.set_research_completed("nb-1", poll_id)
+
+    body = authed_client.get(f"/v1/notebooks/nb-1/research/{poll_id}").json()
+
+    assert body["discovery_mode"] is None
+    assert body["created_at"] is None
+    assert body["updated_at"] is None
+    assert body["duration_seconds"] is None

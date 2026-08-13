@@ -10,6 +10,256 @@ from notebooklm.rpc import RPCMethod
 from notebooklm.rpc.types import ShareAccess, SharePermission, ShareViewLevel
 from notebooklm.types import SharedUser, ShareStatus
 
+#: The full ``GET_SHARE_STATUS`` payload as CAPTURED, copied verbatim from the
+#: response body recorded in ``tests/cassettes/cli_share_status.yaml`` and
+#: re-confirmed byte-identical in shape on 10/10 notebooks in a 2026-08 live
+#: sweep. Not hand-authored: the older fixtures in this module stop at three
+#: elements, which is exactly why slots 2-3 went unread until #2130.
+LIVE_SHARE_STATUS_ROW: list[Any] = [
+    [["owner@example.com", 1, [], ["Owner", "https://avatar=s512"]]],
+    None,
+    1000,
+    True,
+    None,
+    None,
+    [3, True, True],
+    False,
+]
+
+
+class TestShareStatusCapacityAndPolicyFields:
+    """``maxIndividualsShareLimit`` / ``isPublicSharingAllowed`` decoding (#2130).
+
+    Both slots are populated on every live response and were read by nobody; the
+    parser docstring described slot 2 as the bare literal ``1000`` without naming
+    it. The absent-slot cases below are not hypothetical — the pinned golden
+    capture ``tests/fixtures/rpc_golden/GET_SHARE_STATUS.json`` is a real
+    three-element response.
+    """
+
+    def test_decodes_both_fields_from_the_captured_row(self):
+        """The live 8-slot shape yields the real cap and the real policy gate."""
+        status = ShareStatus.from_api_response(LIVE_SHARE_STATUS_ROW, "nb-1")
+
+        assert status.max_individuals_share_limit == 1000
+        assert status.is_public_sharing_allowed is True
+        # Additive: the fields this parser already read are untouched.
+        assert status.is_public is False
+        assert len(status.shared_users) == 1
+
+    def test_short_response_reports_no_claim_rather_than_zero(self):
+        """A 3-element response (the pinned golden capture's real shape).
+
+        The distinction that matters: ``None`` is "the backend said nothing",
+        not a cap of ``0`` (which would read as "you may add no collaborators")
+        and not a policy denial.
+        """
+        status = ShareStatus.from_api_response(
+            [[["owner@example.com", 1, [], ["Owner", None]]], None, 1000], "nb-1"
+        )
+
+        assert status.max_individuals_share_limit == 1000
+        assert status.is_public_sharing_allowed is None
+
+    def test_fields_absent_entirely_stay_none(self):
+        status = ShareStatus.from_api_response([[], None], "nb-1")
+
+        assert status.max_individuals_share_limit is None
+        assert status.is_public_sharing_allowed is None
+
+    def test_policy_denial_is_distinguishable_from_no_claim(self):
+        """``False`` and ``None`` must not collapse — they have opposite meanings.
+
+        A caller gating a "make public" attempt has to be able to tell "the
+        tenant forbids this" from "this response did not say".
+        """
+        denied = ShareStatus.from_api_response(
+            [[], None, 1000, False, None, None, [3, True, True], False], "nb-1"
+        )
+        silent = ShareStatus.from_api_response([[], None, 1000], "nb-1")
+
+        assert denied.is_public_sharing_allowed is False
+        assert silent.is_public_sharing_allowed is None
+        assert denied.is_public_sharing_allowed is not silent.is_public_sharing_allowed
+
+    def test_null_slots_decode_as_no_claim(self):
+        """Explicit ``null`` in either slot is absence, not a value."""
+        status = ShareStatus.from_api_response([[], None, None, None], "nb-1")
+
+        assert status.max_individuals_share_limit is None
+        assert status.is_public_sharing_allowed is None
+
+    def test_boolean_in_the_limit_slot_is_rejected(self):
+        """``bool`` is an ``int`` subclass — ``True`` must not decode as a cap of 1.
+
+        Without the explicit ``bool`` exclusion this returns ``True``, and a
+        bulk-share caller budgeting against it would stop after one user.
+        """
+        status = ShareStatus.from_api_response([[], None, True, True], "nb-1")
+
+        assert status.max_individuals_share_limit is None
+
+    @pytest.mark.parametrize("drifted", [1, "true", "yes", [True]])
+    def test_non_boolean_in_the_policy_slot_is_rejected(self, drifted: Any):
+        """A truthy non-bool is drift, not a policy verdict, and must not coerce."""
+        status = ShareStatus.from_api_response([[], None, 1000, drifted], "nb-1")
+
+        assert status.is_public_sharing_allowed is None
+
+    def test_string_in_the_limit_slot_is_rejected(self):
+        status = ShareStatus.from_api_response([[], None, "1000", True], "nb-1")
+
+        assert status.max_individuals_share_limit is None
+
+    @pytest.mark.asyncio
+    async def test_set_view_level_preserves_the_decoded_fields(
+        self, auth_tokens, httpx_mock: HTTPXMock, build_rpc_response
+    ):
+        """``set_view_level`` must not discard what ``get_status`` just decoded.
+
+        It re-fetches the status and overrides only ``view_level``. That rebuild
+        used to list six fields explicitly, so the cap and the policy gate came
+        back ``None`` — reporting "the backend made no claim" about values the
+        backend had, in the same call, just stated. The REST
+        ``POST /share/view-level`` route and the MCP view-level-only branch of
+        ``share_set_access`` both project this object, so the nulls reached
+        users on two adapters while every suite stayed green.
+        """
+        httpx_mock.add_response(content=build_rpc_response(RPCMethod.RENAME_NOTEBOOK, []).encode())
+        httpx_mock.add_response(
+            content=build_rpc_response(RPCMethod.GET_SHARE_STATUS, LIVE_SHARE_STATUS_ROW).encode()
+        )
+
+        async with NotebookLMClient(auth_tokens) as client:
+            status = await client.sharing.set_view_level("nb_123", ShareViewLevel.CHAT_ONLY)
+
+        # The point of the call still holds.
+        assert status.view_level == ShareViewLevel.CHAT_ONLY
+        # ...and nothing else was dropped on the way.
+        assert status.max_individuals_share_limit == 1000
+        assert status.is_public_sharing_allowed is True
+
+    def test_denied_predicate_fires_only_on_an_explicit_false(self):
+        """``is_public_sharing_denied`` must not fire on the unknown case.
+
+        This is the whole reason the property exists: the idiomatic
+        ``not status.is_public_sharing_allowed`` is ``True`` for ``None`` too,
+        so it reports a denial the backend never made.
+        """
+        denied = ShareStatus.from_api_response([[], None, 1000, False], "nb-1")
+        allowed = ShareStatus.from_api_response([[], None, 1000, True], "nb-1")
+        silent = ShareStatus.from_api_response([[], None, 1000], "nb-1")
+
+        assert denied.is_public_sharing_denied is True
+        assert allowed.is_public_sharing_denied is False
+        assert silent.is_public_sharing_denied is False
+        # The trap the property exists to replace: the naive spelling gets the
+        # silent case wrong, while the property gets it right.
+        assert not silent.is_public_sharing_allowed
+        assert silent.is_public_sharing_denied is False
+
+    def test_malformed_slot_warns_but_absent_slot_is_silent(self, caplog):
+        """Drift is reported; genuine absence is not.
+
+        Absence and drift share the ``None`` representation, so without a log
+        line a backend shape change in either slot would be completely
+        invisible — and shape drift is this client's #1 breakage class.
+        """
+        import logging
+
+        from notebooklm._types import sharing as sharing_mod
+
+        sharing_mod._warned_malformed_share_slots.clear()
+
+        with caplog.at_level(logging.WARNING, logger=sharing_mod.__name__):
+            ShareStatus.from_api_response([[], None, "1000", "yes"], "nb-1")
+        assert "maxIndividualsShareLimit" in caplog.text
+        assert "isPublicSharingAllowed" in caplog.text
+
+        # A short response is normal, not drift, and must stay quiet.
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=sharing_mod.__name__):
+            ShareStatus.from_api_response([[], None], "nb-1")
+        assert caplog.text == ""
+
+        # An explicit null is absence too.
+        with caplog.at_level(logging.WARNING, logger=sharing_mod.__name__):
+            ShareStatus.from_api_response([[], None, None, None], "nb-1")
+        assert caplog.text == ""
+
+    def test_malformed_slot_warn_cache_is_bounded(self):
+        """The warn-once cache must not grow with the number of distinct payloads.
+
+        It sits on a decode path that runs on every share-status read, so keying
+        it on the value would leak memory in any long-lived process (the REST
+        server, an MCP session). Keying on the *type* bounds it by construction:
+        feeding 500 distinct malformed values adds one entry per (field, type).
+        """
+        from notebooklm._types import sharing as sharing_mod
+
+        sharing_mod._warned_malformed_share_slots.clear()
+
+        for i in range(500):
+            ShareStatus.from_api_response([[], None, f"cap-{i}", f"gate-{i}"], "nb-1")
+
+        # Two fields, one type (str) each — not 1000 entries.
+        assert sharing_mod._warned_malformed_share_slots == {
+            ("maxIndividualsShareLimit", "str"),
+            ("isPublicSharingAllowed", "str"),
+        }
+
+        # A genuinely different failure mode is still reported once more, so
+        # bounding the cache did not cost the signal it exists to carry.
+        ShareStatus.from_api_response([[], None, [1], [2]], "nb-1")
+        assert ("maxIndividualsShareLimit", "list") in sharing_mod._warned_malformed_share_slots
+        assert len(sharing_mod._warned_malformed_share_slots) == 4
+
+    def test_malformed_slot_warns_once_per_failure_mode(self, caplog):
+        """A polled notebook must not re-emit the same drift line every decode.
+
+        "Once" is per ``(field, type)`` — the granularity the bounded cache
+        keys on — not per distinct value.
+        """
+        import logging
+
+        from notebooklm._types import sharing as sharing_mod
+
+        sharing_mod._warned_malformed_share_slots.clear()
+
+        with caplog.at_level(logging.WARNING, logger=sharing_mod.__name__):
+            for _ in range(5):
+                ShareStatus.from_api_response([[], None, "1000", True], "nb-1")
+
+        assert caplog.text.count("maxIndividualsShareLimit") == 1
+
+    def test_unnamed_trailing_slots_are_not_surfaced(self):
+        """Tags 7-8 are populated live but deliberately undecoded (#2130).
+
+        The mobile ``GetProjectDetailsResponse`` declares only tags 2-4, so
+        nothing names them. This pins the decision: if a future change starts
+        exposing them, it must come with a name and a wire-contract entry.
+        """
+        status = ShareStatus.from_api_response(LIVE_SHARE_STATUS_ROW, "nb-1")
+
+        # An exact field-set comparison, deliberately not a name heuristic or a
+        # search for the raw value. Both of those are escapable: a slot exposed
+        # under any name that does not contain "tag", or stored decomposed
+        # (``can_invite=data[6][1]``) rather than verbatim, would slip past.
+        # Pinning the whole set fails for ANY new field regardless of name or
+        # shape, which is the actual intent — a new field is then a deliberate
+        # act that updates this list and, for a wire slot, adds the naming
+        # evidence to the wire contract.
+        assert set(vars(status)) == {
+            "notebook_id",
+            "is_public",
+            "access",
+            "view_level",
+            "shared_users",
+            "share_url",
+            "max_individuals_share_limit",
+            "is_public_sharing_allowed",
+        }
+
 
 class TestSharedUser:
     """Tests for SharedUser dataclass."""

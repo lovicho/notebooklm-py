@@ -477,6 +477,9 @@ class TestSourceAddResearchCharacterization:
         assert result.exit_code == 0
         assert "Task ID:" in result.output
         assert "Research started" in result.output
+        # The --no-wait success path must name the non-blocking follow-up, not
+        # just tell a user who opted out of waiting to go wait (#2206).
+        assert "research import" in result.output
 
     def test_add_research_no_wait_with_import_all_is_usage_error(
         self, runner, mock_auth, patched_fetch_tokens

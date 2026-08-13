@@ -6,16 +6,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from notebooklm.rpc.types import (
     BATCHEXECUTE_URL,
     QUERY_URL,
     ArtifactStatus,
     ArtifactTypeCode,
+    DiscoveryMode,
+    DriveSourceStatus,
     GrpcStatusCode,
     RPCMethod,
     SharePermission,
     SourceStatus,
     artifact_status_to_str,
+    discovery_mode_to_str,
+    drive_source_status_to_str,
     get_batchexecute_url,
     get_query_url,
     normalize_grpc_status,
@@ -182,33 +188,52 @@ class TestArtifactTypeCode:
         assert isinstance(ArtifactTypeCode.AUDIO.value, int)
 
 
+#: The backend ``ArtifactStatus`` enum, code by code, as recovered in
+#: ``docs/mobile/enums.txt`` and corrected against live traces in #2127.
+#: ``(wire code, member name, public status string)``.
+_ARTIFACT_STATUS_TABLE = [
+    (0, "UNKNOWN", "unknown"),
+    (1, "PENDING", "pending"),
+    (2, "PROCESSING", "in_progress"),
+    (3, "COMPLETED", "completed"),
+    (4, "FAILED", "failed"),
+    (5, "SUGGESTED", "suggested"),
+    (6, "PENDING_REVIEW", "pending_review"),
+]
+
+
 class TestArtifactStatusToStr:
-    """Tests for artifact_status_to_str helper function."""
+    """Pin every backend ``ArtifactStatus`` code to its member and status string."""
 
-    def test_processing_status(self):
-        """Test status code 1 (PROCESSING) returns 'in_progress'."""
-        assert artifact_status_to_str(ArtifactStatus.PROCESSING) == "in_progress"
-        assert artifact_status_to_str(1) == "in_progress"
+    @pytest.mark.parametrize(
+        ("code", "member_name", "expected"),
+        _ARTIFACT_STATUS_TABLE,
+        ids=[name for _code, name, _s in _ARTIFACT_STATUS_TABLE],
+    )
+    def test_code_maps_to_member_and_string(self, code, member_name, expected):
+        member = ArtifactStatus(code)
+        assert member.name == member_name
+        assert artifact_status_to_str(code) == expected
+        assert artifact_status_to_str(member) == expected
 
-    def test_pending_status(self):
-        """Test status code 2 (PENDING) returns 'pending'."""
-        assert artifact_status_to_str(ArtifactStatus.PENDING) == "pending"
-        assert artifact_status_to_str(2) == "pending"
+    def test_enum_covers_exactly_the_backend_codes(self):
+        """No member is missing, and none was invented beyond the backend enum."""
+        assert {member.value for member in ArtifactStatus} == {
+            code for code, _name, _s in _ARTIFACT_STATUS_TABLE
+        }
 
-    def test_completed_status(self):
-        """Test status code 3 (COMPLETED) returns 'completed'."""
-        assert artifact_status_to_str(ArtifactStatus.COMPLETED) == "completed"
-        assert artifact_status_to_str(3) == "completed"
+    def test_transitional_codes_are_not_transposed(self):
+        """#2127 regression pin: 1 is queued, 2 is actively generating.
 
-    def test_failed_status(self):
-        """Test status code 4 (FAILED) returns 'failed'."""
-        assert artifact_status_to_str(ArtifactStatus.FAILED) == "failed"
-        assert artifact_status_to_str(4) == "failed"
+        Two independent live traces observed ``2 -> 3`` on a generating
+        artifact, and every recorded CREATE_ARTIFACT row starts at 1.
+        """
+        assert ArtifactStatus.PENDING == 1
+        assert ArtifactStatus.PROCESSING == 2
 
-    def test_unknown_status_codes(self):
-        """Test unknown status codes return 'unknown'."""
-        assert artifact_status_to_str(0) == "unknown"
-        assert artifact_status_to_str(5) == "unknown"
+    def test_unrecognized_status_codes_degrade_to_unknown(self):
+        """Codes outside the backend enum still fail closed rather than raise."""
+        assert artifact_status_to_str(7) == "unknown"
         assert artifact_status_to_str(99) == "unknown"
         assert artifact_status_to_str(-1) == "unknown"
 
@@ -264,6 +289,67 @@ class TestSharePermissionToStr:
         assert share_permission_to_str(5) == "unknown"
         assert share_permission_to_str(99) == "unknown"
         assert share_permission_to_str(-1) == "unknown"
+
+
+class TestDriveSourceStatusToStr:
+    """Tests for the drive_source_status_to_str helper function (#2111)."""
+
+    def test_every_member_has_a_label(self):
+        """No member falls through to the "unknown" default by accident."""
+        assert {member: drive_source_status_to_str(member) for member in DriveSourceStatus} == {
+            DriveSourceStatus.UNKNOWN: "unknown",
+            DriveSourceStatus.INACCESSIBLE: "inaccessible",
+            DriveSourceStatus.SYNCING: "syncing",
+            DriveSourceStatus.ACTIVE: "active",
+            DriveSourceStatus.DELETED: "deleted",
+            DriveSourceStatus.GEN_AI_ACCESS_DENIED: "gen_ai_access_denied",
+        }
+
+    def test_accepts_raw_wire_codes(self):
+        """The backend UserDriveSourceStatus integers map without an enum wrap."""
+        assert drive_source_status_to_str(1) == "inaccessible"
+        assert drive_source_status_to_str(2) == "syncing"
+        assert drive_source_status_to_str(3) == "active"
+        assert drive_source_status_to_str(4) == "deleted"
+        assert drive_source_status_to_str(5) == "gen_ai_access_denied"
+
+    def test_unknown_codes_degrade(self):
+        """Unrecognized codes return 'unknown' (future-proofing)."""
+        # 0 is the backend UNSPECIFIED, deliberately unmodelled: the decoder
+        # normalizes it to None before a label is ever asked for.
+        assert drive_source_status_to_str(0) == "unknown"
+        assert drive_source_status_to_str(6) == "unknown"
+        assert drive_source_status_to_str(99) == "unknown"
+        assert drive_source_status_to_str(-2) == "unknown"
+
+
+class TestDiscoveryModeToStr:
+    """Tests for the discovery_mode_to_str helper function (#2122)."""
+
+    def test_every_member_has_a_label(self):
+        """No member falls through to the "unknown" default by accident."""
+        assert {member: discovery_mode_to_str(member) for member in DiscoveryMode} == {
+            DiscoveryMode.UNKNOWN: "unknown",
+            DiscoveryMode.DEFAULT_LLM_SEARCH: "default_llm_search",
+            DiscoveryMode.RAW_SEARCH: "raw_search",
+            DiscoveryMode.CURIOUS_SEARCH: "curious_search",
+            DiscoveryMode.CURIOUS_RAW_SEARCH: "curious_raw_search",
+            DiscoveryMode.DEEP_RESEARCH: "deep_research",
+            DiscoveryMode.LITE_LLM_SEARCH: "lite_llm_search",
+        }
+
+    def test_accepts_raw_wire_codes(self):
+        """The backend DiscoveryMode integers map without an enum wrap."""
+        assert discovery_mode_to_str(1) == "default_llm_search"
+        assert discovery_mode_to_str(5) == "deep_research"
+
+    def test_unknown_codes_degrade(self):
+        """Unrecognized codes return 'unknown' (future-proofing)."""
+        # 0 is the backend UNSPECIFIED, deliberately unmodelled: the decoder
+        # normalizes it to None before a label is ever asked for.
+        assert discovery_mode_to_str(0) == "unknown"
+        assert discovery_mode_to_str(7) == "unknown"
+        assert discovery_mode_to_str(-2) == "unknown"
 
 
 class TestGrpcStatusCode:

@@ -204,9 +204,10 @@ async def _add_source(
         client, add_core.SourceAddExecutionPlan(notebook_id=notebook_id, plan=plan)
     )
     pending.record(notebook_id, result.source.id)
-    # Project with the shared enriched view (string ``kind`` / ``status_label``
-    # alongside the raw codes) so the create path matches ``GET`` — a raw
-    # ``to_jsonable`` here would leak bare ``status`` / ``_type_code`` integers.
+    # Project with the shared enriched view (string ``kind`` / ``status_label`` /
+    # ``drive_status_label`` alongside the raw codes) so the create path matches
+    # ``GET`` — a raw ``to_jsonable`` here would leak bare ``status`` /
+    # ``_type_code`` integers.
     return source_view(result.source)
 
 
@@ -219,8 +220,10 @@ async def list_sources(
 ) -> dict[str, Any]:
     """List a notebook's sources.
 
-    Each source carries string ``kind`` / ``status_label`` labels alongside the
-    raw type/status codes (shared with the MCP ``source_list`` surface). Defaults
+    Each source carries string ``kind`` / ``status_label`` /
+    ``drive_status_label`` labels plus the ``is_drive_degraded`` verdict,
+    alongside the raw type/status codes (shared with the MCP ``source_list``
+    surface). Defaults
     to the full collection under ``sources`` (unchanged); supply ``?limit=`` to
     slice and add a ``meta`` block, ``?offset=`` to page forward.
     """
@@ -248,7 +251,8 @@ async def get_source(
         raise HTTPException(status_code=404, detail="Source not found")
     if source.is_ready:
         pending.drop(notebook_id, source_id)
-    # Enriched view: string ``kind`` / ``status_label`` alongside the raw codes
+    # Enriched view: string ``kind`` / ``status_label`` / ``drive_status_label``
+    # plus the ``is_drive_degraded`` verdict, alongside the raw codes
     # (shared with the MCP source surface).
     return source_view(source)
 
@@ -505,6 +509,10 @@ async def add_batch(
         else:
             pending.record(notebook_id, result.source.id)
             view = source_view(result.source)
+            # Mirrors the MCP batch envelope: a per-input RESULT record for a
+            # just-created source, not a full source view. Drive health (#2111)
+            # is deliberately absent — it carries no signal at add time; read it
+            # back through GET /sources or /sources/{id}, which do project it.
             results.append(
                 {
                     "input": entry,
@@ -538,7 +546,8 @@ async def wait_sources(notebook_id: str, body: SourceWaitBody, client: ClientDep
         {"notebook_id", "ok", "ready", "timed_out", "failed", "not_found"}
 
     plus per-bucket ``*_count`` and a ``total_count`` (their sum). ``ready`` holds
-    the sources that reached READY (each with ``kind`` / ``status_label`` labels);
+    the sources that reached READY (each with ``kind`` / ``status_label`` /
+    ``drive_status_label`` labels);
     the error buckets hold ``{"source_id", "error"}`` entries. ``ok`` is true iff
     all three error buckets are empty — the all-sources mode reports partial
     progress rather than discarding the sources that did become ready.

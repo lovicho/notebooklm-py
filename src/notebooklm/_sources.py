@@ -388,6 +388,9 @@ class SourcesAPI:
 
         Automatically detects YouTube URLs and uses the appropriate method.
 
+        Fires one ``GET_NOTEBOOK`` before the create for the retry probe (#2204);
+        that read bumps Recent position (#2126). See the service method's docs.
+
         Args:
             notebook_id: The notebook ID.
             url: The URL to add.
@@ -417,7 +420,10 @@ class SourcesAPI:
             logger=logger,
             return_result=True,
         )
-        return await honor_requested_title_if_fresh(self.rename, notebook_id, result, title, logger)
+        # Baseline-filtered probe ⇒ even a PROBED result is ours to rename (#2204).
+        return await honor_requested_title_if_fresh(
+            self.rename, notebook_id, result, title, logger, probe_proves_freshness=True
+        )
 
     async def add_text(
         self,
@@ -540,17 +546,16 @@ class SourcesAPI:
     ) -> Source:
         """Add a Google Drive document as a source.
 
+        Fires one ``GET_NOTEBOOK`` before the create for the retry probe (#2113);
+        that read bumps Recent position (#2126). See the service method's docs.
+
         Args:
             notebook_id: The notebook ID.
             file_id: The Google Drive file ID.
-            title: Display title. Native Drive imports re-derive the title from
-                live Drive metadata server-side, so a supplied ``title`` is honored
-                via a best-effort follow-up :meth:`rename` (non-fatal; #1960).
-            mime_type: MIME type of the Drive document. Common values:
-                - application/vnd.google-apps.document (Google Docs)
-                - application/vnd.google-apps.presentation (Slides)
-                - application/vnd.google-apps.spreadsheet (Sheets)
-                - application/pdf (PDF files in Drive)
+            title: Display title. Drive imports re-derive it server-side, so a
+                supplied ``title`` is honored via a follow-up :meth:`rename` (#1960).
+            mime_type: Drive MIME type (Docs / Slides / Sheets /
+                ``application/pdf``) — see :class:`~notebooklm.types.DriveMimeType`.
             wait: If True, wait for source to be ready before returning.
             wait_timeout: Maximum seconds to wait if wait=True (default: 120).
 
@@ -559,10 +564,8 @@ class SourcesAPI:
 
         Example:
             from notebooklm.types import DriveMimeType
-
-            source = await client.sources.add_drive(
-                notebook_id, file_id="1abc123xyz", title="My Document",
-                mime_type=DriveMimeType.GOOGLE_DOC.value, wait=True)
+            source = await client.sources.add_drive(notebook_id, file_id="1abc123xyz",
+                title="My Document", mime_type=DriveMimeType.GOOGLE_DOC.value, wait=True)
         """
         result = await self._adder.add_drive(
             notebook_id,
@@ -577,7 +580,10 @@ class SourcesAPI:
             logger=logger,
             return_result=True,
         )
-        return await honor_requested_title_if_fresh(self.rename, notebook_id, result, title, logger)
+        # Baseline-filtered probe ⇒ even a PROBED result is ours to rename (#2113).
+        return await honor_requested_title_if_fresh(
+            self.rename, notebook_id, result, title, logger, probe_proves_freshness=True
+        )
 
     async def add_drive_file(
         self,
@@ -590,7 +596,9 @@ class SourcesAPI:
     ) -> Source:
         """Auto-route an upload-only Google Drive file: download it, then upload (#1884).
 
-        Covers the upload-only Drive file types (epub/docx/txt/md/rtf/odt/csv/tsv/pdf);
+        Covers the upload-only Drive file types
+        (epub/docx/pptx/txt/md/rtf/odt/csv/tsv/pdf; the rejection error names the
+        full accepted set, derived from one declaration);
         a Drive PDF can also go by reference via :meth:`add_drive`. Fetches the file
         SERVER-SIDE using the same live ``.google.com`` cookie jar the upload leg
         uses (so it works in stdio AND remote MCP mode with no ``upload_required``
@@ -798,8 +806,8 @@ class SourcesAPI:
 
         Note:
             Source type codes include: 1=google_docs, 2=google_slides, 3=pdf,
-            4=pasted_text, 5=web_page, 8=markdown, 9=youtube, 10=media,
-            11=docx, 13=image, 14=google_spreadsheet, 16=csv, 17=epub.
+            4=pasted_text, 5=web_page, 6=powerpoint, 8=markdown, 9=youtube,
+            10=media, 11=docx, 13=image, 14=google_spreadsheet, 16=csv, 17=epub.
 
             The ``"markdown"`` format works by requesting the HTML rendition
             from the API (params ``[3],[3]`` instead of ``[2],[2]``) and

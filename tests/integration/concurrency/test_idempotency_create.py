@@ -12,8 +12,8 @@ Post-fix:
 - An API-layer ``_idempotency.idempotent_create`` wrapper owns
   probe-then-retry with API-specific probes:
     - notebooks.create → baseline-diff by title
-    - sources.add_url → list-then-url-match
-    - sources._add_youtube_source → list-then-url-match
+    - sources.add_url → list-then-url-match, baseline-diff (#2204)
+    - sources._add_youtube_source → same wrapper as sources.add_url
 - ``sources.add_text`` is decision-not-to-fix: the new ``idempotent=True``
   keyword raises ``NonIdempotentRetryError`` rather than silently
   duplicating (no reliable server-side dedupe key for text sources).
@@ -32,6 +32,7 @@ Test plan:
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
 import pytest
@@ -43,6 +44,7 @@ from notebooklm import (
     RPCError,
     ServerError,
 )
+from notebooklm._app.errors import ErrorCategory, classify
 from notebooklm.rpc import RPCMethod
 from tests._fixtures.kernel_test_helpers import install_http_client_for_test
 
@@ -101,6 +103,8 @@ def _create_notebook_response(notebook_id: str, title: str) -> str:
 def _get_notebook_with_sources_response(
     notebook_id: str,
     sources: list[tuple[str, str, str]],
+    *,
+    type_code: int = 5,
 ) -> str:
     """Build a GET_NOTEBOOK response that ``SourcesAPI.list`` parses.
 
@@ -108,12 +112,18 @@ def _get_notebook_with_sources_response(
     the parsing path in ``SourcesAPI.list`` (which reads from
     ``GET_NOTEBOOK``): each src entry is roughly
     ``[[id], title, metadata_with_url_at_[7], status]``.
+
+    ``type_code`` is the source-type code at ``metadata[4]`` — 5 (web page) by
+    default, 9 for YouTube (``SourceType``). It does not steer the probe, which
+    reads only ``source.url``, but a YouTube test that hands the probe a
+    web-page row is not exercising a YouTube row.
     """
     src_rows = []
     for src_id, title, url in sources:
         # metadata: url at index [7] (matches Source.from_api_response /
         # _extract_source_url precedence, allow_bare_http=False).
         metadata: list = [None] * 8
+        metadata[4] = type_code
         metadata[7] = [url]
         # status block at src[3] — [_, READY=2]
         status_block = [None, 2]
@@ -256,14 +266,102 @@ async def test_notebooks_create_re_creates_when_probe_finds_nothing(auth_tokens)
     assert list_rpc_count == 2, f"expected 2 LIST_NOTEBOOKS, got {list_rpc_count}"
 
 
+async def test_notebooks_create_probe_decode_failure_aborts_instead_of_retrying(
+    auth_tokens, caplog
+) -> None:
+    """A probe that cannot answer aborts the create instead of retrying (#2220).
+
+    ``notebooks.create`` is the fourth instance of the probe-then-create shape
+    (the three source paths are the others), and #2220's argument is that they
+    move together. A drifted LIST_NOTEBOOKS makes the decoder raise, which is
+    not a transport signal but does leave the probe unable to say whether the
+    create landed — so re-issuing CREATE_NOTEBOOK would risk two notebooks with
+    the same title and hand back neither id.
+    """
+    title = "Undecodable Probe"
+    create_rpc_count = 0
+    list_rpc_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal create_rpc_count, list_rpc_count
+        rpc_id = _rpc_id_in_request(request)
+        if rpc_id == RPCMethod.LIST_NOTEBOOKS.value:
+            list_rpc_count += 1
+            if list_rpc_count == 1:
+                return httpx.Response(200, text=_list_notebooks_response([]))
+            # Structurally undecodable list envelope -> decode error, not 5xx.
+            return httpx.Response(
+                200, text=_wrb_response(RPCMethod.LIST_NOTEBOOKS.value, "nonsense")
+            )
+        if rpc_id == RPCMethod.CREATE_NOTEBOOK.value:
+            create_rpc_count += 1
+            return httpx.Response(502, text="bad gateway")
+        return httpx.Response(404, text="unexpected")
+
+    transport = httpx.MockTransport(handler)
+    client = _make_client_with_transport(transport, auth_tokens)
+    with caplog.at_level(logging.WARNING, logger="notebooklm._notebooks"):
+        try:
+            with pytest.raises(RPCError, match="Cannot confirm notebook"):
+                await client.notebooks.create(title)
+        finally:
+            await client._collaborators.kernel.get_http_client().aclose()
+
+    # The load-bearing assertion: ONE create, not two.
+    assert create_rpc_count == 1, f"expected 1 CREATE_NOTEBOOK, got {create_rpc_count}"
+    assert "will not be retried" in caplog.text
+
+
+async def test_notebooks_create_baseline_failure_warns_but_proceeds(auth_tokens, caplog) -> None:
+    """A failed *baseline* still degrades — loudly — rather than failing the create (#2220).
+
+    The asymmetry with the probe above is the point of the change: at baseline
+    time nothing has been written, so proceeding is safe and refusing would
+    break creates that would otherwise succeed. The record has to actually
+    reach a handler, though: the ``notebooklm`` logger defaults to WARNING, so
+    the old DEBUG line was dropped before anything could see it and the call ran
+    with a degraded probe in silence.
+    """
+    title = "Baseline Blind"
+    nb_id = "nb_created"
+    list_rpc_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal list_rpc_count
+        rpc_id = _rpc_id_in_request(request)
+        if rpc_id == RPCMethod.LIST_NOTEBOOKS.value:
+            list_rpc_count += 1
+            # The baseline read is undecodable; the create then succeeds.
+            return httpx.Response(
+                200, text=_wrb_response(RPCMethod.LIST_NOTEBOOKS.value, "nonsense")
+            )
+        if rpc_id == RPCMethod.CREATE_NOTEBOOK.value:
+            return httpx.Response(200, text=_create_notebook_response(nb_id, title))
+        return httpx.Response(404, text="unexpected")
+
+    transport = httpx.MockTransport(handler)
+    client = _make_client_with_transport(transport, auth_tokens)
+    with caplog.at_level(logging.WARNING, logger="notebooklm._notebooks"):
+        try:
+            notebook = await client.notebooks.create(title)
+        finally:
+            await client._collaborators.kernel.get_http_client().aclose()
+
+    assert notebook.id == nb_id
+    assert list_rpc_count == 1
+    # Emitted at a level the default configuration actually passes through.
+    assert "falling back to an empty baseline" in caplog.text
+
+
 async def test_notebooks_create_raises_on_ambiguous_probe(auth_tokens) -> None:
     """If the probe finds two new notebooks with the same title, raise rather than guess."""
     title = "Duplicate Title"
 
     list_rpc_count = 0
+    create_rpc_count = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal list_rpc_count
+        nonlocal list_rpc_count, create_rpc_count
         rpc_id = _rpc_id_in_request(request)
         if rpc_id == RPCMethod.LIST_NOTEBOOKS.value:
             list_rpc_count += 1
@@ -277,16 +375,31 @@ async def test_notebooks_create_raises_on_ambiguous_probe(auth_tokens) -> None:
                 text=_list_notebooks_response([("nb_a", title), ("nb_b", title)]),
             )
         if rpc_id == RPCMethod.CREATE_NOTEBOOK.value:
+            create_rpc_count += 1
             return httpx.Response(502, text="bad gateway")
         return httpx.Response(404, text="unexpected")
 
     transport = httpx.MockTransport(handler)
     client = _make_client_with_transport(transport, auth_tokens)
     try:
-        with pytest.raises(RPCError, match="disambiguate"):
+        with pytest.raises(RPCError, match="disambiguate") as exc_info:
             await client.notebooks.create(title)
     finally:
         await client._collaborators.kernel.get_http_client().aclose()
+
+    # The probe listed fine but cannot attribute either notebook, so the create's
+    # outcome is unknown — an unconfirmed create (#2220), not a plain protocol
+    # error. The marker is what keeps a caller (or an adapter) from being told to
+    # retry a create that may already have landed.
+    assert getattr(exc_info.value, "unconfirmed", False) is True
+    assert classify(exc_info.value).category is ErrorCategory.RPC
+    assert classify(exc_info.value).retriable is False
+    # The load-bearing half: an ambiguous probe must ABORT the retry loop, not
+    # merely be classified well after another create has already gone out.
+    # Classification alone would still pass if the loop kept going.
+    assert create_rpc_count == 1, (
+        f"expected 1 CREATE_NOTEBOOK (ambiguity aborts the loop), got {create_rpc_count}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +408,11 @@ async def test_notebooks_create_raises_on_ambiguous_probe(auth_tokens) -> None:
 
 
 async def test_sources_add_url_idempotent_on_5xx_retry(auth_tokens) -> None:
-    """ADD_SOURCE 5xx + probe(list)-finds-url returns existing source."""
+    """ADD_SOURCE 5xx + probe(list)-finds-url returns the source it created.
+
+    The source is absent from the pre-create baseline and present at probe
+    time, so it is provably the one this call committed (#2204).
+    """
     notebook_id = "nb_test"
     url = "https://example.com/article"
     src_id = "src_existing"
@@ -310,11 +427,13 @@ async def test_sources_add_url_idempotent_on_5xx_retry(auth_tokens) -> None:
             add_count += 1
             return httpx.Response(503, text="service unavailable")
         if rpc_id == RPCMethod.GET_NOTEBOOK.value:
-            # SourcesAPI.list calls GET_NOTEBOOK
+            # SourcesAPI.list calls GET_NOTEBOOK. Any list before the first
+            # create attempt is the pre-create baseline; later ones are probes.
             get_count += 1
+            rows = [] if add_count == 0 else [(src_id, "Existing", url)]
             return httpx.Response(
                 200,
-                text=_get_notebook_with_sources_response(notebook_id, [(src_id, "Existing", url)]),
+                text=_get_notebook_with_sources_response(notebook_id, rows),
             )
         return httpx.Response(404, text="unexpected")
 
@@ -329,8 +448,8 @@ async def test_sources_add_url_idempotent_on_5xx_retry(auth_tokens) -> None:
     assert source.url == url
     # Exactly ONE ADD_SOURCE: no naive re-POST after the 503
     assert add_count == 1, f"expected 1 ADD_SOURCE, got {add_count}"
-    # Exactly ONE GET_NOTEBOOK (the probe — no baseline for sources)
-    assert get_count == 1, f"expected 1 GET_NOTEBOOK probe, got {get_count}"
+    # TWO GET_NOTEBOOKs: the pre-create baseline plus the probe (#2204).
+    assert get_count == 2, f"expected baseline + probe GET_NOTEBOOK, got {get_count}"
 
 
 async def test_sources_add_youtube_idempotent_on_5xx_retry(auth_tokens) -> None:
@@ -350,11 +469,12 @@ async def test_sources_add_youtube_idempotent_on_5xx_retry(auth_tokens) -> None:
             return httpx.Response(502, text="bad gateway")
         if rpc_id == RPCMethod.GET_NOTEBOOK.value:
             get_count += 1
+            rows = [] if add_count == 0 else [(src_id, "Video Title", url)]
             return httpx.Response(
                 200,
-                text=_get_notebook_with_sources_response(
-                    notebook_id, [(src_id, "Video Title", url)]
-                ),
+                # type_code 9: a real YouTube row, not a web-page row wearing a
+                # YouTube URL — otherwise this test never sees a YouTube shape.
+                text=_get_notebook_with_sources_response(notebook_id, rows, type_code=9),
             )
         return httpx.Response(404, text="unexpected")
 
@@ -367,8 +487,9 @@ async def test_sources_add_youtube_idempotent_on_5xx_retry(auth_tokens) -> None:
 
     assert source.id == src_id
     assert source.url == url
+    assert source.kind == "youtube"
     assert add_count == 1, f"expected 1 ADD_SOURCE, got {add_count}"
-    assert get_count == 1, f"expected 1 GET_NOTEBOOK probe, got {get_count}"
+    assert get_count == 2, f"expected baseline + probe GET_NOTEBOOK, got {get_count}"
 
 
 # ---------------------------------------------------------------------------

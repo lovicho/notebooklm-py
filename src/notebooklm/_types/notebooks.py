@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from .._deprecation import warn_deprecated
 from ..rpc import RPCMethod, safe_index
 from ..rpc.types import SharePermission, share_permission_to_str
 from .common import _datetime_from_timestamp
@@ -107,27 +108,65 @@ class Notebook:
     #: Kept as a convenience derivation of :attr:`role`; it can no longer
     #: distinguish an editor from a viewer, so prefer :attr:`role` (#2125).
     is_owner: bool = True
-    # ``modified_at`` / ``role`` are appended at the END of the field list so
-    # positional construction stays unaffected (additive, default ``None``).
+    #: **Deprecated alias for :attr:`last_viewed_at`** (#2126) — the name is a
+    #: lie the wire never told: the slot is ``lastViewedTime``, not a
+    #: modification time. Kept in lock-step with :attr:`last_viewed_at` by
+    #: :meth:`__post_init__` and :meth:`__setattr__`, and scheduled for removal
+    #: in v1.0. See ``docs/deprecations.md``.
+    #:
+    #: This is a *docs-only* deprecation because ``modified_at`` is a dataclass
+    #: **field**: a runtime ``DeprecationWarning`` on field access would also
+    #: fire from ``repr()``, ``__eq__``, ``dataclasses.replace()`` and the
+    #: MCP/REST ``to_jsonable`` serializer, flooding callers who never typed the
+    #: old name. That is the same reasoning ``docs/deprecations.md`` records for
+    #: ``AuthTokens.cookies`` / ``cookie_jar``. The sibling property
+    #: :attr:`NotebookMetadata.modified_at` *is* a property, so it does warn.
+    #:
+    #: ``modified_at`` / ``role`` / ``last_viewed_at`` are appended at the END
+    #: of the field list so positional construction stays unaffected (additive,
+    #: default ``None``).
     modified_at: datetime | None = None
     #: The calling account's permission level on this notebook, decoded from
     #: ``ProjectMetadata.userRole``. ``None`` when the row omits the slot or
     #: carries an unmapped code.
     role: SharePermission | None = None
+    #: When *this account* last opened the notebook — ``ProjectMetadata``
+    #: ``lastViewedTime`` (tag 6, ``meta[5]``), tz-aware UTC.
+    #:
+    #: **This is not a modification time.** It does not move when a collaborator
+    #: edits the notebook, and it *does* move when nobody edits anything — the
+    #: backend writes it on every ``GET_NOTEBOOK``. It is also the sort key
+    #: behind the NotebookLM web UI's "Recent" ordering
+    #: (``ListRecentlyViewedProjects``), so every :meth:`NotebooksAPI.get` this
+    #: client issues — including the ones it makes internally, and every
+    #: source-readiness poll iteration — advances it and reshuffles that
+    #: ordering. :meth:`NotebooksAPI.list` is a plain read of that ordering and
+    #: does *not* bump it (probed: pinned across 15s of repeated
+    #: ``LIST_NOTEBOOKS``). ``docs/python-api.md`` carries the full inventory of
+    #: internal call paths that bump;
+    #: :meth:`NotebooksAPI.remove_from_recent` is the only way to undo it.
+    last_viewed_at: datetime | None = None
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Keep ``is_owner`` in lock-step with ``role``, at construction *and* after.
+        """Maintain the two derived-field invariants on every assignment.
 
-        ``is_owner`` stays a *field* rather than becoming a property because the
-        MCP/REST serializer emits ``dataclasses.fields`` only — a property would
-        silently vanish from every adapter's response, a breaking wire change.
-        So the invariant is maintained on assignment instead.
+        Two fields on this dataclass are derivations of another field, and both
+        must stay *fields* rather than becoming properties: the MCP/REST
+        serializer emits ``dataclasses.fields`` only, so a property would
+        silently vanish from every adapter's response — a breaking wire change.
+        The invariants are therefore maintained on assignment instead.
+
+        1. ``is_owner`` mirrors ``role is SharePermission.OWNER`` (#2125).
+        2. ``modified_at`` mirrors ``last_viewed_at`` (#2126). ``modified_at``
+           is the deprecated alias — the wire slot is ``lastViewedTime``, never
+           a modification time — kept through v1.0 so existing callers keep
+           their keyword, their attribute reads, and their serialized JSON key.
 
         Hooking ``__setattr__`` rather than ``__post_init__`` matters because
-        this dataclass is mutated in place after construction (see the
-        timestamp backfill in ``_app.notebooks._backfill_created_timestamps``);
-        a construction-only hook would let ``is_owner`` go stale the moment
-        anyone assigned ``role``.
+        this dataclass is mutated in place after construction (see the timestamp
+        backfill in ``_app.notebooks._backfill_create_timestamps``, which writes
+        ``last_viewed_at``); a construction-only hook would let both derived
+        fields go stale the moment anyone assigned the field they derive from.
 
         A contradictory ``is_owner`` is *corrected*, not rejected. Raising is not
         actually available here: ``is_owner`` has a plain ``True`` default, so
@@ -138,10 +177,79 @@ class Notebook:
         When ``role`` is ``None`` (the row stated no level) the caller's
         ``is_owner`` is left untouched, preserving the historical
         optimistic-``True`` soft-degrade.
+
+        The timestamp pair mirrors in *both* directions so a legacy caller who
+        writes ``nb.modified_at = X`` after construction still round-trips —
+        otherwise ``to_jsonable`` (which emits both fields) and the CLI's
+        ``notebook_viewed_keys`` (which reads only the canonical one) would give
+        two different answers for the same object.
+
+        Both directions are guarded on ``value is not None``, and for a
+        mechanical reason: the generated ``__init__`` assigns fields in
+        declaration order, and ``modified_at`` comes first (it has to, so
+        positional construction keeps working). An unguarded mirror would let
+        ``__init__``'s later ``last_viewed_at=None`` default wipe out a legacy
+        ``Notebook(..., modified_at=X)`` argument. Restoring the canonical field
+        from that legacy argument is handled once in :meth:`__post_init__`.
+
+        The residual gap is assigning ``None`` after construction
+        (``nb.last_viewed_at = None`` leaves ``modified_at`` stale). Clearing a
+        decoded timestamp is not something this codebase or any plausible caller
+        does, and closing it would require an "``__init__`` finished" flag whose
+        cost outlives the alias it protects.
         """
         super().__setattr__(name, value)
         if name == "role" and value is not None:
             super().__setattr__("is_owner", value is SharePermission.OWNER)
+        elif name == "last_viewed_at" and value is not None:
+            super().__setattr__("modified_at", value)
+        elif name == "modified_at" and value is not None:
+            super().__setattr__("last_viewed_at", value)
+
+    def __post_init__(self) -> None:
+        """Reconcile the ``modified_at`` / ``last_viewed_at`` pair once, at birth.
+
+        :meth:`__setattr__` keeps ``modified_at`` following ``last_viewed_at``
+        thereafter; this handles the one direction it deliberately cannot, the
+        legacy ``Notebook(..., modified_at=X)`` keyword, which ``__init__``
+        assigns *before* ``last_viewed_at`` and whose value the canonical field's
+        ``None`` default therefore overwrites. ``last_viewed_at`` is
+        authoritative: when both names are supplied and disagree, it wins.
+
+        Every constructed ``Notebook`` therefore leaves this method with the two
+        names in agreement. One consequence worth naming:
+        ``dataclasses.replace(nb, modified_at=X)`` on a notebook that already has
+        a ``last_viewed_at`` is a no-op — pass ``last_viewed_at=X`` instead.
+        """
+        if self.last_viewed_at is None:
+            self.last_viewed_at = self.modified_at
+        self.modified_at = self.last_viewed_at
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore from a pickle, re-establishing the timestamp-alias invariant.
+
+        Unpickling bypasses ``__init__``, ``__post_init__`` *and*
+        ``__setattr__``: the default protocol writes ``__dict__`` directly. So a
+        pickle written before #2126 restores with ``modified_at`` populated and
+        no ``last_viewed_at`` key at all.
+
+        That does **not** raise ``AttributeError``, which is the tempting
+        assumption — ``last_viewed_at`` is a dataclass field with a ``None``
+        class-level default, so the lookup falls through to the class and
+        quietly yields ``None``. The silent outcome is the worse one: the object
+        reports a populated ``modified_at`` next to a ``None``
+        ``last_viewed_at``, precisely the "the two names disagree" state the
+        alias runway promises cannot happen, and precisely the shape of bug this
+        whole change exists to remove. Seed the canonical field so the promise
+        holds for unpickled objects too.
+
+        ``role`` needs no equivalent: an old pickle restores it as ``None``
+        (unknown), and an unknown role deliberately leaves the pickled
+        ``is_owner`` untouched — already the documented soft-degrade (#2125).
+        """
+        self.__dict__.update(state)
+        if state.get("last_viewed_at") is None and state.get("modified_at") is not None:
+            self.__dict__["last_viewed_at"] = state["modified_at"]
 
     @classmethod
     def from_api_response(cls, data: list[Any]) -> Notebook:
@@ -186,13 +294,10 @@ class Notebook:
         )
         meta = meta_slot if isinstance(meta_slot, list) else None
 
-        # ``meta[8]`` (``data[5][8][0]``) is the CREATION instant: a controlled
-        # probe (create → add source @T0 → add source @T1) showed this slot
-        # stayed pinned at the creation time across modifications, while
-        # ``meta[5]`` advanced on each edit. The two slots were historically
-        # swapped — ``created_at`` read ``meta[5]`` and so exposed the
-        # last-modified time. ``meta[5]`` (``data[5][5][0]``) is now correctly
-        # surfaced as ``modified_at``.
+        # ``meta[8]`` (``data[5][8][0]``, proto tag 9) is the CREATION instant:
+        # pinned across create / share / rename / read and byte-identical over
+        # the mobile gRPC surface (#2126 audit), so it is the one timestamp on
+        # this row that means what its name says.
         created_at = None
         if meta is not None and len(meta) > 8:
             created_ts = safe_index(
@@ -205,15 +310,37 @@ class Notebook:
                     )
                 )
 
-        modified_at = None
+        # ``meta[5]`` (``data[5][5][0]``, proto tag 6) is ``lastViewedTime`` —
+        # NOT a modification time. It was surfaced as ``modified_at`` until
+        # #2126, on the belief that it tracked edits; it tracks *this account's
+        # reads*.
+        #
+        # Why the original probe got it wrong is worth recording, because the
+        # obvious re-run reproduces the error: that probe edited the notebook and
+        # then READ IT BACK to observe the slot, so every "edit" was confounded
+        # with a read. Isolating the read is what settles it — the #2126 audit
+        # (``docs/notes/web-rpc-vs-mobile-grpc-audit-2026-08-07.md`` §1.7) saw
+        # three consecutive reads with no mutation of any kind advance the slot
+        # (1786105463 -> 1786105467 -> 1786105471), and a single bare
+        # ``GET_NOTEBOOK`` move the notebook to index 0 of
+        # ``ListRecentlyViewedProjects``.
+        #
+        # Decoding it is free and read-only — the recency write happens
+        # server-side on the ``GET_NOTEBOOK`` we already issued — so the fix is
+        # the honest name plus the warning in the field docs, not a narrower
+        # decode. See ``Notebook.last_viewed_at``.
+        last_viewed_at = None
         if meta is not None and len(meta) > 5:
-            modified_ts = safe_index(
-                meta, 5, method_id=_NOTEBOOK_METHOD_ID, source="Notebook.modified_at"
+            viewed_ts = safe_index(
+                meta, 5, method_id=_NOTEBOOK_METHOD_ID, source="Notebook.last_viewed_at"
             )
-            if isinstance(modified_ts, list) and len(modified_ts) > 0:
-                modified_at = _datetime_from_timestamp(
+            if isinstance(viewed_ts, list) and len(viewed_ts) > 0:
+                last_viewed_at = _datetime_from_timestamp(
                     safe_index(
-                        modified_ts, 0, method_id=_NOTEBOOK_METHOD_ID, source="Notebook.modified_at"
+                        viewed_ts,
+                        0,
+                        method_id=_NOTEBOOK_METHOD_ID,
+                        source="Notebook.last_viewed_at",
                     )
                 )
 
@@ -245,8 +372,8 @@ class Notebook:
             title=title,
             created_at=created_at,
             sources_count=sources_count,
-            modified_at=modified_at,
             role=role,
+            last_viewed_at=last_viewed_at,
         )
 
 
@@ -319,9 +446,33 @@ class NotebookMetadata:
         return self.notebook.created_at
 
     @property
+    def last_viewed_at(self) -> datetime | None:
+        """When this account last opened the notebook (``lastViewedTime``).
+
+        Not a modification time, and not read-only: the backend rewrites this
+        slot on every read, and it is the sort key behind the web UI's "Recent"
+        ordering. See :attr:`Notebook.last_viewed_at` for the full contract.
+        """
+        return self.notebook.last_viewed_at
+
+    @property
     def modified_at(self) -> datetime | None:
-        """Get last-modified timestamp."""
-        return self.notebook.modified_at
+        """Deprecated alias for :attr:`last_viewed_at` (#2126).
+
+        The wire slot is ``lastViewedTime``, never a modification time. Unlike
+        the same-named *field* on :class:`Notebook` — where a warning would leak
+        through ``repr``/``__eq__``/serialization — this is a property, so it can
+        warn at exactly the boundary ADR-0018 asks for: a caller who typed the
+        old name.
+        """
+        warn_deprecated(
+            "NotebookMetadata.modified_at is deprecated because the underlying wire "
+            "field is lastViewedTime, not a modification time: it advances when this "
+            "account merely reads the notebook and does not move when a collaborator "
+            "edits it. Use NotebookMetadata.last_viewed_at.",
+            removal="1.0",
+        )
+        return self.notebook.last_viewed_at
 
     @property
     def is_owner(self) -> bool:
@@ -334,12 +485,20 @@ class NotebookMetadata:
         return self.notebook.role
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for JSON serialization.
+
+        Emits ``last_viewed_at`` *and* the legacy ``modified_at`` key carrying
+        the same value, so no consumer of the old key breaks during the v1.0
+        runway. Both read :attr:`last_viewed_at`, never the deprecated property,
+        so serializing never emits a ``DeprecationWarning``.
+        """
+        last_viewed = self.last_viewed_at.isoformat() if self.last_viewed_at else None
         return {
             "id": self.id,
             "title": self.title,
             "created_at": self.created_at.isoformat() if self.created_at else None,
-            "modified_at": self.modified_at.isoformat() if self.modified_at else None,
+            "last_viewed_at": last_viewed,
+            "modified_at": last_viewed,
             "is_owner": self.is_owner,
             "role": share_permission_to_str(self.role) if self.role is not None else None,
             "sources": [s.to_dict() for s in self.sources],

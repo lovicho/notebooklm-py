@@ -858,7 +858,7 @@
       "path": "src/notebooklm/_auth/profile_document.py"
     },
     {
-      "lines": 419,
+      "lines": 602,
       "name": "profile_migration",
       "path": "src/notebooklm/_auth/profile_migration.py"
     },
@@ -926,7 +926,7 @@
     "function_local_edges": 12,
     "module_edges": 130,
     "modules": 41,
-    "total_lines": 15898,
+    "total_lines": 16081,
     "unique_edges": 142
   },
   "version": 1

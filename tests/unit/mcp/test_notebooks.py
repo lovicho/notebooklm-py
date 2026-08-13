@@ -45,26 +45,6 @@ class FakeNotebook:
 
 
 @dataclass
-class FakeNotebookFull:
-    """A create-result-shaped notebook mirroring :class:`notebooklm.types.Notebook`.
-
-    Carries the full field set so ``to_jsonable`` emits the flat shape (including
-    ``created_at`` / ``modified_at``) the create tool surfaces. The timestamp
-    backfill itself lives in the transport-neutral core (``execute_notebook_create``,
-    #1705) and is unit-tested there; this fake just lets the MCP test assert the
-    tool flattens and surfaces those fields end-to-end.
-    """
-
-    id: str
-    title: str
-    created_at: datetime | None = None
-    sources_count: int = 0
-    is_owner: bool = True
-    modified_at: datetime | None = None
-    role: SharePermission | None = None
-
-
-@dataclass
 class FakeDescription:
     summary: str
 
@@ -72,7 +52,7 @@ class FakeDescription:
 NB_ID = "11111111-1111-1111-1111-111111111111"
 NB2_ID = "22222222-2222-2222-2222-222222222222"
 CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-MODIFIED_AT = datetime(2026, 1, 3, 4, 5, 6, tzinfo=timezone.utc)
+VIEWED_AT = datetime(2026, 1, 3, 4, 5, 6, tzinfo=timezone.utc)
 
 
 async def test_notebook_list(mcp_call, mock_client) -> None:
@@ -118,10 +98,18 @@ async def test_notebook_create_surfaces_backfilled_timestamps(mcp_call, mock_cli
     The backfill *semantics* (per-key, additive, best-effort fallback) are
     unit-tested against the core in ``tests/unit/app/test_app_notebooks.py``;
     here we only assert the MCP tool wires create → core → flat output, exposing
-    the populated ``created_at`` / ``modified_at`` and the id as ``notebook_id``.
+    the populated ``created_at`` / ``last_viewed_at`` and the id as
+    ``notebook_id``.
+
+    Uses the REAL :class:`~notebooklm.types.Notebook`, not a look-alike fake.
+    A hand-rolled stand-in carrying the same field names cannot carry the type's
+    derived-field invariants (``role``->``is_owner``, ``last_viewed_at``->
+    ``modified_at``, both held in ``Notebook.__setattr__``), so the core's
+    in-place timestamp backfill produced a half-populated record against it —
+    a failure of the fake, not of the code under test (#2126).
     """
     mock_client.notebooks.create = AsyncMock(
-        return_value=FakeNotebookFull(
+        return_value=Notebook(
             id=NB_ID,
             title="New",
             sources_count=0,
@@ -132,13 +120,13 @@ async def test_notebook_create_surfaces_backfilled_timestamps(mcp_call, mock_cli
     # The core re-reads via GET to backfill the null create timestamps; the GET
     # diverges on the non-timestamp fields to prove the create stays authoritative.
     mock_client.notebooks.get = AsyncMock(
-        return_value=FakeNotebookFull(
+        return_value=Notebook(
             id=NB_ID,
             title="Stale",
             created_at=CREATED_AT,
             sources_count=9,
             is_owner=False,
-            modified_at=MODIFIED_AT,
+            last_viewed_at=VIEWED_AT,
         )
     )
     result = await mcp_call("notebook_create", {"title": "New"})
@@ -149,7 +137,9 @@ async def test_notebook_create_surfaces_backfilled_timestamps(mcp_call, mock_cli
         "created_at": CREATED_AT.isoformat(),  # backfilled by the core
         "sources_count": 0,  # from create
         "is_owner": True,  # from create
-        "modified_at": MODIFIED_AT.isoformat(),  # backfilled by the core
+        "last_viewed_at": VIEWED_AT.isoformat(),  # backfilled by the core
+        # The deprecated alias ships alongside it, same value (#2126).
+        "modified_at": VIEWED_AT.isoformat(),
         "role": SharePermission.OWNER.value,  # from create
         "role_label": "owner",
     }
@@ -227,6 +217,7 @@ async def test_notebook_describe_include_metadata_adds_block(mcp_call, mock_clie
             "is_owner": False,
             "modified_at": None,
             "role": SharePermission.EDITOR.value,
+            "last_viewed_at": None,
             "role_label": "editor",
         },
         "sources": [{"kind": "pdf", "title": "Doc", "url": None}],

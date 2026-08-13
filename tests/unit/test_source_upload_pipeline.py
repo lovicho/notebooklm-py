@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import io
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -989,6 +990,75 @@ async def test_register_file_source_probe_failure_is_typed_and_sanitized(
     assert "source-list probe failed (NetworkError)" in message
     assert unrelated_uuid not in message
     assert secret not in message
+
+
+@pytest.mark.asyncio
+async def test_register_file_source_probe_decode_failure_aborts_instead_of_retrying(
+    service: SourceUploadPipeline,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A probe that cannot answer aborts the registration, not retries it (#2220).
+
+    Sharper here than on the URL paths: the probe's answer is the source id the
+    file bytes are subsequently streamed into, so guessing "no match" does not
+    merely risk a duplicate row — it can direct an upload at the wrong source.
+    The registration must fire once and the failure must surface.
+    """
+    logger = logging.getLogger("tests.upload_pipeline_probe")
+    rpc = RecordingRpc(NetworkError("commit lost"))
+    probe_error = RPCError("probe decode failed")
+    # Baseline succeeds; the probe that follows the transport failure does not.
+    # Exactly two: baseline, then the failing probe (see the add_url twin).
+    list_sources = AsyncMock(side_effect=[[], probe_error])
+
+    with (
+        caplog.at_level(logging.WARNING, logger=logger.name),
+        pytest.raises(SourceAddError) as exc_info,
+    ):
+        await service.register_file_source(
+            "nb_123",
+            "report.pdf",
+            rpc_call=rpc,
+            list_sources=list_sources,
+            logger=logger,
+        )
+
+    # The load-bearing assertion: ONE register attempt. Restore the probe's
+    # ``return None`` and this becomes 2.
+    assert len(rpc.calls) == 1
+    assert exc_info.value.cause is probe_error
+    assert "Cannot confirm file source" in str(exc_info.value)
+    assert "will not be retried" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_register_file_source_baseline_failure_warns_but_proceeds(
+    service: SourceUploadPipeline,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed *baseline* still degrades — at WARNING, not DEBUG (#2220).
+
+    The parity half of the issue. Unlike the probe, the baseline runs before
+    anything is written, so proceeding is correct; what was wrong is that the
+    ``notebooklm`` logger defaults to WARNING, so the DEBUG record was dropped
+    before any handler saw it and the call ran with a degraded probe in silence.
+    """
+    logger = logging.getLogger("tests.upload_pipeline_baseline")
+    rpc = RecordingRpc([[["src_new"]]])
+    list_sources = AsyncMock(side_effect=RPCError("baseline decode failed"))
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        source_id = await service.register_file_source(
+            "nb_123",
+            "report.pdf",
+            rpc_call=rpc,
+            list_sources=list_sources,
+            logger=logger,
+        )
+
+    assert source_id == "src_new"
+    # Emitted at a level the default configuration actually passes through.
+    assert "baseline list() failed (RPCError)" in caplog.text
 
 
 @pytest.mark.asyncio

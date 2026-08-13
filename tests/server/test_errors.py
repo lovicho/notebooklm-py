@@ -324,3 +324,22 @@ def test_request_validation_message_has_no_source_paths(authed_client: object) -
     # The missing field is named, but no server path / source file leaks.
     assert "question" in message
     assert ".py" not in message and "/home/" not in message and 'File "' not in message
+
+
+def test_unconfirmed_create_is_surfaced_in_the_rest_body() -> None:
+    """REST parity with the MCP projection (#2220).
+
+    Forced to RPC (HTTP 502), whose category hint is ``None``, so without the
+    override the caller gets a bare message and ``retriable: false`` with
+    nothing indicating a source may already exist.
+    """
+    from notebooklm._app.errors import UNCONFIRMED_HINT
+    from notebooklm._idempotency import mark_unconfirmed
+    from notebooklm.server._errors import error_item
+
+    body = error_item(mark_unconfirmed(exc.NetworkError("connection reset")))
+
+    assert body["unconfirmed"] is True
+    assert body["retriable"] is False
+    assert body["hint"] == UNCONFIRMED_HINT
+    assert "unconfirmed" not in error_item(exc.NetworkError("connection reset"))
