@@ -236,6 +236,20 @@ path, scheduled from the read and joined by nobody
   derived-vs-promoted equality field-by-field across a matrix of malformed
   legacy shapes.
 
+*Amended again (self-healing reconciliation, #2228):* the process-lifetime
+"does not retry" rule above is removed. It made a transient 90-second storage
+lock failure permanent until process exit and, more seriously, left
+`context.json[account]` at rest forever when a process stopped after the
+in-band write but before the sibling scrub: subsequent reads saw in-band and
+never scheduled the one-shot again. The scheduler now deduplicates only an
+**active** worker. After that worker settles, a later read may retry; concurrent
+readers still share one worker and no storage or context lock runs on their
+thread. An in-band resolution also checks for the stale sibling and schedules
+the idempotent only-if-absent promote-or-scrub operation. Thus the 30-second
+exit drain stays an observable ceiling rather than a false durability promise:
+work legitimately queued behind the 90-second storage lock can outlive it, but
+the next read or process repairs both the durable and privacy halves.
+
 ## Consequences
 
 - All `storage_state.json` mutations funnel through one auditable module.

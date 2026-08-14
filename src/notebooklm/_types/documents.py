@@ -45,6 +45,7 @@ The types here are transport-neutral and carry no positional knowledge; the
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import NamedTuple
@@ -57,6 +58,7 @@ __all__ = [
     "ListInfo",
     "ListStyle",
     "StructuredDocument",
+    "TableCell",
     "TextSpan",
     "utf16_len",
 ]
@@ -67,6 +69,16 @@ __all__ = [
 #: at an inline object. It is a BMP character, so one of them occupies exactly
 #: one UTF-16 unit and filler never perturbs the offsets it is holding open.
 _PLACEHOLDER = "￼"
+
+#: What :meth:`StructuredDocument.render` puts between two table cells on the
+#: same row — a tab, so a rendered table is the TSV every reader and
+#: spreadsheet already understands, and so the separator stays a *separator*
+#: rather than the markdown pipes this deliberately marker-free rendering does
+#: not emit. Rows are separated by the newline that separates blocks. Like
+#: every separator this rendering inserts it is **its own**: it exists in the
+#: rendering only and never in :attr:`StructuredDocument.text`, whose offsets
+#: account for no separators at all.
+_CELL_SEPARATOR = "\t"
 
 #: Ceiling on the span a single document may claim, in UTF-16 units. Filler is
 #: synthesized locally from offsets the server chose, so a drifted or hostile
@@ -205,6 +217,124 @@ def _clip_span(span: TextSpan, lower: int, upper: int) -> str:
     return _utf16_slice(span.text, lead, lead + width)
 
 
+def _row_position(row: tuple[TableCell, ...]) -> tuple[int, int]:
+    """A table row's position — its first cell's range. ``row`` is never empty."""
+    first = next(iter(row))
+    return (first.start_index, first.end_index)
+
+
+def _render_runs(spans: Iterable[TextSpan], lower: int, upper: int, cursor: int) -> tuple[str, int]:
+    """``spans`` concatenated over ``[lower, upper)``, and the cursor left behind.
+
+    Each run is trimmed against ``cursor`` — how far the caller has already
+    rendered — so runs that overlap each other are not rendered twice and no
+    result is wider than the window that selected it. The cursor is returned
+    rather than kept locally because a table renders one group of runs per
+    cell and the rule has to hold *across* those groups as well as inside one.
+    """
+    parts: list[str] = []
+    for span in spans:
+        parts.append(_clip_span(span, max(lower, cursor), upper))
+        cursor = max(cursor, min(span.end_index, upper))
+    return "".join(parts), cursor
+
+
+def _spans_by_cell(block: DocumentBlock) -> tuple[list[list[list[TextSpan]]], list[TextSpan]]:
+    """``block``'s runs bucketed by table cell, plus any that land in none.
+
+    Returns one list of runs per cell, nested one level per row so the caller
+    can rebuild the grid, and a flat list of *strays*. Both the block's spans
+    and its cells are ordered by position (each normalised on construction), so
+    a single forward walk assigns them: a run belongs to every cell it
+    overlaps, and the caller clips it to the cell it is rendering. A run
+    overlapping two cells is a wire inconsistency — a cell's blocks are clamped
+    to it during the parse — but assigning it to both is what stops it being
+    rendered in one column at its full width.
+
+    Strays cannot arise from a decoded document — every run in a table block
+    was read out of one of its cells — but :class:`DocumentBlock` is public and
+    can be built by hand with cells that do not cover its spans. Collecting
+    them rather than letting the walk drop them is what keeps this a
+    *regrouping* of the block's text: no input renders less text than it did
+    before the cells were carried.
+    """
+    cells = [cell for row in block.table_rows for cell in row]
+    buckets: list[list[TextSpan]] = [[] for _ in cells]
+    strays: list[TextSpan] = []
+    index = 0
+    for span in block.spans:
+        while index < len(cells) and cells[index].end_index <= span.start_index:
+            index += 1
+        overlapping = index
+        while overlapping < len(cells) and cells[overlapping].start_index < span.end_index:
+            buckets[overlapping].append(span)
+            overlapping += 1
+        if overlapping == index:
+            strays.append(span)  # lands in a gap the grid does not cover
+    grouped: list[list[list[TextSpan]]] = []
+    at = 0
+    for row in block.table_rows:
+        grouped.append(buckets[at : at + len(row)])
+        at += len(row)
+    return grouped, strays
+
+
+def _render_table(block: DocumentBlock, lower: int, upper: int) -> list[str]:
+    """``block`` rendered as one line per table row, cells tab-separated.
+
+    The boundaries come from :attr:`DocumentBlock.table_rows`, which the parse
+    carries precisely because they cannot be recovered here: a cell is several
+    runs (``"Android 10"``, ``"+, "``, ``"iOS 17"`` are one cell in this
+    library's captured infobox), so separating *runs* would split cells as
+    often as it separated them (#2230).
+
+    A cell the window does not reach is left out of its row entirely, and a row
+    left with nothing to read is dropped — the same rule that omits a block
+    with no text, applied one level down, so a window over one cell reads as
+    that cell rather than as its column position in the grid. A cell the window
+    *does* reach but which renders empty (including a zero-width one — a real
+    column holding no characters) keeps its place: a trailing one then drops
+    its separator with it, while a *leading* one keeps it, so a value stays in
+    the column it was written in rather than sliding left into an empty
+    neighbour's.
+
+    Runs the grid does not cover (see :func:`_spans_by_cell`) render as a final
+    line, on a cursor of their own: the grid's cursor has by then passed them,
+    so sharing it would clip exactly the text this line exists to keep.
+    """
+    grouped, strays = _spans_by_cell(block)
+    lines: list[str] = []
+    cursor = lower
+    for row, row_spans in zip(block.table_rows, grouped, strict=True):
+        cells: list[str] = []
+        filled = 0  # how many cells reach the last one that has text
+        for cell, spans in zip(row, row_spans, strict=True):
+            # Each cell renders inside its own range as well as inside the
+            # window, so a run that overruns the cell it started in is cut at
+            # the boundary rather than pulling the next cell's text along.
+            if cell.end_index < lower or cell.start_index > upper:
+                continue  # the window does not reach this cell at all
+            start, end = max(lower, cell.start_index), min(upper, cell.end_index)
+            text, cursor = _render_runs(spans, start, end, cursor)
+            cells.append(text)
+            if text:
+                filled = len(cells)
+        # Separators run only as far as the last cell that has text, so a
+        # trailing empty *cell* drops its separator. Note this drops empty
+        # cells rather than stripping separator *characters* off the joined
+        # line: a run may legitimately end in a tab (plain-text sources keep
+        # their whitespace in :attr:`TextSpan.text`), and stripping would eat
+        # the cell's own content along with it.
+        line = _CELL_SEPARATOR.join(cells[:filled])
+        if line:
+            lines.append(line)
+    if strays:
+        line, _ = _render_runs(strays, lower, upper, lower)
+        if line:
+            lines.append(line)
+    return lines
+
+
 class BlockKind(str, Enum):
     """Which variant of ``StructuralElement`` a :class:`DocumentBlock` came from.
 
@@ -341,6 +471,37 @@ class TextSpan:
 
 
 @dataclass(frozen=True)
+class TableCell:
+    """One cell of a table, as the range of the document it occupies.
+
+    A :attr:`BlockKind.TABLE` block's text arrives *flattened*: the parse walks
+    rows, then cells, then the blocks inside each cell, and concatenates every
+    run it finds into one span sequence (:attr:`DocumentBlock.spans`), because
+    that sequence is what :attr:`StructuredDocument.text` lays out at the
+    backend's offsets. Flattening loses exactly one thing — where one cell ends
+    and the next begins — and no reader can recover it from the runs, since a
+    single cell is routinely several of them.
+
+    This carries that boundary alongside the flattened runs, as **offsets and
+    nothing else**. It adds no characters and moves none: the coordinate space
+    is untouched, and only :meth:`StructuredDocument.render` — the rendering
+    whose separators are its own — consumes it.
+
+    Attributes:
+        start_index: Inclusive start offset (UTF-16 code units) in
+            :attr:`StructuredDocument.text`.
+        end_index: Exclusive end offset.
+    """
+
+    start_index: int
+    end_index: int
+
+    def __post_init__(self) -> None:
+        """Reject a range that cannot index the document."""
+        _validate_range("TableCell", self.start_index, self.end_index)
+
+
+@dataclass(frozen=True)
 class DocumentBlock:
     """One structural element of a document — a paragraph, heading or list item.
 
@@ -354,6 +515,16 @@ class DocumentBlock:
         style: Named paragraph style (heading level, title, body prose).
         list_info: List membership when the block is a list item, else ``None``.
         kind: Which ``StructuralElement`` variant produced this block.
+        table_rows: For a :attr:`BlockKind.TABLE`, the grid its :attr:`spans`
+            were flattened out of — one tuple of :class:`TableCell` per row, in
+            document order. The parse populates it for no other kind, and
+            leaves it empty for a table whose rows and cells all declared
+            unusable ranges; :meth:`StructuredDocument.render` keys off the
+            cells themselves rather than off :attr:`kind`, so a hand-built
+            block carrying them renders as a grid whatever it calls itself.
+            The cells partition the runs; they do not add to them, so this
+            changes nothing about :attr:`text` or
+            :attr:`StructuredDocument.text` (#2230).
     """
 
     start_index: int
@@ -362,6 +533,7 @@ class DocumentBlock:
     style: BlockStyle = BlockStyle.UNSPECIFIED
     list_info: ListInfo | None = None
     kind: BlockKind = BlockKind.UNKNOWN
+    table_rows: tuple[tuple[TableCell, ...], ...] = ()
 
     def __post_init__(self) -> None:
         """Establish the three things a block guarantees about its own spans.
@@ -389,6 +561,40 @@ class DocumentBlock:
         """
         _validate_range("DocumentBlock", self.start_index, self.end_index)
         object.__setattr__(self, "spans", self._normalised_spans())
+        object.__setattr__(self, "table_rows", self._normalised_table_rows())
+
+    def _normalised_table_rows(self) -> tuple[tuple[TableCell, ...], ...]:
+        """This block's cells, ordered by position and clamped to its range.
+
+        The same three guarantees :meth:`_normalised_spans` gives the runs, for
+        the boundaries that group them — ordering by offset rather than by
+        container order, refusing a cell that claims positions its block does
+        not own, and freezing what was passed in.
+
+        A **zero-width** cell is kept, because it is a column that holds no
+        characters rather than a cell that does not exist: dropping it would
+        slide every value after it one column to the left. A row of *nothing
+        but* those is dropped, though — it has no column positions to hold and
+        would render as a line of separators with nothing between them, which
+        is what the captured infobox's declared header row is.
+        """
+        rows: list[tuple[TableCell, ...]] = []
+        for row in self.table_rows:
+            cells: list[TableCell] = []
+            for cell in sorted(row, key=lambda cell: (cell.start_index, cell.end_index)):
+                start = max(cell.start_index, self.start_index)
+                end = min(cell.end_index, self.end_index)
+                if end < start:
+                    continue  # lies wholly outside the block that claims it
+                cells.append(
+                    cell
+                    if (start, end) == (cell.start_index, cell.end_index)
+                    else replace(cell, start_index=start, end_index=end)
+                )
+            if any(cell.start_index < cell.end_index for cell in cells):
+                rows.append(tuple(cells))
+        rows.sort(key=_row_position)
+        return tuple(rows)
 
     def _normalised_spans(self) -> tuple[TextSpan, ...]:
         """This block's spans, ordered by position and clamped to its range."""
@@ -647,16 +853,18 @@ class StructuredDocument:
         than a change of what this returns. Read :attr:`blocks` when you want
         the structure.
 
-        A :attr:`BlockKind.TABLE` renders as **one line with its cell text
-        running together** — ``"Operating system"`` and ``"Android 10"``
-        adjacent, in this library's captured infobox. That is not a choice made
-        here: the parse flattens every row and cell into the table block's
-        spans (#2128), and a cell is several runs rather than one, so nothing
-        at this level can tell a cell boundary from a formatting change. It is
-        the same reading :attr:`DocumentBlock.text` and
-        ``ChatReference.cited_text`` already give. Giving tables their
-        boundaries back means teaching the *parse* to keep them, which is
-        `#2230 <https://github.com/teng-lin/notebooklm-py/issues/2230>`_.
+        A :attr:`BlockKind.TABLE` renders as **one line per row, with its cells
+        separated by a tab** — the one block kind that is not one line. Its
+        runs are flattened into a single span sequence by the parse (#2128) and
+        a cell is several of them, so nothing at this level could tell a cell
+        boundary from a formatting change; the boundaries are read from
+        :attr:`DocumentBlock.table_rows`, which the parse now carries as
+        offsets alongside the flattened runs
+        (`#2230 <https://github.com/teng-lin/notebooklm-py/issues/2230>`_).
+        They are offsets only, so nothing about the coordinate space moves:
+        :attr:`DocumentBlock.text` and ``ChatReference.cited_text`` still read
+        a table's cells run together, and the separators here — like the
+        newline between blocks — exist in this rendering alone.
 
         Args:
             start_index: Inclusive start of the range to render, in **UTF-16
@@ -700,18 +908,18 @@ class StructuredDocument:
         for block in sorted(self.blocks, key=lambda block: (block.start_index, block.end_index)):
             if block.end_index <= lower or block.start_index >= upper:
                 continue
-            # Trim each run against what the block has already rendered, the
-            # same rule :attr:`text` applies across the document. A block's
-            # spans are ordered and clamped to it but may still *overlap* each
-            # other, and concatenating them then repeats the overlap — a line
-            # wider than the window that selected it, reading as duplicated
-            # citation text.
-            parts: list[str] = []
-            cursor = lower
-            for span in block.spans:
-                parts.append(_clip_span(span, max(lower, cursor), upper))
-                cursor = max(cursor, min(span.end_index, upper))
-            line = "".join(parts)
+            # A table knows where its cells are (:attr:`DocumentBlock.
+            # table_rows`) and renders one line per row; everything else is one
+            # line of runs. Either way each run is trimmed against what has
+            # already been rendered, the same rule :attr:`text` applies across
+            # the document: a block's spans are ordered and clamped to it but
+            # may still *overlap* each other, and concatenating them then
+            # repeats the overlap — a line wider than the window that selected
+            # it, reading as duplicated citation text.
+            if block.table_rows:
+                lines.extend(_render_table(block, lower, upper))
+                continue
+            line, _ = _render_runs(block.spans, lower, upper, lower)
             if line:
                 lines.append(line)
         return "\n".join(lines)

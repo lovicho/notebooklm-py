@@ -29,6 +29,7 @@ _EXPECTED_IMPORTS = {
     ("module", "contextlib", "contextmanager", 0, None),
     ("module", "typing", "Any", 0, None),
     ("module", "httpx", "", 0, None),
+    ("module", "exceptions", "MissingDependencyError", 2, None),
     ("module", "master_token_types", "MasterToken", 1, None),
     ("_require_gpsoauth", "gpsoauth", "", 0, None),
 }
@@ -935,8 +936,22 @@ def test_exchange_mint_http_and_error_shapes_are_exact() -> None:
         if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
             if _qualified_name(node.exc.func) == "_MintError":
                 raises.add((ast.unparse(node.exc), ast.unparse(node.cause) if node.cause else "-"))
-    assert len(raises) == 8
+    assert len(raises) == 7
     assert {cause for _expression, cause in raises} == {"-", "None", "exc"}
+    dependency_raises = [
+        (ast.unparse(node.exc), ast.unparse(node.cause) if node.cause else "-")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and _qualified_name(node.exc.func) == "MissingDependencyError"
+    ]
+    assert dependency_raises == [
+        (
+            'MissingDependencyError("Master-token auth needs gpsoauth. Install: pip install '
+            "'notebooklm-py[headless]'\")",
+            "exc",
+        )
+    ]
     assert mint_service._ROTATE_POST_KWARGS == {
         "headers": {
             "Content-Type": "application/json",

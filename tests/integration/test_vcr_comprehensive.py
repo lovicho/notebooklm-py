@@ -397,6 +397,39 @@ class TestArtifactsListAPI:
 
     @pytest.mark.vcr
     @pytest.mark.asyncio
+    @notebooklm_vcr.use_cassette("artifacts_list_slide_decks.yaml")
+    async def test_listing_decodes_recorded_content_metadata(self):
+        """Real rows expose media duration/URLs and visual accessibility text."""
+        async with vcr_client() as client:
+            rows = await client.artifacts._list_raw(READONLY_NOTEBOOK_ID)
+        artifacts = [Artifact.from_api_response(row) for row in rows]
+
+        audio = next(art for art in artifacts if art.kind is ArtifactType.AUDIO)
+        video = next(art for art in artifacts if art.kind is ArtifactType.VIDEO)
+        infographic = next(art for art in artifacts if art.kind is ArtifactType.INFOGRAPHIC)
+        slides = next(art for art in artifacts if art.kind is ArtifactType.SLIDE_DECK)
+        report = next(art for art in artifacts if art.kind is ArtifactType.REPORT)
+
+        assert audio.duration_seconds == 734.0
+        assert {media.type_code for media in audio.media_urls} == {1, 2, 3, 4}
+        assert video.duration_seconds is not None and video.duration_seconds > 400
+        assert {media.type_code for media in video.media_urls} == {1, 2, 3, 4}
+        assert infographic.infographics[0].alt_text
+        assert infographic.infographics[0].text
+        assert len(slides.slides) == 14
+        assert all(slide.alt_text and slide.text for slide in slides.slides)
+        # The VCR response scrubber replaces person-like/title-like values with
+        # SCRUBBED_NAME on some replay paths; either way the raw kind survives.
+        assert report.report_kind in {"Study Guide", "SCRUBBED_NAME"}
+        expected_report_format = (
+            ReportFormat.STUDY_GUIDE if report.report_kind == "Study Guide" else None
+        )
+        assert report.report_format is expected_report_format
+        assert all(art.source_ids for art in artifacts)
+        assert all(art.last_modified_at is not None for art in artifacts)
+
+    @pytest.mark.vcr
+    @pytest.mark.asyncio
     @notebooklm_vcr.use_cassette("artifacts_suggest_reports.yaml")
     async def test_suggest_reports(self):
         """Get report suggestions."""

@@ -282,6 +282,11 @@ class TestNotebooksGoldenDecoded:
         )
         assert_decoded_equals(notebook.title, "VCR Test Notebook", field="notebooks_create.title")
         assert_decoded_equals(notebook.sources_count, 0, field="notebooks_create.sources_count")
+        assert_decoded_equals(
+            [session.id for session in notebook.chat_sessions],
+            ["6b8bc782-7624-47cd-a5ef-8679165c076f"],
+            field="notebooks_create.chat_sessions",
+        )
 
 
 # =============================================================================

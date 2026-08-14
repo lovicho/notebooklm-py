@@ -386,6 +386,7 @@ def _assemble_client(
         chat_timeout=resolve_chat_read_timeout(chat_timeout, timeout),
         chat_response_max_bytes=chat_response_max_bytes,
         notebooks=client.notebooks,
+        created_chat_sessions=client.notebooks,
     )
     client.notes = NotesAPI(
         notes=note_service,

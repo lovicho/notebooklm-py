@@ -123,15 +123,14 @@ def _reset_poke_state():
        run), so we clear it eagerly to keep tests independent.
     3. ``_SECONDARY_BINDING_WARNED`` — one-shot flag for the Tier 2 cookie
        warning. Reset so tests can independently observe the warning fire.
-    4. ``LegacyPromotionScheduler.process_default()`` — the detached one-shot
+    4. ``LegacyPromotionScheduler.process_default()`` — the detached retryable
        legacy-account promotion (ADR-0033 PR 5.1). A read of
        a legacy-only profile schedules a background writer, so teardown must
        JOIN it before clearing: a worker still running when the next test
        starts would write into a ``tmp_path`` that test believes it owns, and
-       a leftover scheduled-path entry would suppress the very
-       promotion another test is asserting on (``tmp_path`` uniqueness makes
-       real path collisions unlikely, but the drain is what makes the durable
-       half deterministic rather than a race the suite usually wins).
+       a leftover active-path entry would suppress the very promotion another
+       test is asserting on (``tmp_path`` uniqueness makes real path collisions
+       unlikely, but the drain makes the durable half deterministic).
     """
     from notebooklm import auth as _auth
     from notebooklm._auth import cookie_policy as _cookie_policy

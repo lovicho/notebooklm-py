@@ -3,7 +3,7 @@
 import asyncio
 import builtins
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 from time import monotonic
 from typing import IO, Any, Literal
@@ -18,6 +18,7 @@ from ._runtime.contracts import RpcCaller
 from ._settings import build_get_user_settings_params, extract_account_limits
 from ._source import upload as _source_upload
 from ._source.add import SourceAddService, honor_requested_title_if_fresh
+from ._source.batch import SourceBatchAddService, SourceUrlBatchItem
 from ._source.content import SourceContentRenderer
 from ._source.drive_import import DriveFetcher, DriveImportService
 from ._source.listing import SourceLister
@@ -31,6 +32,8 @@ from .rpc import RPCMethod
 from .types import (
     Source,
     SourceFulltext,
+    SourceStatus,
+    SourceType,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,6 +98,7 @@ class SourcesAPI:
         # historical attributes for callers that introspect the instance.
         self._rpc = rpc
         self._adder = SourceAddService()
+        self._batch_adder = SourceBatchAddService()
         self._content = SourceContentRenderer(self._rpc, logger=logger)
         self._lister = SourceLister(self._rpc)
         self._poller = SourcePoller()
@@ -133,18 +137,35 @@ class SourcesAPI:
             operation_variant=operation_variant,
         )
 
-    async def list(self, notebook_id: str, *, strict: bool = False) -> list[Source]:
+    async def list(
+        self,
+        notebook_id: str,
+        *,
+        strict: bool = False,
+        statuses: Collection[SourceStatus] | None = None,
+        types: Collection[SourceType] | None = None,
+    ) -> list[Source]:
         """List all sources in a notebook.
 
         Args:
             notebook_id: The notebook ID.
-            strict: Retained for call-site clarity; malformed source-list
-                responses always raise ``RPCError``. Empty notebooks return ``[]``.
+            strict: Reject malformed source rows and conflicting duplicate IDs.
+                Malformed response envelopes always raise ``RPCError``. Use
+                ``strict=True`` when ``len(result)`` must be an exact count of
+                uniquely addressable matching sources.
+            statuses: Optional collection of accepted statuses. Members are ORed.
+            types: Optional collection of accepted source types. Members are ORed.
+                When both filters are supplied, a source must match both.
 
         Returns:
-            List of Source objects.
+            Source objects in backend order after normalization and filtering.
         """
-        return await self._lister.list(notebook_id, strict=strict)
+        return await self._lister.list(
+            notebook_id,
+            strict=strict,
+            statuses=statuses,
+            types=types,
+        )
 
     async def get(self, notebook_id: str, source_id: str) -> Source:
         """Get details of a specific source.
@@ -423,6 +444,28 @@ class SourcesAPI:
         # Baseline-filtered probe ⇒ even a PROBED result is ours to rename (#2204).
         return await honor_requested_title_if_fresh(
             self.rename, notebook_id, result, title, logger, probe_proves_freshness=True
+        )
+
+    async def _add_urls_batch(
+        self,
+        notebook_id: str,
+        urls: builtins.list[str],
+    ) -> builtins.list[SourceUrlBatchItem]:
+        """Add validated URL entries with one batch-capable ``ADD_SOURCE`` RPC.
+
+        Internal adapter seam for the existing MCP/REST batch endpoints.  The
+        public single-item :meth:`add_url` contract remains unchanged; in
+        particular, it retains precise probe-then-create recovery.  This bulk
+        path never replays an uncertain write and returns typed positional
+        outcomes after reconciling silently omitted failures.
+        """
+        return await self._batch_adder.add_urls(
+            notebook_id,
+            urls,
+            rpc=self._rpc,
+            list_sources=self.list,
+            extract_youtube_video_id=self._extract_youtube_video_id,
+            logger=logger,
         )
 
     async def add_text(

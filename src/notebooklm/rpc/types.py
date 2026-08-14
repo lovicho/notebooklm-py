@@ -78,7 +78,9 @@ class RPCMethod(str, Enum):
     DELETE_NOTEBOOK = "WWINqb"  # -> DeleteProjects (single id; batch shapes probed & rejected, see _notebooks.delete)
 
     # Source operations
-    ADD_SOURCE = "izAoDd"  # -> AddSources (batch-capable; we send a single source)
+    # -> AddSources. Single-item SDK methods send one source; the existing
+    # MCP/REST batch endpoints deliberately send repeated URL entries (#2115).
+    ADD_SOURCE = "izAoDd"
     # NOTE: the live registry path-extractor paired o4cbdc with ``AddTentativeSources``,
     # but that is almost certainly a mis-pairing — this id is the upload-register
     # step for a file already staged via the upload endpoint, whereas
@@ -258,10 +260,10 @@ def normalize_grpc_status(code: str | int | None) -> GrpcStatusCode | None:
 class ArtifactTypeCode(int, Enum):
     """Integer codes for artifact types used in RPC calls.
 
-    Codes 1, 2, 3, 4, 7, 8, and 9 are raw CREATE_ARTIFACT / LIST_ARTIFACTS
-    values. MIND_MAP (5) is the library's synthetic code for note-backed mind
-    maps returned by GET_NOTES_AND_MIND_MAPS; interactive mind maps are type 4 /
-    variant 4.
+    Codes 1 through 10 are backend ``ArtifactType`` values. The library also
+    uses the genuine MIND_MAP code (5) when adapting note-backed mind maps from
+    GET_NOTES_AND_MIND_MAPS into the public artifact listing; interactive mind
+    maps are APP/QUIZ-family type 4 / variant 4.
 
     Note: This is an internal enum. Users should use ArtifactType (str enum)
     from notebooklm.types for a cleaner API.
@@ -275,16 +277,17 @@ class ArtifactTypeCode(int, Enum):
     QUIZ = 4  # Also used for flashcards and interactive mind maps (variant 4)
     QUIZ_FLASHCARD = 4  # Alias for backward compatibility
     MIND_MAP = 5
-    # Note: Type 6 appears unused in current API
+    FANTASY_MAP = 6
     INFOGRAPHIC = 7
     SLIDE_DECK = 8
     DATA_TABLE = 9
+    FILE = 10
 
 
 # Variant codes at artifact_data[9][1][0], distinguishing sub-kinds within the
 # type-4 (QUIZ) family. The interactive mind map is a studio artifact
 # (type 4 / variant 4) created via CREATE_ARTIFACT, distinct from the
-# note-backed mind map (surfaced with the synthetic type code 5).
+# note-backed mind map (adapted using the genuine backend mind-map code 5).
 FLASHCARDS_VARIANT: Final[int] = 1
 QUIZ_VARIANT: Final[int] = 2
 INTERACTIVE_MIND_MAP_VARIANT: Final[int] = 4
@@ -494,7 +497,32 @@ class ReportFormat(str, Enum):
     BRIEFING_DOC = "briefing_doc"
     STUDY_GUIDE = "study_guide"
     BLOG_POST = "blog_post"
+    # Returned by LIST_ARTIFACTS as a report kind. Read-only for now: unlike
+    # the three static generation presets, its generation directive has not
+    # been recovered, so build_report_artifact_params rejects it explicitly.
+    CONCEPT_EXPLANATION = "concept_explanation"
     CUSTOM = "custom"
+
+
+class MagicArtifactType(int, Enum):
+    """Artifact/suggestion surface codes used by NextStepSuggestions."""
+
+    UNSPECIFIED = 0
+    MINDMAP = 1
+    AUDIO_OVERVIEW = 2
+    VIDEO_OVERVIEW = 3
+    NOTE = 4
+    TABLE = 5
+    LINE_CHART = 6
+    FLASHCARDS = 7
+    REPORT = 8
+    CONVERSATIONAL_TEXT_CHIP = 9
+    VIDEO_OVERVIEW_TEXT_CHIP = 10
+    AUDIO_OVERVIEW_TEXT_CHIP = 11
+    REPORT_TEXT_CHIP = 12
+    FLASHCARDS_TEXT_CHIP = 13
+    QUIZ_TEXT_CHIP = 14
+    SOURCE_DISCOVERY_TEXT_CHIP = 15
 
 
 class ChatGoal(int, Enum):

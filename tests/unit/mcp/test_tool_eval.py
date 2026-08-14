@@ -31,8 +31,11 @@ pytest.importorskip("fastmcp")
 #: to ~36.0k). Move these DOWN as the surface gets leaner; a rise means
 #: description/param bloat that must be justified, not rubber-stamped.
 SCHEMA_CHAR_BUDGET = (
-    39_370  # total serialized inputSchema + description chars (current 39_349; +21 slack)
+    39_400  # total serialized inputSchema + description chars (current 39_377; +23 slack)
 )
+# #2129 added the genuine listable FANTASY_MAP and FILE artifact types to the
+# `studio_list.kind` enum. Their two required enum strings move the surface from
+# 39_349 to 39_377 (+28); ratcheted to 39_400 with the existing ~20-char slack.
 # #2111 (Drive-backed source health) added `drive_status_label` to the `source_list`
 # / `source_read` roster descriptions plus the two sentences an agent needs to act on
 # it: that it is a SEPARATE axis from `status_label`, and that a deleted/unshared

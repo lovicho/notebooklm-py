@@ -80,10 +80,12 @@
 | 2 | Report | Briefing Doc, Study Guide, Blog Post |
 | 3 | Video | Video Overview |
 | 4 | Quiz/Flashcards (QUIZ_FLASHCARD alias) | Quiz (variant=2), Flashcards (variant=1) |
-| 5 | Mind Map | Library synthetic type for note-backed mind maps |
+| 5 | Mind Map | Backend mind map type; also used when adapting note-backed mind maps |
+| 6 | Fantasy Map | Backend fantasy-map artifact |
 | 7 | Infographic | Infographic |
 | 8 | Slide Deck | Slide Deck |
 | 9 | Data Table | Data Table |
+| 10 | File | Backend file artifact |
 
 ### Source Type Codes (file uploads & sources)
 
@@ -108,7 +110,7 @@ Internal integer codes returned by `GET_NOTEBOOK` / `LIST_SOURCES` and consumed 
 
 > Codes outside this map are surfaced as `SourceType.UNKNOWN` and emit `UnknownTypeWarning` on first occurrence so unmapped types don't crash callers.
 
-> **Code `14` is overloaded** (live-captured #1828/#1832): the backend returns `14` for a native Google Sheet *and* for a Drive-hosted PDF. Drive sources carry no URL (`metadata[5]/[7]` are null and `metadata[0]` holds the Drive metadata block, not a URL — see `SourceRow.drive_document_id`), so the two are disambiguated by the MIME at `metadata[19]` (fallback `metadata[9][2]`): `application/vnd.google-apps.spreadsheet` → `GOOGLE_SPREADSHEET`, `application/pdf` → `PDF`. See `_disambiguate_type_code` in `src/notebooklm/_types/sources.py`.
+> **Code `14` is overloaded** (live-captured #1828/#1832): the backend returns `14` for a native Google Sheet *and* for a Drive-hosted PDF. Drive sources carry no URL (`metadata[5]/[7]` are null and `metadata[0]` holds the Drive metadata block, not a URL — see `SourceRow.drive_document_id`), so the two are disambiguated by the original-content MIME at `source[7][2]`, falling back to the Drive-only MIME at `metadata[19]` / `metadata[9][2]`: `application/vnd.google-apps.spreadsheet` → `GOOGLE_SPREADSHEET`, `application/pdf` → `PDF`. See `_disambiguate_type_code` in `src/notebooklm/_types/sources.py`.
 
 ### Source Settings Block (`source[3]`)
 
@@ -123,6 +125,26 @@ they answer different questions:
 Shapes observed across 409 live source rows (2026-08-07 audit): `[null, 2]` ×402,
 `[null, 2, null, 3]` ×4 (all Drive-backed, all `ACTIVE`), and
 `[null, 2, [null,null,null,[]]]` ×3.
+
+### Additional Source Metadata (`source[5:8]`, `source[2]`)
+
+The web source row carries useful fields beyond the four named by the recovered
+mobile `Source` message. Uploaded-file rows may populate all three trailing
+slots together:
+
+| Index | Proto tag | `Source` field | Meaning |
+|-------|-----------|----------------|---------|
+| 5 | 6 | `download_url` | Direct download URL for the original file |
+| 6 | 7 | `viewer_url` | Drive viewer URL for the original file |
+| 7 | 8 | `content_mime` | MIME at blob descriptor index 2 |
+
+The nested `SourceMetadata` row also exposes `word_count` at index 1,
+`[revision_id, revision_timestamp]` at index 3, and `last_modified_at` at index
+14. Their shapes and population are live-confirmed, but the mobile schema marks
+the slots unused, so those semantic names are inferred and recorded as pinned
+wire evidence rather than schema mappings.
+
+### Drive Source Status Codes
 
 | Code | `DriveSourceStatus` | Backend member |
 |------|---------------------|----------------|
@@ -427,7 +449,8 @@ button (`mattooltip='Close source view'`).
 
 ### RPC: ADD_SOURCE (izAoDd) - URL
 
-**Source:** `_source/add.py::SourceAddService.add_url_source()`
+**Sources:** `_source/add.py::SourceAddService.add_url_source()` (single item),
+`_source/batch.py::SourceBatchAddService.add_urls()` (true batch)
 
 ```python
 # URL goes at position [2] in an 11-element source spec.
@@ -438,6 +461,16 @@ params = [
                                                            # 2: Shared request-options wrapper
 ]
 ```
+
+The existing MCP `source_add(urls=[...])` and REST `/sources/batch` endpoints
+put multiple URL specs in `params[0]` and issue this RPC once. `AddSources` is
+per-item rather than atomic: successful Source rows remain in request order,
+while failed entries are silently omitted unless every entry fails (then the
+RPC raises). The adapters reconcile omissions with an ERROR-status source list
+and restore positional result rows. This true-batch path disables transport
+retries because a timeout leaves the committed subset unknown; the ordinary
+single-item `sources.add_url()` path still uses its dedicated probe-then-create
+recovery unchanged.
 
 ### RPC: ADD_SOURCE (izAoDd) - Text
 
@@ -1567,7 +1600,8 @@ params = [
 
 NotebookLM's web app now generates an **interactive** mind map — a studio
 artifact in the type-4 family with `variant 4` (distinct from the note-backed
-JSON mind map above, which the library surfaces with the synthetic type code 5).
+JSON mind map above, which the library adapts using the genuine backend mind-map
+type code 5).
 Unlike the synchronous note-backed kind, this is created asynchronously via
 `CREATE_ARTIFACT` and polled to completion (issue #1256).
 

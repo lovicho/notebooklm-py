@@ -36,6 +36,27 @@ def build_get_notebook_params(notebook_id: str) -> list[Any]:
     return [notebook_id, None, build_template_block(), None, 0]
 
 
+def build_update_notebook_params(
+    notebook_id: str,
+    *,
+    title: str | None = None,
+    emoji: str | None = None,
+) -> list[Any]:
+    """Return the ``MutateProject`` change-property payload.
+
+    ``ProjectMutation.changeProperty`` is the fourth mutation variant. Inside
+    that block, tag 2 is the title and tag 3 is the emoji, so the positional
+    JSON is ``[None, title, emoji]``. The trailing emoji slot is omitted when
+    it is not being changed, preserving the long-standing title-only request
+    shape (and its recorded-cassette contract). ``None`` leaves a property
+    unchanged; callers validate that at least one value is supplied.
+    """
+    change_property = [None, title]
+    if emoji is not None:
+        change_property.append(emoji)
+    return [notebook_id, [[None, None, None, change_property]]]
+
+
 # The required ``C0`` "mode/surface" enum (field 4 of the SUGGEST_PROMPTS request).
 # ``0`` / omitted -> gRPC INTERNAL; ``1..10`` return a populated suggestion list;
 # ``11+`` -> INTERNAL. Two complementary LIVE investigations characterize it; the

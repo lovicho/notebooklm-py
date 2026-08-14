@@ -30,6 +30,7 @@ from notebooklm._row_adapters.chat import (
     CitationRow,
     ConversationTurnRow,
     ErrorPayloadRow,
+    NextStepSuggestionRow,
     SavedChatNoteRow,
     StreamEnvelopeRow,
     StreamFrameRow,
@@ -73,7 +74,11 @@ class TestAnswerRowPositionContract:
 
 class TestStreamEnvelopeRowPositionContract:
     def test_positions_pinned(self) -> None:
-        assert StreamEnvelopeRow._IS_FINAL_RESPONSE_POS == 4
+        assert (
+            StreamEnvelopeRow._IS_FINAL_RESPONSE_POS,
+            StreamEnvelopeRow._NEXT_STEPS_POS,
+            StreamEnvelopeRow._NEXT_STEPS_ROWS_POS,
+        ) == (4, 5, 0)
 
 
 class TestAnswerRowTurnKeyPositionContract:
@@ -203,6 +208,29 @@ class TestAnswerRow:
         rec = _answer_record()
         rec[4][3] = None
         assert AnswerRow(rec).citations == []
+
+
+class TestNextStepSuggestionRow:
+    def test_positions_pinned(self) -> None:
+        assert (
+            NextStepSuggestionRow._QUESTION_POS,
+            NextStepSuggestionRow._TYPE_CODE_POS,
+            NextStepSuggestionRow._MIN_LEN,
+        ) == (0, 1, 2)
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            [],
+            ["question"],
+            ["", 9],
+            [7, 9],
+            ["question", True],
+            ["question", "9"],
+        ],
+    )
+    def test_malformed_row_is_not_well_formed(self, raw: object) -> None:
+        assert NextStepSuggestionRow(raw).is_well_formed is False
 
     def test_truthy_non_list_citation_slot_raises(self) -> None:
         """A truthy non-list where the citation container belongs is wire drift.
@@ -760,6 +788,33 @@ class TestStreamEnvelopeRow:
 
     def test_non_list_envelope_is_not_final(self) -> None:
         assert StreamEnvelopeRow("reshaped").is_final_response is False
+
+    def test_next_step_suggestions(self) -> None:
+        row = StreamEnvelopeRow(
+            [
+                _answer_record(),
+                None,
+                None,
+                None,
+                True,
+                [[["What happens next?", 9], ["Make a report", 12]]],
+            ]
+        )
+        suggestions = row.next_step_rows
+        assert [(item.question, item.type_code) for item in suggestions] == [
+            ("What happens next?", 9),
+            ("Make a report", 12),
+        ]
+        assert all(isinstance(item, NextStepSuggestionRow) for item in suggestions)
+
+    @pytest.mark.parametrize("suggestions", [None, "bad", 7, {"rows": []}])
+    def test_malformed_next_step_container_is_optional(self, suggestions: object) -> None:
+        assert (
+            StreamEnvelopeRow(
+                [_answer_record(), None, None, None, True, suggestions]
+            ).next_step_rows
+            == []
+        )
 
 
 class TestAnswerRowTurnKeyAgainstCapture:

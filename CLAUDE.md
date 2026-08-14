@@ -49,7 +49,7 @@ reports the *pipeline's* status, which has masked real failures here before.
 The pre-commit hook runs ruff (format + lint) on staged files. Also run these manually — CI fails otherwise:
 
 ```bash
-uv run mypy src/notebooklm --ignore-missing-imports
+uv run mypy src/notebooklm scripts/_live_auth_scenarios --ignore-missing-imports
 uv run pytest
 ```
 

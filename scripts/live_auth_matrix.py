@@ -52,6 +52,13 @@ expiry, and remote MCP HTTP/bearer/file-side-channel checks remain account- or
 deployment-specific manual cells. The matrix's MCP auth-recovery cell uses
 FastMCP's real in-memory protocol transport; deployed file-route coverage is
 available from ``scripts/mcp_live_smoke.py``.
+
+This module owns *isolation, execution, and reporting* only. The realistic
+recovery cells themselves live in ``scripts/_live_auth_scenarios/`` as ordinary
+importable modules (#2180) and are still launched one-per-child-process with
+``python -m scripts._live_auth_scenarios.<cell>`` under a disposable
+``NOTEBOOKLM_HOME``. They used to be Python source strings passed to
+``python -c``, which no linter, type checker, or unit test could see.
 """
 
 from __future__ import annotations
@@ -67,7 +74,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import textwrap
 import time
 import urllib.request
 from pathlib import Path
@@ -76,6 +82,18 @@ from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HOME = Path(os.environ.get("NOTEBOOKLM_HOME", Path.home() / ".notebooklm"))
+
+#: Import path of the scenario package launched with ``python -m`` by the
+#: realistic-recovery phases. The scenario *bodies* live in real, lintable,
+#: type-checked modules (#2180); this orchestrator still owns isolation,
+#: execution, and reporting, and every scenario still runs in its own child
+#: process with its own ``NOTEBOOKLM_HOME``.
+SCENARIO_PACKAGE = "scripts._live_auth_scenarios"
+
+
+def _scenario_command(module: str, *args: str) -> list[str]:
+    """Build the child-process command for one importable scenario module."""
+    return [sys.executable, "-m", f"{SCENARIO_PACKAGE}.{module}", *args]
 
 
 def _timeout_text(value: str | bytes | None) -> str:
@@ -126,7 +144,12 @@ class Matrix:
         self.base_env = os.environ.copy()
         self.base_env.update(
             {
-                "PYTHONPATH": str(ROOT / "src"),
+                # ``src`` for the package under test, and the repo root so a
+                # child can import ``scripts._live_auth_scenarios.<cell>``.
+                # Set explicitly rather than relying on ``python -m`` inserting
+                # the CWD, which ``PYTHONSAFEPATH`` in the caller's environment
+                # would suppress.
+                "PYTHONPATH": os.pathsep.join((str(ROOT / "src"), str(ROOT))),
                 "NOTEBOOKLM_BASE_URL": args.base_url,
                 "NOTEBOOKLM_REFRESH_BROWSER": args.browser,
             }
@@ -713,43 +736,7 @@ class Matrix:
         home = self.temp / "mid-session-storage"
         self.copy_profile(self.args.profile, home, "mid-session-storage")
         (home / "profiles" / "mid-session-storage" / "master_token.json").unlink(missing_ok=True)
-        script = (
-            "import asyncio, json\n"
-            "from notebooklm import NotebookLMClient\n"
-            "from notebooklm._auth import session as auth_session\n"
-            "def require(condition, message):\n"
-            "    if not condition:\n"
-            "        raise RuntimeError(message)\n"
-            "async def main():\n"
-            "    reload_calls = 0\n"
-            "    original_reload = getattr(auth_session, 'try_storage_cookie_reload', None)\n"
-            "    async def tracked_reload(*args, **kwargs):\n"
-            "        nonlocal reload_calls\n"
-            "        reload_calls += 1\n"
-            "        require(original_reload is not None, 'storage reload helper unavailable')\n"
-            "        return await original_reload(*args, **kwargs)\n"
-            "    async def forbidden(*args, **kwargs):\n"
-            "        raise AssertionError('external recovery rung reached')\n"
-            "    if original_reload is not None:\n"
-            "        auth_session.try_storage_cookie_reload = tracked_reload\n"
-            "    auth_session._try_refresh_cmd_reauth = forbidden\n"
-            "    auth_session._try_headless_reauth = forbidden\n"
-            "    auth_session._try_master_token_reauth = forbidden\n"
-            "    async with NotebookLMClient.from_storage(profile='mid-session-storage') as c:\n"
-            "        before = await c.notebooks.list()\n"
-            "        before_ids = tuple(sorted(item.id for item in before))\n"
-            "        live = c._collaborators.kernel.get_http_client().cookies\n"
-            "        live.clear()\n"
-            "        after = await c.notebooks.list()\n"
-            "        after_ids = tuple(sorted(item.id for item in after))\n"
-            "        require(reload_calls > 0, 'storage reload rung was not exercised')\n"
-            "        require(len(live) > 0, 'storage reload did not restore the live jar')\n"
-            "        require(before_ids == after_ids, 'notebook identity changed after recovery')\n"
-            "        print(json.dumps({'before': len(before), 'after': len(after), "
-            "'reload_calls': reload_calls, 'live_cookies': len(live)}))\n"
-            "asyncio.run(main())\n"
-        )
-        command = [sys.executable, "-c", script]
+        command = _scenario_command("storage_reload")
         proc = self._run(
             command,
             home,
@@ -766,97 +753,7 @@ class Matrix:
         """Consume a real sibling re-mint through one concurrent recovery wave."""
         home = self.temp / "mid-session-sibling"
         self.copy_profile(self.args.profile, home, "mid-session-sibling")
-        script = textwrap.dedent(
-            """\
-            import asyncio
-            import hashlib
-            import json
-            import os
-            import subprocess
-            import sys
-            from pathlib import Path
-
-            from notebooklm import NotebookLMClient
-            from notebooklm._auth import session as auth_session
-
-            def require(condition, message):
-                if not condition:
-                    raise RuntimeError(message)
-
-            async def main():
-                reload_calls = 0
-                original_reload = auth_session.try_storage_cookie_reload
-
-                async def tracked_reload(*args, **kwargs):
-                    nonlocal reload_calls
-                    reload_calls += 1
-                    return await original_reload(*args, **kwargs)
-
-                async def forbidden(*args, **kwargs):
-                    raise AssertionError("external recovery rung reached")
-
-                auth_session.try_storage_cookie_reload = tracked_reload
-                auth_session._try_refresh_cmd_reauth = forbidden
-                auth_session._try_headless_reauth = forbidden
-                auth_session._try_master_token_reauth = forbidden
-                profile_dir = Path(os.environ["NOTEBOOKLM_HOME"]) / "profiles" / "mid-session-sibling"
-                storage = profile_dir / "storage_state.json"
-                before_hash = hashlib.sha256(storage.read_bytes()).hexdigest()
-
-                async with NotebookLMClient.from_storage(profile="mid-session-sibling") as client:
-                    before = await client.notebooks.list()
-                    before_ids = tuple(sorted(item.id for item in before))
-                    sibling = subprocess.run(
-                        [
-                            sys.executable,
-                            "-m",
-                            "notebooklm.notebooklm_cli",
-                            "--profile",
-                            "mid-session-sibling",
-                            "login",
-                            "--master-token-refresh",
-                        ],
-                        env=os.environ.copy(),
-                        text=True,
-                        capture_output=True,
-                        timeout=90,
-                        check=False,
-                    )
-                    require(sibling.returncode == 0, sibling.stderr[-1000:])
-                    after_hash = hashlib.sha256(storage.read_bytes()).hexdigest()
-                    require(
-                        after_hash != before_hash,
-                        "sibling re-mint did not replace profile state",
-                    )
-                    (profile_dir / "master_token.json").unlink()
-                    live = client._collaborators.kernel.get_http_client().cookies
-                    live.clear()
-                    recovered = await asyncio.gather(*(client.notebooks.list() for _ in range(4)))
-                    counts = [len(items) for items in recovered]
-                    recovered_ids = [
-                        tuple(sorted(item.id for item in items)) for items in recovered
-                    ]
-                    require(
-                        recovered_ids == [before_ids] * 4,
-                        "notebook identity changed after sibling recovery",
-                    )
-                    require(
-                        0 < reload_calls <= 3,
-                        "concurrent RPCs did not share one recovery wave",
-                    )
-                    require(len(live) > 0, "sibling recovery did not restore the live jar")
-                    print(json.dumps({
-                        "before": len(before),
-                        "after": counts,
-                        "reload_calls": reload_calls,
-                        "live_cookies": len(live),
-                        "sibling_profile_changed": True,
-                    }))
-
-            asyncio.run(main())
-            """
-        )
-        command = [sys.executable, "-c", script]
+        command = _scenario_command("sibling_concurrent_reload")
         proc = self._run(
             command,
             home,
@@ -875,71 +772,7 @@ class Matrix:
         """Force the real Layer-4 rung after both live and disk cookies become unusable."""
         home = self.temp / "mid-session-master"
         self.copy_profile(self.args.profile, home, "mid-session-master")
-        script = textwrap.dedent(
-            """\
-            import asyncio
-            import json
-            import os
-            from pathlib import Path
-
-            from notebooklm import NotebookLMClient
-            from notebooklm._auth import session as auth_session
-
-            def require(condition, message):
-                if not condition:
-                    raise RuntimeError(message)
-
-            async def main():
-                master_calls = 0
-                original_master = auth_session._try_master_token_reauth
-
-                async def tracked_master(*args, **kwargs):
-                    nonlocal master_calls
-                    master_calls += 1
-                    return await original_master(*args, **kwargs)
-
-                auth_session._try_master_token_reauth = tracked_master
-                profile_dir = Path(os.environ["NOTEBOOKLM_HOME"]) / "profiles" / "mid-session-master"
-                storage = profile_dir / "storage_state.json"
-
-                async with NotebookLMClient.from_storage(profile="mid-session-master") as client:
-                    before = await client.notebooks.list()
-                    before_ids = tuple(sorted(item.id for item in before))
-                    state = json.loads(storage.read_text(encoding="utf-8"))
-                    state["cookies"] = []
-                    replacement = storage.with_suffix(".matrix-tmp")
-                    replacement.write_text(json.dumps(state), encoding="utf-8")
-                    os.replace(replacement, storage)
-                    live = client._collaborators.kernel.get_http_client().cookies
-                    live.clear()
-                    after = await client.notebooks.list()
-                    after_ids = tuple(sorted(item.id for item in after))
-                    persisted = json.loads(storage.read_text(encoding="utf-8"))
-                    require(
-                        before_ids == after_ids,
-                        "notebook identity changed after master-token recovery",
-                    )
-                    require(
-                        master_calls == 1,
-                        "mid-session Layer-4 recovery was not exercised once",
-                    )
-                    require(
-                        persisted.get("cookies"),
-                        "master-token recovery did not repair storage",
-                    )
-                    require(len(live) > 0, "master-token recovery did not restore live jar")
-                    print(json.dumps({
-                        "before": len(before),
-                        "after": len(after),
-                        "master_token_calls": master_calls,
-                        "persisted_cookies": len(persisted["cookies"]),
-                        "live_cookies": len(live),
-                    }))
-
-            asyncio.run(main())
-            """
-        )
-        command = [sys.executable, "-c", script]
+        command = _scenario_command("master_token_recovery")
         proc = self._run(
             command,
             home,
@@ -960,126 +793,7 @@ class Matrix:
         self.copy_profile(self.args.profile, home, "rest-live")
         self.copy_profile(self.args.profile, home, "rest-stale")
         (home / "profiles" / "rest-live" / "master_token.json").unlink(missing_ok=True)
-        script = textwrap.dedent(
-            """\
-            import asyncio
-            import contextlib
-            import json
-            import os
-            import subprocess
-            import sys
-            from pathlib import Path
-
-            import httpx
-
-            from notebooklm import NotebookLMClient
-            from notebooklm.server.app import create_app
-
-            TOKEN = "matrix-rest-token"
-            HEADERS = {"Authorization": f"Bearer {TOKEN}", "Host": "127.0.0.1"}
-
-            def require(condition, message):
-                if not condition:
-                    raise RuntimeError(message)
-
-            def notebook_ids(response):
-                return tuple(sorted(item["id"] for item in response.json()["notebooks"]))
-
-            async def mid_session():
-                holder = {}
-
-                @contextlib.asynccontextmanager
-                async def factory():
-                    async with NotebookLMClient.from_storage(
-                        profile="rest-live", keepalive=600.0
-                    ) as client:
-                        holder["client"] = client
-                        yield client
-
-                app = create_app(profile="rest-live", client_factory=factory)
-                async with app.router.lifespan_context(app):
-                    transport = httpx.ASGITransport(
-                        app=app, client=("127.0.0.1", 5555), raise_app_exceptions=False
-                    )
-                    async with httpx.AsyncClient(
-                        transport=transport, base_url="http://127.0.0.1"
-                    ) as http:
-                        before = await http.get("/v1/notebooks", headers=HEADERS)
-                        require(before.status_code == 200, before.text[-1000:])
-                        holder["client"]._collaborators.kernel.get_http_client().cookies.clear()
-                        after = await http.get("/v1/notebooks", headers=HEADERS)
-                        require(after.status_code == 200, after.text[-1000:])
-                        return notebook_ids(before), notebook_ids(after)
-
-            async def stale_startup():
-                profile_dir = Path(os.environ["NOTEBOOKLM_HOME"]) / "profiles" / "rest-stale"
-                storage = profile_dir / "storage_state.json"
-                token = profile_dir / "master_token.json"
-                held_token = profile_dir / "master_token.matrix-held"
-                state = json.loads(storage.read_text(encoding="utf-8"))
-                state["cookies"] = []
-                replacement = storage.with_suffix(".matrix-tmp")
-                replacement.write_text(json.dumps(state), encoding="utf-8")
-                os.replace(replacement, storage)
-                require(token.is_file(), "rest-stale profile has no master_token.json")
-                token.replace(held_token)
-
-                app = create_app(profile="rest-stale")
-                async with app.router.lifespan_context(app):
-                    require(
-                        app.state.notebooklm.client is None,
-                        "REST server did not enter degraded startup",
-                    )
-                    held_token.replace(token)
-                    sibling = subprocess.run(
-                        [
-                            sys.executable,
-                            "-m",
-                            "notebooklm.notebooklm_cli",
-                            "--profile",
-                            "rest-stale",
-                            "login",
-                            "--master-token-refresh",
-                        ],
-                        env=os.environ.copy(),
-                        text=True,
-                        capture_output=True,
-                        timeout=90,
-                        check=False,
-                    )
-                    require(sibling.returncode == 0, sibling.stderr[-1000:])
-                    transport = httpx.ASGITransport(
-                        app=app, client=("127.0.0.1", 5555), raise_app_exceptions=False
-                    )
-                    async with httpx.AsyncClient(
-                        transport=transport, base_url="http://127.0.0.1"
-                    ) as http:
-                        response = await http.get("/v1/notebooks", headers=HEADERS)
-                    require(response.status_code == 200, response.text[-1000:])
-                    require(
-                        app.state.notebooklm.client is not None,
-                        "REST server did not bind a recovered client",
-                    )
-                    return notebook_ids(response)
-
-            async def main():
-                before_ids, after_ids = await mid_session()
-                rebound_ids = await stale_startup()
-                require(
-                    before_ids == after_ids == rebound_ids,
-                    "REST recovery changed notebook identity",
-                )
-                print(json.dumps({
-                    "before": len(before_ids),
-                    "after_live_reload": len(after_ids),
-                    "after_stale_startup_rebind": len(rebound_ids),
-                    "stale_startup_rebound": True,
-                }))
-
-            asyncio.run(main())
-            """
-        )
-        command = [sys.executable, "-c", script]
+        command = _scenario_command("rest_recovery")
         proc = self._run(
             command,
             home,
@@ -1100,76 +814,7 @@ class Matrix:
         home = self.temp / "mcp-auth"
         self.copy_profile(self.args.profile, home, "mcp-live")
         (home / "profiles" / "mcp-live" / "master_token.json").unlink(missing_ok=True)
-        script = textwrap.dedent(
-            """\
-            import asyncio
-            import contextlib
-            import json
-
-            from fastmcp import Client
-
-            from notebooklm import NotebookLMClient
-            from notebooklm.mcp.server import create_server
-
-            def require(condition, message):
-                if not condition:
-                    raise RuntimeError(message)
-
-            async def main():
-                holder = {}
-
-                @contextlib.asynccontextmanager
-                async def factory():
-                    async with NotebookLMClient.from_storage(
-                        profile="mcp-live", keepalive=600.0
-                    ) as client:
-                        holder["client"] = client
-                        yield client
-
-                server = create_server(profile="mcp-live", client_factory=factory)
-                async with Client(server) as mcp:
-                    before_result = await mcp.call_tool("notebook_list", {"limit": 50})
-                    require(
-                        before_result.structured_content is not None,
-                        "MCP baseline returned no structured content",
-                    )
-                    before = before_result.structured_content
-                    require(
-                        "total" in before and "notebooks" in before,
-                        "MCP baseline response is incomplete",
-                    )
-                    holder["client"]._collaborators.kernel.get_http_client().cookies.clear()
-                    after_result = await mcp.call_tool("notebook_list", {"limit": 50})
-                    require(
-                        after_result.structured_content is not None,
-                        "MCP recovery returned no structured content",
-                    )
-                    after = after_result.structured_content
-                    require(
-                        "total" in after and "notebooks" in after,
-                        "MCP recovery response is incomplete",
-                    )
-                    require(
-                        before.get("total") == after.get("total"),
-                        "MCP recovery changed the notebook count",
-                    )
-                    require(
-                        before.get("notebooks") == after.get("notebooks"),
-                        "MCP recovery changed notebook identity",
-                    )
-                    live = holder["client"]._collaborators.kernel.get_http_client().cookies
-                    require(len(live) > 0, "MCP recovery did not restore the live jar")
-                    print(json.dumps({
-                        "before": before.get("total"),
-                        "after": after.get("total"),
-                        "live_cookies": len(live),
-                        "transport": "fastmcp-in-memory",
-                    }))
-
-            asyncio.run(main())
-            """
-        )
-        command = [sys.executable, "-c", script]
+        command = _scenario_command("mcp_recovery")
         proc = self._run(
             command,
             home,
@@ -1189,65 +834,7 @@ class Matrix:
         self.copy_profile(self.args.profile, home, "mid-session-browser")
         profile_dir = home / "profiles" / "mid-session-browser"
         (profile_dir / "master_token.json").unlink(missing_ok=True)
-        script = textwrap.dedent(
-            """\
-            import asyncio
-            import json
-            import os
-            from pathlib import Path
-
-            from notebooklm import NotebookLMClient
-            from notebooklm._auth import session as auth_session
-
-            def require(condition, message):
-                if not condition:
-                    raise RuntimeError(message)
-
-            async def main():
-                refresh_calls = 0
-                original_refresh = auth_session._try_refresh_cmd_reauth
-
-                async def tracked_refresh(*args, **kwargs):
-                    nonlocal refresh_calls
-                    refresh_calls += 1
-                    return await original_refresh(*args, **kwargs)
-
-                auth_session._try_refresh_cmd_reauth = tracked_refresh
-                profile_dir = Path(os.environ["NOTEBOOKLM_HOME"]) / "profiles" / "mid-session-browser"
-                storage = profile_dir / "storage_state.json"
-
-                async with NotebookLMClient.from_storage(profile="mid-session-browser") as client:
-                    before = await client.notebooks.list()
-                    before_ids = tuple(sorted(item.id for item in before))
-                    state = json.loads(storage.read_text(encoding="utf-8"))
-                    state["cookies"] = []
-                    replacement = storage.with_suffix(".matrix-tmp")
-                    replacement.write_text(json.dumps(state), encoding="utf-8")
-                    os.replace(replacement, storage)
-                    live = client._collaborators.kernel.get_http_client().cookies
-                    live.clear()
-                    after = await client.notebooks.list()
-                    after_ids = tuple(sorted(item.id for item in after))
-                    require(
-                        before_ids == after_ids,
-                        "notebook identity changed after browser recovery",
-                    )
-                    require(
-                        refresh_calls == 1,
-                        "browser refresh command rung was not exercised once",
-                    )
-                    require(len(live) > 0, "browser recovery did not restore live jar")
-                    print(json.dumps({
-                        "before": len(before),
-                        "after": len(after),
-                        "refresh_command_calls": refresh_calls,
-                        "live_cookies": len(live),
-                    }))
-
-            asyncio.run(main())
-            """
-        )
-        command = [sys.executable, "-c", script]
+        command = _scenario_command("browser_refresh")
         proc = self._run(
             command,
             home,
@@ -1291,17 +878,11 @@ class Matrix:
         required_names = {"SID", "APISID", "SAPISID", "LSID"}
         target = home / "storage_state.json"
         shutil.copy2(source, target)
-        script = (
-            "import json, sys\n"
-            "from pathlib import Path\n"
-            "from notebooklm._auth.storage import replace_from_login\n"
-            "p=Path(sys.argv[1]); state=json.loads(Path(sys.argv[2]).read_text())\n"
-            "[replace_from_login(p, state, include_domains=None) for _ in range(10000)]\n"
-        )
+        command = _scenario_command("crash_safe_writer", str(target), str(source))
         passed = True
         for _ in range(3):
             proc = subprocess.Popen(
-                [sys.executable, "-c", script, str(target), str(source)],
+                command,
                 cwd=ROOT,
                 env=self.env(home),
             )

@@ -216,6 +216,8 @@ def register(mcp: Any) -> None:
             "audio",
             "data-table",
             "flashcards",
+            "fantasy-map",
+            "file",
             "infographic",
             "mind-map",
             "note",

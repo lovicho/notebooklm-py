@@ -168,9 +168,9 @@ _SOURCE_TYPE_COMPAT_MAP: dict[SourceType, str] = {
 # native Google Sheet AND a Drive-hosted binary file (e.g. a PDF). Live capture
 # showed Drive sources carry no URL (metadata[5]/[7] are null and metadata[0]
 # holds the Drive metadata block — see ``SourceRow.drive_document_id`` — rather
-# than a URL), so the only disambiguation signal is the MIME at metadata[19] /
-# metadata[9][2]. A native
-# Sheet carries "application/vnd.google-apps.spreadsheet" (→ stay 14); a Drive
+# than a URL), so disambiguation uses the original-content MIME at Source tag 8
+# first (#2112), then the Drive-only MIME at metadata[19] / metadata[9][2]. A
+# native Sheet carries "application/vnd.google-apps.spreadsheet" (→ stay 14); a Drive
 # PDF carries "application/pdf" (→ 3). Only MIMEs proven by live capture are
 # mapped; anything else under 14 is left as GOOGLE_SPREADSHEET (conservative —
 # never relabel a real Sheet, never introduce UNKNOWN). Extend as more
@@ -318,6 +318,26 @@ class Source:
     #: was deleted or unshared keeps reporting ``READY`` because ingestion did
     #: complete (#2111). See :attr:`is_drive_degraded`.
     drive_status: DriveSourceStatus | None = None
+    #: Direct URL for downloading the original uploaded file. Populated only
+    #: when the backend retains a downloadable blob for the source (#2112).
+    download_url: str | None = field(default=None, repr=False)
+    #: Human-clickable Drive viewer URL for the original uploaded file, when
+    #: the backend supplies one (#2112).
+    viewer_url: str | None = field(default=None, repr=False)
+    #: True MIME type from the source's content blob descriptor. Unlike the
+    #: internal Drive MIME used for type disambiguation, this also covers
+    #: ordinary uploaded files (#2112).
+    content_mime: str | None = None
+    #: Inferred source word count. The wire slot is confirmed live but unnamed
+    #: in the recovered schema, so the semantic label remains provisional.
+    word_count: int | None = None
+    #: Opaque revision identifier from the source metadata revision handle.
+    revision_id: str | None = None
+    #: Timestamp paired with :attr:`revision_id`, decoded as timezone-aware UTC.
+    revision_timestamp: datetime | None = None
+    #: Last time the backend reports the source content was modified/refreshed,
+    #: decoded as timezone-aware UTC.
+    last_modified_at: datetime | None = None
 
     @property
     def kind(self) -> SourceType:
@@ -405,15 +425,18 @@ class Source:
         when no metadata list is present at ``_raw[2]``, so
         :attr:`SourceRow.metadata` returns ``None`` and
         :attr:`~SourceRow.type_code` / :attr:`~SourceRow.url` /
-        :attr:`~SourceRow.created_at` all resolve to ``None`` while
+        :attr:`~SourceRow.created_at` and all optional enrichment properties
+        resolve to ``None`` while
         :attr:`~SourceRow.status` resolves to ``SourceStatus.UNKNOWN``. The
         single field mapping below therefore covers all three wire shapes
         identically.
         """
-        # Correct the type_code==14 native-Sheet/Drive-PDF overload by the row
-        # MIME before it reaches ``kind`` (#1832). No-op for every other type
-        # code and for real Sheets.
-        type_code = _disambiguate_type_code(row.type_code, row.mime)
+        # Correct the type_code==14 native-Sheet/Drive-PDF overload before it
+        # reaches ``kind`` (#1832). Prefer the original-content MIME, then fall
+        # back to the Drive-only MIME if the first value is not a known
+        # override. Both passes are no-ops for every other code and real Sheets.
+        type_code = _disambiguate_type_code(row.type_code, row.content_mime)
+        type_code = _disambiguate_type_code(type_code, row.mime)
         return cls(
             id=row.id,
             # #1850: a direct-PDF URL arrives with the raw URL in the title slot
@@ -427,6 +450,13 @@ class Source:
             status=row.status,
             drive_document_id=row.drive_document_id,
             drive_status=row.drive_status,
+            download_url=row.download_url,
+            viewer_url=row.viewer_url,
+            content_mime=row.content_mime,
+            word_count=row.word_count,
+            revision_id=row.revision_id,
+            revision_timestamp=row.revision_timestamp,
+            last_modified_at=row.last_modified_at,
         )
 
     @classmethod
@@ -544,8 +574,11 @@ class SourceFulltext:
         had parsed, not a rendering anybody chose. Since #2128 the tree *is*
         parsed, so this property renders from it instead — runs joined
         **within** a block, blocks separated, blocks with nothing to read
-        omitted. :meth:`~notebooklm.types.StructuredDocument.render` carries the
-        full account, including the measurement on this repo's own capture.
+        omitted. A table is the one exception to "one line per block": it reads
+        as one line per **row**, cells tab-separated, from the cell boundaries
+        the parse carries alongside its flattened runs (#2230).
+        :meth:`~notebooklm.types.StructuredDocument.render` carries the full
+        account, including the measurement on this repo's own capture.
 
         It is derived, additive and free — the document is parsed on every
         ``get_fulltext`` regardless of ``output_format``, so nothing extra is

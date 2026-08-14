@@ -1,7 +1,7 @@
 # Python API Reference
 
 **Status:** Active
-**Last Updated:** 2026-06-11
+**Last Updated:** 2026-08-14
 
 Complete reference for the `notebooklm` Python library.
 
@@ -137,7 +137,7 @@ client = NotebookLMClient(auth)
 ```
 
 `AuthTokens.from_storage(...)` remains available as a v0.x compatibility loader,
-but it is deprecated in v0.9.0 and emits `DeprecationWarning` when awaited. Use
+but it is deprecated in v0.8.1 and emits `DeprecationWarning` when awaited. Use
 the managed `NotebookLMClient.from_storage(...)` examples above and access
 `client.auth` while the client is open. It is scheduled for removal in v1.0.
 
@@ -146,10 +146,10 @@ compatible through v0.x, but its implicit synchronous storage/recovery I/O is
 deprecated on the same schedule. Prefer the managed client; low-level callers
 that already own a live jar should pass `cookie_jar=` explicitly.
 
-The v0.9 cookie-view runway preserves the `AuthTokens` constructor and dataclass
+The v0.8.1 cookie-view runway preserves the `AuthTokens` constructor and dataclass
 behavior while moving managed clients toward one live authority:
 
-| Surface | v0.9 behavior and migration |
+| Surface | v0.8.1 behavior and migration |
 |---|---|
 | `flat_cookies` | Direct access warns because the name-only map loses domain/path siblings. Use `jar` for bootstrap-cookie questions and managed client APIs for requests. |
 | `cookies`, `cookie_jar` | Docs-only deprecated compatibility fields. They cannot warn without making construction, repr, equality, and `dataclasses.replace()` noisy. |
@@ -492,7 +492,7 @@ The following methods are idempotent under retry:
 
 | Method | Probe |
 |---|---|
-| `client.notebooks.create(title)` | Snapshot notebook IDs *before*, list *after* a transport failure, return the single new notebook with the matching title (or raise on ambiguity). |
+| `client.notebooks.create(title)` | Snapshot notebook IDs *before*, list *after* a transport failure, return the single **new** notebook with the matching title (or raise on ambiguity). Titles are not unique, so an unfiltered match could hand back a notebook that predates the call — and every later `sources.add_*` / `chat.ask` in the session would then target it ([#2232](https://github.com/teng-lin/notebooklm-py/issues/2232)). |
 | `client.sources.add_url(notebook_id, url)` | Snapshot source IDs *before*, list *after* a transport failure, return the single **new** source whose `url` exactly matches (or raise on ambiguity). The same URL can legitimately appear twice in one notebook, so an unfiltered match could hand back a source that predates the call ([#2204](https://github.com/teng-lin/notebooklm-py/issues/2204)). |
 | `client.sources.add_url(notebook_id, youtube_url)` | Same probe; the backend echoes the requested YouTube URL back verbatim, short (`youtu.be/…`) forms included. |
 
@@ -1179,6 +1179,8 @@ async with NotebookLMClient.from_storage(rate_limit_max_retries=0) as client:
 | `get(notebook_id)` | `notebook_id: str` | `Notebook` | Get notebook details |
 | `delete(notebook_id)` | `notebook_id: str` | `None` | Delete a notebook (idempotent; returns `None` whether or not it existed) |
 | `rename(notebook_id, new_title)` | `notebook_id: str, new_title: str` | `Notebook` | Rename a notebook (re-fetched; raises `NotebookNotFoundError` if missing) |
+| `set_emoji(notebook_id, emoji)` | `notebook_id: str, emoji: str` | `Notebook` | Set (or clear with `""`) the notebook display emoji and re-fetch it |
+| `update(notebook_id, *, title=None, emoji=None)` | `str, str \| None, str \| None` | `Notebook` | Set title and/or emoji in one `MutateProject`; raises `ValidationError` when both are `None` |
 | `get_description(notebook_id)` | `notebook_id: str` | `NotebookDescription` | Get AI summary and topics |
 | `suggest_prompts(notebook_id, *, source_ids=None, mode=4, query=None)` | `str, list[str] \| None, int, str \| None` | `list[PromptSuggestion]` | Get AI-suggested prompts for the notebook. `source_ids=None` uses all sources; `mode` is the required `1..10` "mode/surface" int (default `4` suggests chat questions; other modes target other surfaces); `query` optionally steers the suggestions. Each `PromptSuggestion.prompt` is a ready-to-send instruction for `ask()`. |
 | `get_metadata(notebook_id)` | `notebook_id: str` | `NotebookMetadata` | Get notebook metadata and sources |
@@ -1196,7 +1198,7 @@ for nb in notebooks:
 
 # Create and rename
 nb = await client.notebooks.create("Draft")
-nb = await client.notebooks.rename(nb.id, "Final Version")
+nb = await client.notebooks.update(nb.id, title="Final Version", emoji="📖")
 
 # Get AI-generated description (parsed with suggested topics)
 desc = await client.notebooks.get_description(nb.id)
@@ -1230,7 +1232,7 @@ print(url)
 
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
-| `list(notebook_id, strict=False)` | `notebook_id: str, strict: bool = False` | `list[Source]` | List sources |
+| `list(notebook_id, *, strict=False, statuses=None, types=None)` | `str, *, bool, Collection[SourceStatus] \| None, Collection[SourceType] \| None` | `list[Source]` | List sources, optionally filtered after normalization |
 | `get(notebook_id, source_id)` | `str, str` | `Source` | Get source details; raises `SourceNotFoundError` on a miss |
 | `get_or_none(notebook_id, source_id)` | `str, str` | `Source \| None` | Optional lookup; returns `None` when absent |
 | `get_fulltext(notebook_id, source_id, *, output_format="text")` | `str, str, *, output_format: Literal["text", "markdown"]` | `SourceFulltext` | Get full content; `"markdown"` requires the optional `markdownify` extra |
@@ -1280,6 +1282,21 @@ sources = await client.sources.list(nb_id)
 for src in sources:
     print(f"{src.id}: {src.title} ({src.kind})")
 
+# Filters are ORed within an axis and ANDed across axes. Backend order is
+# preserved; an explicitly empty filter matches no sources.
+from notebooklm import SourceStatus, SourceType
+
+ready_documents = await client.sources.list(
+    nb_id,
+    statuses={SourceStatus.READY},
+    types={SourceType.PDF, SourceType.DOCX, SourceType.GOOGLE_DOCS},
+)
+
+# The backend does not expose a separate authoritative count endpoint. For an
+# exact count of uniquely addressable sources, request a strict normalized
+# snapshot and count it locally.
+actual_source_count = len(await client.sources.list(nb_id, strict=True))
+
 await client.sources.rename(nb_id, src.id, "Better Title")
 await client.sources.refresh(nb_id, src.id)  # Re-fetch URL content
 
@@ -1298,6 +1315,34 @@ print(f"Summary: {guide.summary}")
 print(f"Keywords: {guide.keywords}")
 # SourceGuide is a typed value; prefer attribute access.
 ```
+
+`sources.list()` performs one `GET_NOTEBOOK` read. `statuses` and `types` do
+not trigger extra RPCs: each collection is snapshotted before the read, then
+matched against normalized `Source.status` and `Source.kind` values. Multiple
+members within `statuses` or `types` are alternatives (OR); supplying both
+axes requires both to match (AND). `None` means no filter on that axis, while
+an explicitly empty collection matches nothing.
+
+The `strict` option is for callers that need a trustworthy count. Response-
+envelope drift always raises `RPCError`, regardless of this option. At the row
+level, the default `strict=False` keeps backward-compatible recovery: malformed
+or id-less rows are skipped and duplicate IDs keep their first normalized
+value. `strict=True` instead raises on malformed/id-less rows, on ID-bearing
+rows whose type or status discriminant is missing/malformed, and on duplicate
+IDs whose normalized values conflict. Duplicate rows that normalize to the
+same `Source` still collapse to one resource because the count is of unique,
+addressable sources—not raw wire rows. Therefore the canonical exact-count
+operation is:
+
+```python
+actual_count = len(await client.sources.list(notebook_id, strict=True))
+```
+
+Apply `statuses=` / `types=` to that same call when the desired count is for a
+filtered subset. There is intentionally no separate `sources.count()` or
+inventory object: the backend already returns the source rows needed to count,
+so another public surface would imply authority or efficiency that does not
+exist.
 
 ---
 
@@ -1321,7 +1366,7 @@ print(f"Keywords: {guide.keywords}")
 
 #### Type-Specific List Methods
 
-**CLI equivalent:** `notebooklm artifact list --type <audio|video|slide-deck|quiz|flashcard|infographic|data-table|mind-map|report>` (see [Artifact Commands](cli-reference.md#artifact-commands-notebooklm-artifact-cmd)).
+**CLI equivalent:** `notebooklm artifact list --type <audio|video|slide-deck|quiz|flashcard|infographic|data-table|mind-map|report|fantasy-map|file>` (see [Artifact Commands](cli-reference.md#artifact-commands-notebooklm-artifact-cmd)).
 
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
@@ -1657,10 +1702,12 @@ async def ask(
 - `conversation_id=None` matches the web UI's default: the server attaches the
   question to your current conversation on this notebook (or creates one if
   none exists). Repeated `ask()` calls without `conversation_id` extend the
-  same conversation; they do not start fresh ones. The SDK fetches the
-  server-recorded conversation_id via `hPTbtc` after each new-conversation
-  ask and surfaces it on `AskResult.conversation_id`, so passing it back as
-  `conversation_id=` for follow-ups works as expected.
+  same conversation; they do not start fresh ones. The SDK resolves the
+  server-recorded conversation id through `hPTbtc` when needed and surfaces it
+  on `AskResult.conversation_id`, so passing it back as `conversation_id=` for
+  follow-ups works. The first ask after `notebooks.create()` binds to the
+  server-issued `ChatSession` id in the create response instead, avoiding that
+  redundant lookup while keeping the POST target and returned id identical.
 - `conversation_id=<existing-id>` is a follow-up: the question is appended
   to the named conversation.
 - To force a brand-new conversation, call
@@ -1678,7 +1725,7 @@ from notebooklm import ChatGoal, ChatResponseLength
 # Ask questions (uses all sources)
 result = await client.chat.ask(nb_id, "What are the main themes?")
 print(result.answer)
-print(result.conversation_id)  # server-recorded id, fetched via hPTbtc
+print(result.conversation_id)  # server-recorded id (CREATE hint or hPTbtc)
 
 # Access source references (cited in answer as [1], [2], etc.)
 for ref in result.references:
@@ -2324,7 +2371,30 @@ class Notebook:
     modified_at: Optional[datetime]    # DEPRECATED alias for last_viewed_at
     role: Optional[SharePermission]    # your own level: OWNER / EDITOR / VIEWER
     last_viewed_at: Optional[datetime] # when YOU last opened it (tz-aware UTC)
+    emoji: Optional[str]               # Project.emoji; None when unstated
+    premium_features: Optional[PremiumFeatureInfo]
+    chat_sessions: list[ChatSession]   # populated by CREATE; GET omits it
+    chat_settings: Optional[ChatSettings] # current goal/length/persona on get()
+
+@dataclass(frozen=True)
+class PremiumFeatureInfo:
+    can_edit_advanced_settings: bool | None
+    can_edit_guidebook_config: bool | None
+    can_view_analytics: bool | None
+
+@dataclass(frozen=True)
+class ChatSession:
+    id: str
 ```
+
+The three premium flags are tri-state: `None` means the response made no usable
+claim. `chat_sessions` is normally populated only on the object returned by
+`create()`; the client consumes its first id once when the first `chat.ask()` is
+made, avoiding a redundant `hPTbtc` lookup. `chat_settings` is populated by
+`notebooks.get()`; it stays `None` on `list()` because the listing RPC does not
+project the configuration (its null slot cannot distinguish default from a
+configured notebook). These richer Project fields are Python API data and do
+not silently widen the established CLI/MCP/REST notebook JSON contracts.
 
 #### `last_viewed_at` is not a modification time — and `GET_NOTEBOOK` mutates it
 
@@ -2367,7 +2437,7 @@ effect of doing something else:
 | `notebooks.create()` (CLI/MCP/REST path) | One best-effort re-read to backfill the timestamps `CREATE_NOTEBOOK` leaves null; skipped when both are already populated. |
 | `chat.get_settings()` | Chat config lives in the notebook payload. |
 | `sources.add_file()` / `add_drive()` / `add_url()` | An **unconditional** pre-create baseline of existing source ids, on every call — the idempotency probe needs it to tell a source it created from one that was already there. (`add_text()` is `NON_IDEMPOTENT_NO_RETRY` and runs no probe at all, so it never bumps recency.) |
-| REST `POST /v1/notebooks/{id}/sources/batch` preflight | One shared existence/auth check before the per-URL loop. |
+| REST `POST /v1/notebooks/{id}/sources/batch` | One shared existence/auth check before one multi-URL `ADD_SOURCE`; omitted failures trigger one reconciliation `GET_NOTEBOOK`. It never blindly replays a transport-uncertain batch. |
 
 > **`sources.add_drive()` and `sources.add_url()` moved rows**, in
 > [#2113](https://github.com/teng-lin/notebooklm-py/issues/2113) and
@@ -2407,6 +2477,13 @@ class Source:
     status: SourceStatus                 # UNKNOWN when the wire status is missing or unmapped
     drive_document_id: Optional[str]     # Drive file id for Drive-backed sources; None otherwise
     drive_status: Optional[DriveSourceStatus]  # Drive-side health; None when the row makes no claim
+    download_url: Optional[str]          # Original uploaded file; None when unavailable
+    viewer_url: Optional[str]            # Drive viewer for the uploaded file; None when unavailable
+    content_mime: Optional[str]          # True MIME from the original-content blob descriptor
+    word_count: Optional[int]            # Inferred source word count
+    revision_id: Optional[str]           # Opaque source revision identifier
+    revision_timestamp: Optional[datetime]  # Timestamp paired with revision_id (tz-aware UTC)
+    last_modified_at: Optional[datetime] # Last source content update/refresh (tz-aware UTC)
 
     @property
     def kind(self) -> SourceType:
@@ -2431,6 +2508,18 @@ class Source:
 
 > **Removed in v0.5.0:** `Source.source_type` was replaced by `Source.kind`.
 > See [stability.md → Removed in v0.5.0](stability.md#removed-in-v050).
+
+Uploaded-file sources may carry `download_url`, `viewer_url`, and
+`content_mime`. These describe the retained original file, not the indexed text:
+`download_url` retrieves the original bytes, `viewer_url` opens the backend's
+Drive viewer, and `content_mime` is the MIME stored with that original-content
+blob. They are `None` for source kinds whose rows do not include that blob.
+
+`word_count`, `revision_id`, `revision_timestamp`, and `last_modified_at` expose
+metadata already returned by `GET_NOTEBOOK`. The slots and shapes are confirmed
+live, but the recovered mobile schema does not name them; `word_count`, the
+revision-handle interpretation, and the meaning of `last_modified_at` are
+therefore evidence-based names rather than recovered protobuf names.
 
 **Drive-backed sources: `is_ready` is not the whole story.**
 
@@ -2529,6 +2618,15 @@ class Artifact:
     url: Optional[str]
     _variant: int | None = None     # Internal variant for type-4 artifacts (1=flashcards, 2=quiz, 4=interactive mind map).
     generation_prompt: str | None = None  # Free-text prompt this artifact was generated from, if any (see get_prompt()).
+    media_urls: tuple[ArtifactMedia, ...] = ()
+    duration_seconds: float | None = None
+    slides: tuple[ArtifactSlide, ...] = ()
+    infographics: tuple[ArtifactInfographic, ...] = ()
+    report_kind: str | None = None
+    source_ids: tuple[str, ...] = ()
+    last_modified_at: datetime | None = None
+    etag: str | None = None
+    user_state: ArtifactUserState | None = None
 
     @property
     def kind(self) -> ArtifactType:
@@ -2568,7 +2666,21 @@ class Artifact:
         'blog_post', or 'report' for type-2 artifacts; None otherwise.
         Use this instead of parsing titles in caller code.
         """
+
+    @property
+    def report_format(self) -> ReportFormat | None:
+        """Typed format for a known report_kind; None for unknown labels."""
 ```
+
+`media_urls` contains all returned progressive, HLS, DASH, and download
+variants; the historical `url` remains the preferred single download URL.
+`slides` and `infographics` retain image dimensions, alt text, and full text.
+The `ArtifactMedia`, `ArtifactSlide`, `ArtifactInfographic`,
+`AudioArtifactUserState`, `FlashcardArtifactUserState`, and
+`UnknownArtifactUserState` records are frozen dataclasses exported from
+`notebooklm`. Unknown media type codes and user-state shapes preserve their raw
+identity instead of being discarded. `report_kind` likewise retains an unknown
+backend label verbatim while `report_format` maps labels the client recognizes.
 
 **Note on `_artifact_type` / `_variant`:** these are private (leading-underscore) fields with `repr=False` and are part of the dataclass for `from_api_response()` round-tripping. Always consume them via the public `.kind`, `.is_quiz`, `.is_flashcards`, and `.report_subtype` accessors.
 
@@ -2757,6 +2869,13 @@ class AskResult:
     raw_response: str                  # First 1000 chars of raw API response
     answer_document: StructuredDocument  # The answer's own parsed document (#2120)
     turn_key: ConversationTurnKey | None  # Backend key for THIS turn (#2122)
+    next_steps: list[NextStepSuggestion]  # Backend-suggested follow-ups (#2119)
+
+@dataclass(frozen=True)
+class NextStepSuggestion:
+    question: str
+    type_code: int                     # raw MagicArtifactType code, preserved
+    kind: MagicArtifactType | None     # typed property; None for a new code
 
 @dataclass(frozen=True)
 class ConversationTurnKey:
@@ -2790,13 +2909,22 @@ class ChatReference:
     answer_anchor_end: int | None    # ...and end
 ```
 
+`next_steps` decodes the `NextStepSuggestions` block the backend includes with
+live answers. A normal chat follow-up uses
+`MagicArtifactType.CONVERSATIONAL_TEXT_CHIP` (`9`). The raw `type_code` remains
+available even when a newer backend sends an enum value this client does not
+yet know; in that case `kind` is `None` rather than dropping the suggestion.
+MCP and REST ask responses serialize each item as `{question, type_code}`.
+
 > **`session_id` is not a conversation id.** It is the same wire slot issue
 > #659 established is a *per-stream* identifier (`khqZz` returns 0 turns for
 > it). The evidence is mixed — a live two-turn probe saw the `hPTbtc`-resolved
 > conversation id there, while this repo's recorded cassettes show it differing
 > from the recorded `hPTbtc` id in 4/4 chat captures — so it is exposed under
 > its proto name with nothing claimed for it. Use `AskResult.conversation_id`
-> for follow-ups; `ask()` still resolves that through `hPTbtc`.
+> for follow-ups. `ask()` normally resolves that through `hPTbtc`; immediately
+> after `notebooks.create()`, it binds the first ask to the create response's
+> server-issued `ChatSession` instead of fetching the same id again.
 >
 > `turn_id` deliberately does **not** take its proto name (`conversationId`),
 > which contradicts every observation: it changes on each turn of one
@@ -3104,9 +3232,12 @@ costs no extra request, `content` does not move, and like `content` it is
 deliberately **not** offset-addressable — its separators are its own. It is
 also marker-free: list glyphs and heading levels stay on `blocks` rather than
 being rendered, so this is the flat rendering `content` should have been, not
-a markdown one. A **table** renders as one line with its cells running
-together, because the parse flattens rows and cells into the block's spans
-([#2230](https://github.com/teng-lin/notebooklm-py/issues/2230)).
+a markdown one. A **table** is the one block that is not one line: it renders
+one line per row with its cells tab-separated, read from the cell offsets the
+parse carries on `DocumentBlock.table_rows`
+([#2230](https://github.com/teng-lin/notebooklm-py/issues/2230)). Those are
+offsets only — `document.text`, `DocumentBlock.text` and `cited_text` are
+byte-for-byte what they were, and the tab lives in the rendering alone.
 
 With `output_format="markdown"` the two are not the same material: `content`
 is then built from the response's HTML rendition while `document` — and so
@@ -3125,7 +3256,9 @@ and `source read --offset` keeps windowing `content` in those same units, not
 in the document's.
 
 `StructuredDocument` exposes `blocks` (`DocumentBlock`: `start_index`,
-`end_index`, `spans`, `style`, `list_info`, `kind`), `annotations`
+`end_index`, `spans`, `style`, `list_info`, `kind`, `table_rows` — a tuple of
+rows of `TableCell` ranges, non-empty only for a `BlockKind.TABLE`),
+`annotations`
 (`DocumentAnnotation`: `object_id`, `start_index`, `end_index`), `text`,
 `extent`, `slice()`, `render()` and `annotations_for()`. Each `TextSpan`
 carries its own range plus `bold` / `italic` / `underline` / `url`.
@@ -3229,8 +3362,13 @@ class ReportFormat(str, Enum):
     BRIEFING_DOC = "briefing_doc"
     STUDY_GUIDE = "study_guide"
     BLOG_POST = "blog_post"
+    CONCEPT_EXPLANATION = "concept_explanation"
     CUSTOM = "custom"
 ```
+
+`CONCEPT_EXPLANATION` is currently read-only: it can be returned by artifact
+listings, but generation rejects it until NotebookLM's creation directive is
+known.
 
 ### Infographics
 
@@ -3326,6 +3464,8 @@ class ArtifactType(str, Enum):
     INFOGRAPHIC = "infographic"
     SLIDE_DECK = "slide_deck"
     DATA_TABLE = "data_table"
+    FANTASY_MAP = "fantasy_map"
+    FILE = "file"
     UNKNOWN = "unknown"
 
 class SourceStatus(Enum):
@@ -3369,10 +3509,14 @@ class DiscoveryMode(Enum):
 
 **Usage Example:**
 ```python
-from notebooklm import SourceType, ArtifactType
+from notebooklm import ArtifactType, SourceStatus, SourceType
 
-# List sources by type using .kind property
-sources = await client.sources.list(nb_id)
+# Request the source families and states you need directly.
+sources = await client.sources.list(
+    nb_id,
+    statuses={SourceStatus.READY},
+    types={SourceType.PDF, SourceType.MEDIA, SourceType.IMAGE, SourceType.UNKNOWN},
+)
 for src in sources:
     if src.kind == SourceType.PDF:
         print(f"PDF: {src.title}")

@@ -218,6 +218,7 @@ MAPPINGS: tuple[Mapping, ...] = (
     Mapping("artifacts", "ArtifactRow", "_ID_POS", "Artifact", "artifactId"),
     Mapping("artifacts", "ArtifactRow", "_TITLE_POS", "Artifact", "title"),
     Mapping("artifacts", "ArtifactRow", "_TYPE_POS", "Artifact", "type"),
+    Mapping("artifacts", "ArtifactRow", "_SOURCES_POS", "Artifact", "sources"),
     Mapping("artifacts", "ArtifactRow", "_STATUS_POS", "Artifact", "status"),
     Mapping("artifacts", "ArtifactRow", "_AUDIO_METADATA_POS", "Artifact", "audioOverview"),
     Mapping("artifacts", "ArtifactRow", "_REPORT_MARKDOWN_POS", "Artifact", "tailoredReport"),
@@ -230,8 +231,92 @@ MAPPINGS: tuple[Mapping, ...] = (
         "app",
         note="quiz/flashcards are AppArtifacts; generationOptions nests under this",
     ),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_LAST_MODIFIED_TIMESTAMP_POS",
+        "Artifact",
+        "lastModifiedTimestamp",
+    ),
     Mapping("artifacts", "ArtifactRow", "_INFOGRAPHIC_METADATA_POS", "Artifact", "infographic"),
     Mapping("artifacts", "ArtifactRow", "_SLIDE_DECK_METADATA_POS", "Artifact", "slides"),
+    Mapping(
+        "artifacts", "ArtifactRow", "_ARTIFACT_USER_STATE_POS", "Artifact", "artifactUserState"
+    ),
+    Mapping("artifacts", "ArtifactRow", "_ETAG_POS", "Artifact", "etag"),
+    # ---- Artifact content payloads (#2135/#2136) --------------------------
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_AUDIO_MEDIA_LIST_POS",
+        "AudioOverviewArtifact",
+        "mediaUrls",
+    ),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_AUDIO_DURATION_POS",
+        "AudioOverviewArtifact",
+        "duration",
+    ),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_VIDEO_MEDIA_LIST_POS",
+        "ExplainerVideoArtifact",
+        "mediaUrls",
+    ),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_VIDEO_DURATION_POS",
+        "ExplainerVideoArtifact",
+        "duration",
+    ),
+    Mapping("artifacts", "ArtifactRow", "_MEDIA_URL_POS", "MediaStreamingUrl", "url"),
+    Mapping("artifacts", "ArtifactRow", "_MEDIA_KIND_POS", "MediaStreamingUrl", "type"),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_REPORT_GENERATION_OPTIONS_POS",
+        "TailoredReportArtifact",
+        "generationOptions",
+    ),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_REPORT_KIND_POS",
+        "TailoredReportArtifactGenerationOptions",
+        "type",
+    ),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_INFOGRAPHIC_ITEMS_POS",
+        "InfographicArtifact",
+        "infographics",
+    ),
+    Mapping("artifacts", "ArtifactRow", "_INFOGRAPHIC_TITLE_POS", "Infographic", "title"),
+    Mapping("artifacts", "ArtifactRow", "_INFOGRAPHIC_IMAGE_POS", "Infographic", "image"),
+    Mapping("artifacts", "ArtifactRow", "_SLIDE_ITEMS_POS", "SlidesArtifact", "slides"),
+    Mapping("artifacts", "ArtifactRow", "_SLIDE_IMAGE_POS", "Slide", "image"),
+    Mapping("artifacts", "ArtifactRow", "_IMAGE_URL_POS", "ServedImage", "url"),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_AUDIO_USER_STATE_POS",
+        "ArtifactState",
+        "audioOverviewState",
+    ),
+    Mapping("artifacts", "ArtifactRow", "_APP_USER_STATE_POS", "ArtifactState", "appArtifactState"),
+    Mapping(
+        "artifacts",
+        "ArtifactRow",
+        "_PLAYBACK_POSITION_POS",
+        "AudioOverviewState",
+        "playbackPosition",
+    ),
+    Mapping("artifacts", "ArtifactRow", "_APP_STATE_POS", "AppArtifactState", "appState"),
     # ---- Inside the AppArtifact options block (#2195) ----------------------
     Mapping(
         "artifacts",
@@ -575,6 +660,30 @@ MAPPINGS: tuple[Mapping, ...] = (
             "exactly the last, across a 5-chunk and a 6-chunk stream."
         ),
     ),
+    Mapping(
+        "chat",
+        "StreamEnvelopeRow",
+        "_NEXT_STEPS_POS",
+        "GenerateFreeFormStreamedResponse",
+        "nextStepSuggestions",
+        note="#2119 — typed follow-up chips carried on the final live stream envelope",
+    ),
+    Mapping(
+        "chat",
+        "StreamEnvelopeRow",
+        "_NEXT_STEPS_ROWS_POS",
+        "NextStepSuggestions",
+        "nextSteps",
+        note="nested inside GenerateFreeFormStreamedResponse.nextStepSuggestions",
+    ),
+    Mapping("chat", "NextStepSuggestionRow", "_QUESTION_POS", "NextStep", "suggestion"),
+    Mapping(
+        "chat",
+        "NextStepSuggestionRow",
+        "_TYPE_CODE_POS",
+        "NextStep",
+        "suggestionType",
+    ),
     # ---- Chat: ConversationTurnKey (inside AnswerResponse tag 3) -----------
     # The three slots of the key at ``answer_row[2]``. Slot 0 keeps its proto
     # name on the public type; slot 1 does NOT, because its proto name
@@ -638,6 +747,21 @@ MAPPINGS: tuple[Mapping, ...] = (
     ),
     Mapping("research", "ResearchResultRow", "_RESULT_TYPE_POS", "DiscoveredSource", "corpusType"),
     # ---- Notebooks: PromptSuggestion --------------------------------------
+    Mapping("notebooks", "ProjectRow", "_EMOJI_POS", "Project", "emoji"),
+    Mapping(
+        "notebooks",
+        "ProjectRow",
+        "_PREMIUM_FEATURE_INFO_POS",
+        "Project",
+        "premiumFeatureInfo",
+    ),
+    Mapping(
+        "notebooks",
+        "ProjectRow",
+        "_CHAT_SESSIONS_POS",
+        "Project",
+        "chatSessions",
+    ),
     Mapping("notebooks", "PromptSuggestionRow", "_TITLE_POS", "PromptSuggestion", "title"),
     Mapping("notebooks", "PromptSuggestionRow", "_PROMPT_POS", "PromptSuggestion", "prompt"),
     # ---- Account limits: TierLimits ---------------------------------------
@@ -787,13 +911,48 @@ UNMAPPED: tuple[Unmapped, ...] = (
     Unmapped("sources", "SourceFulltextRow", "_TEXT_CONTENT_POS", _NESTED_LOCAL),
     Unmapped("sources", "SourceFulltextRow", "_METADATA_TYPE_POS", _NESTED_LOCAL),
     # artifacts.py
-    Unmapped("artifacts", "ArtifactRow", "_AUDIO_MEDIA_LIST_POS", _NESTED_LOCAL),
-    Unmapped("artifacts", "ArtifactRow", "_MEDIA_URL_POS", _NESTED_LOCAL),
-    Unmapped("artifacts", "ArtifactRow", "_MEDIA_KIND_POS", _NESTED_LOCAL),
     Unmapped("artifacts", "ArtifactRow", "_MEDIA_MIME_POS", _NESTED_LOCAL),
+    Unmapped(
+        "artifacts",
+        "ArtifactRow",
+        "_INFOGRAPHIC_ALT_TEXT_POS",
+        "live web field absent from the recovered mobile Infographic message",
+    ),
+    Unmapped(
+        "artifacts",
+        "ArtifactRow",
+        "_INFOGRAPHIC_TEXT_POS",
+        "live web field absent from the recovered mobile Infographic message",
+    ),
     Unmapped("artifacts", "ArtifactRow", "_INFOGRAPHIC_CONTENT_POS", _NESTED_LOCAL),
     Unmapped("artifacts", "ArtifactRow", "_INFOGRAPHIC_FIRST_CONTENT_POS", _NESTED_LOCAL),
     Unmapped("artifacts", "ArtifactRow", "_INFOGRAPHIC_IMAGE_DATA_POS", _NESTED_LOCAL),
+    Unmapped(
+        "artifacts",
+        "ArtifactRow",
+        "_SLIDE_ALT_TEXT_POS",
+        "live web field absent from the recovered mobile Slide message",
+    ),
+    Unmapped(
+        "artifacts",
+        "ArtifactRow",
+        "_SLIDE_TEXT_POS",
+        "live web field absent from the recovered mobile Slide message",
+    ),
+    Unmapped(
+        "artifacts",
+        "ArtifactRow",
+        "_IMAGE_WIDTH_POS",
+        "live web ServedImage extension absent from the recovered mobile schema",
+    ),
+    Unmapped(
+        "artifacts",
+        "ArtifactRow",
+        "_IMAGE_HEIGHT_POS",
+        "live web ServedImage extension absent from the recovered mobile schema",
+    ),
+    Unmapped("artifacts", "ArtifactRow", "_DURATION_SECONDS_POS", _NESTED_LOCAL),
+    Unmapped("artifacts", "ArtifactRow", "_DURATION_NANOS_POS", _NESTED_LOCAL),
     Unmapped("artifacts", "ArtifactRow", "_SLIDE_DECK_PDF_URL_POS", _NESTED_LOCAL),
     Unmapped("artifacts", "ArtifactRow", "_SLIDE_DECK_PPTX_URL_POS", _NESTED_LOCAL),
     Unmapped("artifacts", "ReportSuggestionRow", "_TITLE_POS", _SHAPE_UNKNOWN),
@@ -932,6 +1091,87 @@ UNREAD_SHARE_STATUS_SLOTS: dict[int, str] = {
 
 PINNED: tuple[Pinned, ...] = (
     Pinned(
+        "sources",
+        "SourceRow",
+        "_DOWNLOAD_URL_POS",
+        5,
+        "Source tag 6 — direct download URL for the original uploaded file",
+        "#2112: populated on 41/409 live source rows, always as a "
+        "contribution.usercontent.google.com/download URL; independently rechecked "
+        "on 27/305 rows across 12 notebooks",
+    ),
+    Pinned(
+        "sources",
+        "SourceRow",
+        "_VIEWER_URL_POS",
+        6,
+        "Source tag 7 — Drive viewer URL for the original uploaded file",
+        "#2112: populated alongside tag 6 on 41/409 live source rows, always as a "
+        "drive.google.com/viewer/upload URL; independently rechecked on 27/305 rows",
+    ),
+    Pinned(
+        "sources",
+        "SourceRow",
+        "_CONTENT_DESCRIPTOR_POS",
+        7,
+        "Source tag 8 — original-content blob descriptor",
+        "#2112: populated alongside tags 6/7 on 41/409 live rows with blobref, MIME, "
+        "and opaque token payload; independently rechecked on 27/305 rows",
+    ),
+    Pinned(
+        "sources",
+        "SourceRow",
+        "_CONTENT_DESCRIPTOR_MIME_POS",
+        2,
+        "Source tag-8 blob descriptor index 2 — true content MIME",
+        "#2112: non-null MIME (including text/markdown) on every one of the 41 rows "
+        "whose Source tag-8 descriptor was populated",
+    ),
+    Pinned(
+        "sources",
+        "SourceRow",
+        "_META_WORD_COUNT_POS",
+        1,
+        "SourceMetadata tag 2 — inferred source word/size count",
+        "#2114: populated on 409/409 sampled rows with values such as 1498, 4048, "
+        "and 116962; the word-count meaning is inferred from values and the confirmed "
+        "per-source word limit, not a recovered proto name",
+    ),
+    Pinned(
+        "sources",
+        "SourceRow",
+        "_META_REVISION_POS",
+        3,
+        "SourceMetadata tag 4 — inferred [revision id, timestamp] handle",
+        "#2114: populated on 409/409 sampled rows as [uuid, [seconds, nanos]]; the "
+        "revision meaning is inferred because the mobile schema marks the slot unused",
+    ),
+    Pinned(
+        "sources",
+        "SourceRow",
+        "_META_LAST_MODIFIED_POS",
+        14,
+        "SourceMetadata tag 15 — inferred last-modified timestamp",
+        "#2114: populated on 409/409 sampled rows as [seconds, nanos]; the temporal "
+        "meaning is inferred from live values rather than a recovered proto name",
+    ),
+    Pinned(
+        "sources",
+        "SourceRow",
+        "_REVISION_ID_POS",
+        0,
+        "SourceMetadata tag-4 revision handle index 0 — opaque revision UUID",
+        "#2114: 409/409 live revision handles used [uuid, [seconds, nanos]]",
+    ),
+    Pinned(
+        "sources",
+        "SourceRow",
+        "_REVISION_TIMESTAMP_POS",
+        1,
+        "SourceMetadata tag-4 revision handle index 1 — revision timestamp",
+        "#2114: 409/409 live revision handles used [uuid, [seconds, nanos]]",
+    ),
+    Pinned(
         "chat",
         "CitationDetail",
         "_FRAGMENT_RANGE_POS",
@@ -1047,6 +1287,42 @@ PINNED: tuple[Pinned, ...] = (
 #: Only members we actually claim are listed; the test reports backend members we
 #: do not model as informational, not as failures.
 ENUM_BINDINGS: dict[str, tuple[str, dict[int, str]]] = {
+    "ArtifactTypeCode": (
+        "ArtifactType",
+        {
+            1: "ARTIFACT_TYPE_AUDIO_OVERVIEW",
+            2: "ARTIFACT_TYPE_TAILORED_REPORT",
+            3: "ARTIFACT_TYPE_EXPLAINER_VIDEO",
+            4: "ARTIFACT_TYPE_APP",
+            5: "ARTIFACT_TYPE_MINDMAP",
+            6: "ARTIFACT_TYPE_FANTASY_MAP",
+            7: "ARTIFACT_TYPE_INFOGRAPHIC",
+            8: "ARTIFACT_TYPE_SLIDES",
+            9: "ARTIFACT_TYPE_TABLE",
+            10: "ARTIFACT_TYPE_FILE",
+        },
+    ),
+    "MagicArtifactType": (
+        "MagicArtifactType",
+        {
+            0: "MAGIC_ARTIFACT_TYPE_UNSPECIFIED",
+            1: "MINDMAP",
+            2: "AUDIO_OVERVIEW",
+            3: "VIDEO_OVERVIEW",
+            4: "NOTE",
+            5: "TABLE",
+            6: "LINE_CHART",
+            7: "FLASHCARDS",
+            8: "REPORT",
+            9: "CONVERSATIONAL_TEXT_CHIP",
+            10: "VIDEO_OVERVIEW_TEXT_CHIP",
+            11: "AUDIO_OVERVIEW_TEXT_CHIP",
+            12: "REPORT_TEXT_CHIP",
+            13: "FLASHCARDS_TEXT_CHIP",
+            14: "QUIZ_TEXT_CHIP",
+            15: "SOURCE_DISCOVERY_TEXT_CHIP",
+        },
+    ),
     "SourceStatus": (
         "SourceStatus",
         {

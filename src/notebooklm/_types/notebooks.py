@@ -9,8 +9,11 @@ from datetime import datetime
 from typing import Any
 
 from .._deprecation import warn_deprecated
+from .._row_adapters.notebooks import ProjectRow
+from ..exceptions import UnknownRPCMethodError
 from ..rpc import RPCMethod, safe_index
-from ..rpc.types import SharePermission, share_permission_to_str
+from ..rpc.types import ChatGoal, ChatResponseLength, SharePermission, share_permission_to_str
+from .chat import ChatSettings
 from .common import _datetime_from_timestamp
 from .sources import SourceType
 
@@ -96,6 +99,28 @@ def _role_from_wire(raw_role: Any, row: list[Any]) -> SharePermission | None:
     return None
 
 
+@dataclass(frozen=True)
+class PremiumFeatureInfo:
+    """Tier-dependent notebook capabilities returned with a ``Project``.
+
+    Each member is tri-state. ``True``/``False`` is the server's explicit
+    capability verdict; ``None`` means the response did not carry a usable
+    boolean for that slot. In particular, callers should test
+    ``can_view_analytics is True`` rather than treating absence as denial.
+    """
+
+    can_edit_advanced_settings: bool | None = None
+    can_edit_guidebook_config: bool | None = None
+    can_view_analytics: bool | None = None
+
+
+@dataclass(frozen=True)
+class ChatSession:
+    """A chat session volunteered by the notebook ``Project`` response."""
+
+    id: str
+
+
 @dataclass
 class Notebook:
     """Represents a NotebookLM notebook."""
@@ -146,6 +171,17 @@ class Notebook:
     #: internal call paths that bump;
     #: :meth:`NotebooksAPI.remove_from_recent` is the only way to undo it.
     last_viewed_at: datetime | None = None
+    #: Display emoji carried by ``Project.emoji``. ``None`` when the response
+    #: omits it; an empty string is preserved as an explicit no-emoji value.
+    emoji: str | None = None
+    #: Tier-dependent feature availability volunteered by the backend.
+    premium_features: PremiumFeatureInfo | None = None
+    #: Chat sessions returned by ``CREATE_NOTEBOOK``. ``GET_NOTEBOOK`` omits
+    #: them, so this is normally empty outside the create result.
+    chat_sessions: list[ChatSession] = field(default_factory=list)
+    #: Current chat persona/configuration decoded from ``Project`` tag 8.
+    #: ``None`` only when the row was too short or malformed to make a claim.
+    chat_settings: ChatSettings | None = None
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Maintain the two derived-field invariants on every assignment.
@@ -243,17 +279,34 @@ class Notebook:
         whole change exists to remove. Seed the canonical field so the promise
         holds for unpickled objects too.
 
-        ``role`` needs no equivalent: an old pickle restores it as ``None``
-        (unknown), and an unknown role deliberately leaves the pickled
-        ``is_owner`` untouched — already the documented soft-degrade (#2125).
+        ``chat_sessions`` is different from the other additive fields: its
+        ``default_factory`` creates no class-level fallback, so a pickle from
+        before #2133 would raise ``AttributeError`` on access unless we seed an
+        empty list here. ``role`` needs no equivalent: an old pickle restores
+        it as ``None`` (unknown), and an unknown role deliberately leaves the
+        pickled ``is_owner`` untouched — already the documented soft-degrade
+        (#2125).
         """
         self.__dict__.update(state)
+        self.__dict__.setdefault("chat_sessions", [])
         if state.get("last_viewed_at") is None and state.get("modified_at") is not None:
             self.__dict__["last_viewed_at"] = state["modified_at"]
 
     @classmethod
-    def from_api_response(cls, data: list[Any]) -> Notebook:
-        """Parse notebook from API response."""
+    def from_api_response(
+        cls,
+        data: list[Any],
+        *,
+        include_chat_settings: bool = False,
+    ) -> Notebook:
+        """Parse a notebook row from an API response.
+
+        ``LIST_NOTEBOOKS`` does not project chat configuration: its slot 7 is
+        ``null`` even when the notebook is configured. Only callers mapping a
+        ``GET_NOTEBOOK`` row should set ``include_chat_settings=True``; there an
+        explicit ``null`` truthfully means the default configuration.
+        """
+        project = ProjectRow(data)
         title_slot = (
             safe_index(data, 0, method_id=_NOTEBOOK_METHOD_ID, source="Notebook.title")
             if len(data) > 0
@@ -363,6 +416,33 @@ class Notebook:
             raw_role = safe_index(meta, 0, method_id=_NOTEBOOK_METHOD_ID, source="Notebook.role")
             role = _role_from_wire(raw_role, data)
 
+        premium_features = None
+        premium_flags = project.premium_feature_flags
+        if premium_flags is not None:
+            premium_features = PremiumFeatureInfo(*premium_flags)
+
+        chat_settings = None
+        if include_chat_settings:
+            # Reuse the strict GET_NOTEBOOK decoder so the persona/config wire
+            # position has one owner. The general Notebook factory is softer
+            # than ChatAPI.get_settings because it also maps whole listings:
+            # one malformed optional config must not discard sibling notebooks.
+            from .._row_adapters.chat import unwrap_chat_settings
+
+            try:
+                settings_row = unwrap_chat_settings(data, source="Notebook.chat_settings")
+                chat_settings = ChatSettings(
+                    goal=ChatGoal(settings_row.goal_code),
+                    response_length=ChatResponseLength(settings_row.response_length_code),
+                    custom_prompt=settings_row.custom_prompt,
+                )
+            except (UnknownRPCMethodError, ValueError):
+                logger.warning(
+                    "Notebook row chat-settings slot could not be decoded — reporting unknown "
+                    "settings (row=%s)",
+                    reprlib.repr(data),
+                )
+
         # ``is_owner`` is derived from ``role`` in ``__post_init__``. An unknown
         # / absent role leaves the field's default of ``True``: the
         # overwhelmingly common case is the caller's own notebook, and a short
@@ -374,6 +454,10 @@ class Notebook:
             sources_count=sources_count,
             role=role,
             last_viewed_at=last_viewed_at,
+            emoji=project.emoji,
+            premium_features=premium_features,
+            chat_sessions=[ChatSession(id=session_id) for session_id in project.chat_session_ids],
+            chat_settings=chat_settings,
         )
 
 

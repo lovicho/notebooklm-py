@@ -76,7 +76,6 @@ from .profile_account import (
 from .profile_document import ProfileDocument
 from .profile_migration import (
     AccountMetadataWriter,
-    LegacyAccount,
     LegacyAccountMigrator,
     LegacyPromotionScheduler,
     Promoted,
@@ -869,13 +868,13 @@ def read_account_metadata_from_storage_state(storage_state: Any) -> dict[str, An
 
 
 def read_account_metadata(storage_path: Path | None) -> dict[str, Any]:
-    """Resolve the v0.x account projection and schedule legacy promotion."""
+    """Resolve the v0.x account projection and schedule legacy reconciliation."""
     if storage_path is None:
         return {}
     store = ProfileStore(storage_path)
     migrator = LegacyAccountMigrator()
     resolution, compatibility = migrator._resolve_with_projection(store)
-    if isinstance(resolution, LegacyAccount):
+    if migrator.needs_reconciliation(store.path, resolution):
         LegacyPromotionScheduler.process_default().schedule(store, migrator)
     return compatibility
 

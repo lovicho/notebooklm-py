@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from ..exceptions import MissingDependencyError
 from .master_token_types import MasterToken
 
 _MASTER_APP = "com.google.android.apps.chromecast.app"
@@ -47,7 +48,7 @@ def _require_gpsoauth() -> Any:
     try:
         import gpsoauth  # noqa: PLC0415 (lazy optional [headless] dependency)
     except ImportError as exc:  # pragma: no cover - import guard
-        raise _MintError(
+        raise MissingDependencyError(
             "Master-token auth needs gpsoauth. Install: pip install 'notebooklm-py[headless]'"
         ) from exc
     return gpsoauth
@@ -110,7 +111,14 @@ class MintService:
         android_id: str,
     ) -> MasterToken:
         """Exchange a single-use OAuth token for a durable master token."""
-        gpsoauth = _require_gpsoauth()
+        try:
+            gpsoauth = _require_gpsoauth()
+        except BaseException:
+            # MissingDependencyError deliberately bypasses the private auth
+            # translation. Scrub its direct caller frame before it escapes so
+            # traceback inspection cannot recover the single-use token.
+            del oauth_token
+            raise
         try:
             with _quiet_gpsoauth_logging():
                 result = gpsoauth.exchange_token(email, oauth_token, android_id)
@@ -126,7 +134,13 @@ class MintService:
 
     async def mint(self, token: MasterToken) -> httpx.Cookies:
         """Mint a fresh live transport jar from one durable master token."""
-        gpsoauth = _require_gpsoauth()
+        try:
+            gpsoauth = _require_gpsoauth()
+        except BaseException:
+            # See ``exchange``: this dependency failure is public, so do not
+            # leave the durable master token in the escaping traceback frame.
+            del token
+            raise
         try:
             oauth = await asyncio.to_thread(
                 _perform_oauth,

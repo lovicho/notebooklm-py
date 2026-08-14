@@ -239,6 +239,44 @@ def test_fresh_login_after_legacy_sample_wins_over_stale_legacy(tmp_path):
     assert raw["email"] == "fresh@example.com"
 
 
+def test_in_band_write_with_stale_legacy_copy_is_reconciled_without_overwrite(tmp_path):
+    """A crash between embed and scrub self-heals on the next account read (#2228)."""
+    storage_path = tmp_path / "storage_state.json"
+    storage_path.write_text(
+        json.dumps(
+            {
+                "cookies": [],
+                "origins": [],
+                "notebooklm": {
+                    "version": 1,
+                    "account": {"authuser": 8, "email": "fresh@example.com"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    context_path = tmp_path / "context.json"
+    context_path.write_text(
+        json.dumps({"account": {"authuser": 1, "email": "stale@example.com"}}),
+        encoding="utf-8",
+    )
+    store = migration.ProfileStore(storage_path)
+    migrator = LegacyAccountMigrator()
+
+    resolved, compatibility = migrator._resolve_with_projection(store)
+
+    assert resolved == InBandAccount(ProfileAccount(8, "fresh@example.com"))
+    assert compatibility["email"] == "fresh@example.com"
+    assert migrator.needs_reconciliation(store.path, resolved) is True
+    assert isinstance(migrator.promote(store), AlreadyInBand)
+    assert json.loads(storage_path.read_text(encoding="utf-8"))["notebooklm"]["account"] == {
+        "authuser": 8,
+        "email": "fresh@example.com",
+    }
+    assert not context_path.exists()
+    assert migrator.needs_reconciliation(store.path, resolved) is False
+
+
 @pytest.mark.parametrize(
     ("legacy", "expected"),
     [
@@ -431,14 +469,16 @@ def test_scheduler_dedupes_canonical_paths_and_runs_one_daemon_worker(tmp_path):
     worker = next(iter(workers))
     assert worker.name == "notebooklm-account-promotion"
     assert worker.daemon is True
+    assert scheduler._active_paths_for_tests() == {str(one.ordering_key)}
     release.set()
     scheduler.drain(10.0)
     assert calls == [one.path]
     assert not scheduler._workers_for_tests()
+    assert not scheduler._active_paths_for_tests()
     assert scheduler._scheduled_paths_for_tests() == {str(one.ordering_key)}
 
 
-def test_scheduler_construction_and_start_failures_remain_once_only(tmp_path):
+def test_scheduler_construction_and_start_failures_are_retryable(tmp_path):
     store = _SequencedStore(tmp_path / "state.json", [])
     migrator = LegacyAccountMigrator(_RecordingContext())
 
@@ -448,8 +488,10 @@ def test_scheduler_construction_and_start_failures_remain_once_only(tmp_path):
     scheduler = LegacyPromotionScheduler(_construct_boom)
     with pytest.raises(RuntimeError, match="construction"):
         scheduler.schedule(store, migrator)  # type: ignore[arg-type]
-    assert scheduler.schedule(store, migrator) is False  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="construction"):
+        scheduler.schedule(store, migrator)  # type: ignore[arg-type]
     assert not scheduler._workers_for_tests()
+    assert not scheduler._active_paths_for_tests()
 
     class _Unstarted:
         def start(self):
@@ -461,9 +503,40 @@ def test_scheduler_construction_and_start_failures_remain_once_only(tmp_path):
     scheduler = LegacyPromotionScheduler(lambda **kwargs: _Unstarted())  # type: ignore[arg-type]
     with pytest.raises(RuntimeError, match="start"):
         scheduler.schedule(store, migrator)  # type: ignore[arg-type]
-    assert scheduler.schedule(store, migrator) is False  # type: ignore[arg-type]
-    with pytest.raises(RuntimeError, match="cannot join"):
-        scheduler.drain(2.0)
+    with pytest.raises(RuntimeError, match="start"):
+        scheduler.schedule(store, migrator)  # type: ignore[arg-type]
+    assert not scheduler._workers_for_tests()
+    assert not scheduler._active_paths_for_tests()
+
+
+def test_scheduler_allows_retry_after_a_worker_failure(tmp_path):
+    attempts = 0
+    attempted = threading.Event()
+
+    class _FailsOnce:
+        def promote(self, store):
+            nonlocal attempts
+            attempts += 1
+            attempted.set()
+            if attempts == 1:
+                raise RuntimeError("transient lock failure")
+
+    scheduler = LegacyPromotionScheduler()
+    store = _SequencedStore(tmp_path / "state.json", [])
+    migrator = _FailsOnce()
+
+    assert scheduler.schedule(store, migrator) is True  # type: ignore[arg-type]
+    assert attempted.wait(5.0)
+    deadline = time.monotonic() + 5.0
+    while scheduler._active_paths_for_tests() and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert not scheduler._active_paths_for_tests()
+
+    attempted.clear()
+    assert scheduler.schedule(store, migrator) is True  # type: ignore[arg-type]
+    assert attempted.wait(5.0)
+    assert scheduler.drain(5.0) is True
+    assert attempts == 2
 
 
 def test_scheduler_worker_contains_baseexception_and_deregisters(tmp_path, caplog):
@@ -1088,13 +1161,14 @@ def test_account_writer_orders_store_before_scrub_and_stops_on_store_failure(tmp
 
 def test_storage_reader_uses_one_core_call_and_schedules_only_legacy(monkeypatch, tmp_path):
     path = tmp_path / "state.json"
-    store = object()
+    store = SimpleNamespace(path=path)
     migrator = SimpleNamespace()
     calls: list[object] = []
     migrator._resolve_with_projection = lambda value: (
         LegacyAccount(ProfileAccount(3, None)),
         {"authuser": 3},
     )
+    migrator.needs_reconciliation = lambda value, resolution: isinstance(resolution, LegacyAccount)
 
     class _Scheduler:
         def schedule(self, value, owner):
@@ -1108,6 +1182,41 @@ def test_storage_reader_uses_one_core_call_and_schedules_only_legacy(monkeypatch
     assert storage.read_account_metadata(path) == {"authuser": 3}
     assert calls == [(store, migrator)]
     assert storage.read_account_metadata(None) == {}
+
+
+def test_storage_reader_schedules_stale_copy_cleanup_after_in_band_write(monkeypatch, tmp_path):
+    path = tmp_path / "storage_state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "cookies": [],
+                "origins": [],
+                "notebooklm": {
+                    "version": 1,
+                    "account": {"authuser": 4, "email": "fresh@example.com"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "context.json").write_text(
+        json.dumps({"account": {"authuser": 1, "email": "stale@example.com"}}),
+        encoding="utf-8",
+    )
+    calls: list[tuple[object, object]] = []
+
+    class _Scheduler:
+        def schedule(self, store, migrator):
+            calls.append((store, migrator))
+            return True
+
+    monkeypatch.setattr(storage.LegacyPromotionScheduler, "process_default", lambda: _Scheduler())
+
+    assert storage.read_account_metadata(path) == {
+        "authuser": 4,
+        "email": "fresh@example.com",
+    }
+    assert len(calls) == 1
 
 
 def test_public_drop_compatibility_symbol_is_exact_alias():

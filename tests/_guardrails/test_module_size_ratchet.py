@@ -185,21 +185,21 @@ ALLOWLISTED_CEILINGS: dict[str, int] = {
 # and PR). DO lower a pin when a module shrinks — the gate prints the exact value.
 #
 # The arcs these pins lock in, for context on why they are worth keeping:
-#     _auth/storage.py           3102 -> 1090   (ADR-0034 PR4..PR11B, #2172 B3)
+#     _auth/storage.py           3102 -> 1089   (ADR-0034 PR4..PR11B, #2172 B3)
 #     _auth/browser_capture.py   1251 -> 1225   (ADR-0033 PR4.1, #2172 B3)
 #     _auth/psidts_recovery.py   1222 -> 1214   (ADR-0033 load-composition merge)
 #     _auth/refresh.py           1184           (ADR-0033 token-route fold)
 # The per-module "sanctioned merge" / "RATCHETED DOWN" annotations are preserved in this
 # file's git history at the commit that raised the budget.
 #
-# Note ``_auth/storage.py`` is *also* pinned at 1090 by
+# Note ``_auth/storage.py`` is *also* pinned at 1089 by
 # ``tests/_guardrails/test_auth_profile_document_boundary.py``, for a different reason
 # (a consumer boundary). Both are deliberate; a shrink there updates both.
 SHRINK_LOCKED_CEILINGS: dict[str, int] = {
     "_auth/browser_capture.py": 1225,
     "_auth/psidts_recovery.py": 1214,
     "_auth/refresh.py": 1184,
-    "_auth/storage.py": 1090,
+    "_auth/storage.py": 1089,
 }
 
 
@@ -448,7 +448,7 @@ def test_credential_store_and_migration_modules_use_the_ordinary_budget() -> Non
     assert {path: measured[path] for path in leaves} == {
         "_auth/credential_io.py": 23,
         "_auth/master_token_file.py": 89,
-        "_auth/profile_migration.py": 602,
+        "_auth/profile_migration.py": 636,
         "_auth/profile_store.py": 876,
     }
     assert (
@@ -456,7 +456,7 @@ def test_credential_store_and_migration_modules_use_the_ordinary_budget() -> Non
         + measured["_auth/profile_store.py"]
         + measured["_auth/cookie_filter.py"]
         + measured["_auth/profile_migration.py"]
-        == 2664
+        == 2697
     )
     synthetic = dict.fromkeys(leaves, MODULE_SIZE_BUDGET + 1)
     assert _over_budget_offenders(synthetic, {}, MODULE_SIZE_BUDGET) == synthetic
@@ -472,9 +472,9 @@ def test_phase_11d_bootstrap_extraction_modules_are_measured_exactly() -> None:
             "_auth/storage.py",
         }
     } == {
-        "_auth/master_token.py": 455,
+        "_auth/master_token.py": 469,
         "_auth/master_token_bootstrap.py": 373,
-        "_auth/storage.py": 1090,
+        "_auth/storage.py": 1089,
     }
 
 

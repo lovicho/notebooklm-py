@@ -38,7 +38,7 @@ from ..rpc._safe_index import safe_index
 from ..rpc.decoder import strip_anti_xssi
 from ..rpc.encoder import nest_source_ids
 from ..rpc.types import RPCMethod, get_query_url
-from ..types import ChatReference, ConversationTurnKey
+from ..types import ChatReference, ConversationTurnKey, NextStepSuggestion
 
 # Deliberate: use the ``notebooklm._chat`` logger namespace (not this module's)
 # so existing log filters keep matching the chat parser diagnostics.
@@ -105,6 +105,9 @@ class StreamingChatParseResult:
     #: :attr:`conversation_id` above this is NOT a legacy field — it is the key
     #: ``SubmitFeedback`` is addressed by.
     turn_key: ConversationTurnKey | None = None
+    #: Suggested follow-up questions/actions, collected last-wins across chunks
+    #: that carried a populated ``NextStepSuggestions`` block.
+    next_steps: list[NextStepSuggestion] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -135,6 +138,7 @@ class _ChunkExtraction:
     #: The ``ConversationTurnKey`` seen on this chunk (#2122), or ``None``.
     #: Read before the answer-text gate, so a text-less chunk still reports it.
     turn_key: ConversationTurnKey | None = None
+    next_steps: list[NextStepSuggestion] = field(default_factory=list)
 
 
 def build_streaming_chat_request(
@@ -250,6 +254,7 @@ def parse_streaming_chat_response(response_text: str) -> StreamingChatParseResul
     saw_drift_signal = False
     server_conv_id: str | None = None
     turn_key: ConversationTurnKey | None = None
+    next_steps: list[NextStepSuggestion] = []
     saw_final_chunk = False
     parseable_chunk_count = 0
 
@@ -258,7 +263,7 @@ def parse_streaming_chat_response(response_text: str) -> StreamingChatParseResul
         nonlocal final_marked_answer, final_marked_refs, final_marked_document
         nonlocal best_marked_answer, best_marked_refs, best_marked_document
         nonlocal best_unmarked_answer, best_unmarked_refs, best_unmarked_document
-        nonlocal saw_drift_signal, server_conv_id, turn_key, parseable_chunk_count
+        nonlocal saw_drift_signal, server_conv_id, turn_key, next_steps, parseable_chunk_count
         nonlocal saw_final_chunk
         chunk = _extract_chunk_with_parseable(json_str)
         if chunk.parseable:
@@ -290,6 +295,8 @@ def parse_streaming_chat_response(response_text: str) -> StreamingChatParseResul
             server_conv_id = chunk.conversation_id
         if chunk.turn_key is not None:
             turn_key = chunk.turn_key
+        if chunk.next_steps:
+            next_steps = chunk.next_steps
 
     i = 0
     while i < len(lines):
@@ -392,7 +399,12 @@ def parse_streaming_chat_response(response_text: str) -> StreamingChatParseResul
     ]
 
     return StreamingChatParseResult(
-        longest_answer, final_refs, server_conv_id, final_document, turn_key
+        answer=longest_answer,
+        references=final_refs,
+        conversation_id=server_conv_id,
+        answer_document=final_document,
+        turn_key=turn_key,
+        next_steps=next_steps,
     )
 
 
@@ -443,6 +455,7 @@ def _extract_chunk_with_parseable(json_str: str) -> _ChunkExtraction:
     parseable = False
     saw_final_envelope = False
     turn_key: ConversationTurnKey | None = None
+    next_steps: list[NextStepSuggestion] = []
     for item in data:
         if not isinstance(item, list) or len(item) < 2:
             continue
@@ -512,8 +525,16 @@ def _extract_chunk_with_parseable(json_str: str) -> _ChunkExtraction:
         # only "final" if the envelope holding the answer said so. The OR is
         # kept solely for the no-answer fall-through, where the question is the
         # weaker "did any envelope in this frame claim finality".
-        envelope_is_final = StreamEnvelopeRow(inner_data).is_final_response
+        envelope = StreamEnvelopeRow(inner_data)
+        envelope_is_final = envelope.is_final_response
         saw_final_envelope |= envelope_is_final
+        decoded_next_steps = [
+            NextStepSuggestion(question=row.question, type_code=row.type_code)
+            for row in envelope.next_step_rows
+            if row.is_well_formed and row.question is not None and row.type_code is not None
+        ]
+        if decoded_next_steps:
+            next_steps = decoded_next_steps
 
         if isinstance(inner_data, list) and len(inner_data) > 0:
             # ``inner_data`` is a *populated* answer record (heartbeats decode
@@ -574,6 +595,7 @@ def _extract_chunk_with_parseable(json_str: str) -> _ChunkExtraction:
                     document=document,
                     is_final_response=envelope_is_final,
                     turn_key=turn_key,
+                    next_steps=next_steps,
                 )
         # inner_json decoded but the record didn't yield usable answer data
         # — either the outer ``isinstance(inner_data, list) and len > 0``
@@ -590,6 +612,7 @@ def _extract_chunk_with_parseable(json_str: str) -> _ChunkExtraction:
         parseable=parseable,
         is_final_response=saw_final_envelope,
         turn_key=turn_key,
+        next_steps=next_steps,
     )
 
 

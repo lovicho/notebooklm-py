@@ -14,8 +14,10 @@ from notebooklm.types import (
     Artifact,
     ArtifactType,
     AskResult,
+    ChatGoal,
     ChatMode,
     ChatReference,
+    ChatResponseLength,
     ConversationTurn,
     GenerationStatus,
     Note,
@@ -362,6 +364,66 @@ class TestNotebook:
         assert notebook.title == "My Notebook"
         assert notebook.sources_count == 0
         assert notebook.is_owner is True
+        assert notebook.emoji == "📓"
+
+    def test_from_api_response_decodes_project_metadata(self):
+        data = [
+            "Project Metadata",
+            None,
+            "nb_project",
+            "🧬",
+            None,
+            None,
+            None,
+            [[2, "You are a science tutor"], [4]],
+            [False],
+            [True, True, False],
+            None,
+            [["session-1"], ["session-2"]],
+        ]
+
+        notebook = Notebook.from_api_response(data, include_chat_settings=True)
+
+        assert notebook.emoji == "🧬"
+        assert notebook.premium_features is not None
+        assert notebook.premium_features.can_edit_advanced_settings is True
+        assert notebook.premium_features.can_edit_guidebook_config is True
+        assert notebook.premium_features.can_view_analytics is False
+        assert [session.id for session in notebook.chat_sessions] == ["session-1", "session-2"]
+        assert notebook.chat_settings is not None
+        assert notebook.chat_settings.goal is ChatGoal.CUSTOM
+        assert notebook.chat_settings.response_length is ChatResponseLength.LONGER
+        assert notebook.chat_settings.custom_prompt == "You are a science tutor"
+
+    def test_from_api_response_null_chat_config_is_default(self):
+        data = ["Defaults", None, "nb_default", None, None, None, None, None]
+        notebook = Notebook.from_api_response(data, include_chat_settings=True)
+
+        assert notebook.chat_settings is not None
+        assert notebook.chat_settings.goal is ChatGoal.DEFAULT
+        assert notebook.chat_settings.response_length is ChatResponseLength.DEFAULT
+        assert notebook.chat_settings.custom_prompt is None
+
+    def test_list_projection_does_not_claim_default_chat_settings(self):
+        list_data = ["Configured", None, "nb-1", None, None, None, None, None]
+        get_data = [
+            "Configured",
+            None,
+            "nb-1",
+            None,
+            None,
+            None,
+            None,
+            [[2, "Configured persona"], [4]],
+        ]
+
+        listed = Notebook.from_api_response(list_data)
+        fetched = Notebook.from_api_response(get_data, include_chat_settings=True)
+
+        assert listed.chat_settings is None
+        assert fetched.chat_settings is not None
+        assert fetched.chat_settings.goal is ChatGoal.CUSTOM
+        assert fetched.chat_settings.custom_prompt == "Configured persona"
 
     def test_from_api_response_counts_sources(self):
         """Test parsing notebook source count from embedded source entries."""
@@ -2680,6 +2742,17 @@ class TestLastViewedAtAlias:
 
         assert restored.last_viewed_at == datetime(2026, 8, 12)
         assert restored.modified_at == restored.last_viewed_at
+
+    def test_pre_chat_sessions_pickle_restores_with_an_empty_list(self):
+        """A pre-#2133 pickle gets the default-factory field it never stored."""
+        nb = Notebook(id="nb_1", title="N")
+        del nb.__dict__["chat_sessions"]
+
+        restored = pickle.loads(pickle.dumps(nb))
+
+        assert restored.chat_sessions == []
+        assert repr(restored)
+        assert dataclasses.asdict(restored)["chat_sessions"] == []
 
     def test_current_pickle_round_trip_is_unchanged(self):
         """The ordinary round trip keeps equality — ``__setstate__`` is additive."""

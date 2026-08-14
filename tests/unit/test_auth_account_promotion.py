@@ -8,7 +8,9 @@ took the storage WRITE lock — the read wrote. The 2-second promotion deadline
 and the per-path warning throttle existed only to compensate for that.
 
 Now the read DERIVES its answer read-only from the legacy sibling and returns;
-the durable promotion is a detached one-shot per canonical path. This module is
+the durable promotion is a detached single-flight per canonical path. Completed
+workers leave the path retryable, and an in-band winner with a stale sibling
+schedules the privacy scrub, so interrupted migrations self-heal. This module is
 the proof, in four parts:
 
 1. **The derivation is indistinguishable from the promotion** (the
@@ -18,9 +20,9 @@ the proof, in four parts:
    write would have produced. Proven field-by-field over a matrix of legacy
    shapes, including the malformed ones.
 2. **Zero locks on the read.** Not "a short lock" — none, on either branch.
-3. **Single-flight one-shot.** N concurrent readers produce ONE promotion; a
-   failed promotion is not retried in-process.
-4. **All three entry paths reach the one-shot** (per-RPC, CLI, env-auth) —
+3. **Retryable single-flight.** N concurrent readers produce ONE promotion;
+   after that worker settles, a later read can retry a transient failure.
+4. **All three entry paths reach reconciliation** (per-RPC, CLI, env-auth) —
    the precondition for deleting the deadline and the throttle at all.
 """
 
@@ -175,10 +177,10 @@ class TestDerivedRecordEqualsPromotedRecord:
         # ``test_legacy_read_never_enters_the_storage_writer_on_the_readers_thread``.
         derived = read_account_metadata(storage)
 
-        # (b) Let the detached one-shot commit the durable record.
+        # (b) Let the detached reconciliation commit the durable record.
         _drain_promotions_for_tests()
         promoted = _in_band_on_disk(storage)
-        assert promoted is not None, "the one-shot must still make the migration durable"
+        assert promoted is not None, "reconciliation must still make the migration durable"
 
         # (c) The same read, now served from the genuinely in-band record.
         after = read_account_metadata(storage)
@@ -389,7 +391,7 @@ class TestPromotionRacingTheReader:
         assert read_account_metadata(storage) == {}
 
 
-class TestSingleFlightOneShot:
+class TestRetryableSingleFlight:
     """Requirement: N concurrent reads trigger at most ONE promotion."""
 
     def test_concurrent_reads_of_one_profile_promote_exactly_once(self, tmp_path, monkeypatch):
@@ -430,27 +432,66 @@ class TestSingleFlightOneShot:
         assert len(calls) == 1, f"expected exactly one promotion, got {len(calls)}"
         assert sorted(_scheduler()._scheduled_paths_for_tests()) == [_canonical(storage)]
 
-    def test_a_failed_promotion_is_not_retried_by_later_reads(self, tmp_path, monkeypatch):
-        """One-shot, not a retry loop.
-
-        Re-attempting on every read would put a failing write back on the
-        per-RPC path — the exact problem this change removes — and buys
-        nothing, because the read already answers correctly without it.
-        """
+    def test_a_failed_promotion_is_retried_by_a_later_read(self, tmp_path, monkeypatch):
+        """A settled failure stays off-thread but no longer poisons the process."""
         storage = _legacy_profile(tmp_path, {"authuser": 2, "email": "l@example.com"})
         attempts = []
+        real_update = ProfileStore.update_account
 
-        def _boom(*args, **kwargs):
+        def _fail_once(*args, **kwargs):
             attempts.append(1)
-            raise OSError("disk full")
+            if len(attempts) == 1:
+                raise OSError("transient contention")
+            return real_update(*args, **kwargs)
 
-        monkeypatch.setattr(ProfileStore, "update_account", _boom)
+        monkeypatch.setattr(ProfileStore, "update_account", _fail_once)
 
-        for _ in range(4):
-            assert read_account_metadata(storage) == {"authuser": 2, "email": "l@example.com"}
-            _drain_promotions_for_tests()
+        assert read_account_metadata(storage) == {"authuser": 2, "email": "l@example.com"}
+        deadline = time.monotonic() + 5.0
+        while _scheduler()._active_paths_for_tests() and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert not _scheduler()._active_paths_for_tests()
 
-        assert len(attempts) == 1
+        assert read_account_metadata(storage) == {"authuser": 2, "email": "l@example.com"}
+        _drain_promotions_for_tests()
+
+        assert len(attempts) == 2
+        assert _in_band_on_disk(storage) == {"authuser": 2, "email": "l@example.com"}
+
+    def test_a_failed_post_write_scrub_is_retried_from_the_in_band_state(
+        self, tmp_path, monkeypatch
+    ):
+        """The embed→scrub crash state must not strand the email at rest (#2228)."""
+        storage = _legacy_profile(tmp_path, {"authuser": 2, "email": "privacy@example.com"})
+        real_scrub = LegacyAccountContext.scrub
+        scrubs = 0
+
+        def _fail_once(context, path):
+            nonlocal scrubs
+            scrubs += 1
+            if scrubs == 1:
+                return False
+            return real_scrub(context, path)
+
+        monkeypatch.setattr(LegacyAccountContext, "scrub", _fail_once)
+
+        assert read_account_metadata(storage)["email"] == "privacy@example.com"
+        deadline = time.monotonic() + 5.0
+        while _scheduler()._active_paths_for_tests() and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert _in_band_on_disk(storage) == {
+            "authuser": 2,
+            "email": "privacy@example.com",
+        }
+        assert "account" in json.loads((tmp_path / "context.json").read_text(encoding="utf-8"))
+
+        assert read_account_metadata(storage)["email"] == "privacy@example.com"
+        _drain_promotions_for_tests()
+
+        assert scrubs == 2
+        assert json.loads((tmp_path / "context.json").read_text(encoding="utf-8")) == {
+            "notebook_id": "nb-1"
+        }
 
     def test_distinct_profiles_each_get_their_own_flight(self, tmp_path):
         (tmp_path / "a").mkdir()
@@ -562,7 +603,7 @@ class TestInBandAlwaysWins:
         context = tmp_path / "context.json"
         assert json.loads(context.read_text(encoding="utf-8")) == {"notebook_id": "nb-1"}
 
-    def test_in_band_beats_a_stale_legacy_sibling(self, tmp_path, monkeypatch):
+    def test_in_band_beats_a_stale_legacy_sibling_and_schedules_its_scrub(self, tmp_path):
         storage = tmp_path / "storage_state.json"
         storage.write_text(
             json.dumps(
@@ -578,11 +619,10 @@ class TestInBandAlwaysWins:
             json.dumps({"account": {"authuser": 1, "email": "old@x.com"}}), encoding="utf-8"
         )
 
-        def _fail(*args, **kwargs):
-            raise AssertionError("the legacy sibling must not even be consulted")
-
-        monkeypatch.setattr(LegacyAccountContext, "read", _fail)
         assert read_account_metadata(storage) == {"authuser": 9, "email": "new@x.com"}
+        _drain_promotions_for_tests()
+        assert _in_band_on_disk(storage) == {"authuser": 9, "email": "new@x.com"}
+        assert not (tmp_path / "context.json").exists()
 
     def test_a_login_landing_during_the_sibling_read_still_wins(self, tmp_path):
         """The narrow window the second in-band check closes.
@@ -606,15 +646,21 @@ class TestInBandAlwaysWins:
             mp.setattr(LegacyAccountContext, "read", _read_then_race_a_login)
             assert read_account_metadata(storage) == {"authuser": 8, "email": "fresh@x.com"}
 
-        # No promotion was scheduled — in-band won before we got that far.
-        assert not _scheduler()._scheduled_paths_for_tests()
+        # In-band still wins, while the stale sibling is now scrubbed in the
+        # background to close the write-then-scrub crash gap (#2228).
+        assert sorted(_scheduler()._scheduled_paths_for_tests()) == [_canonical(storage)]
+        _drain_promotions_for_tests()
+        assert _in_band_on_disk(storage) == {"authuser": 8, "email": "fresh@x.com"}
+        assert json.loads((tmp_path / "context.json").read_text(encoding="utf-8")) == {
+            "notebook_id": "nb-1"
+        }
 
 
-class TestAllThreeEntryPathsReachTheOneShot:
+class TestAllThreeEntryPathsReachReconciliation:
     """The precondition for deleting the 2s deadline and the warn throttle.
 
     Those two compensations existed because promotion sat on the read path.
-    Deleting them is only safe if the replacement — the detached one-shot —
+    Deleting them is only safe if the replacement — detached reconciliation —
     actually covers every path that used to trigger promotion.
     """
 
@@ -632,7 +678,7 @@ class TestAllThreeEntryPathsReachTheOneShot:
     def test_cli_read_derives_and_schedules(self, tmp_path):
         """The CLI reads synchronously, with no event loop running.
 
-        This is why the one-shot is a thread and not an ``asyncio`` flight:
+        This is why reconciliation uses a thread and not an ``asyncio`` flight:
         ``_auth.single_flight`` needs ``asyncio.get_running_loop()`` and would
         leave this entry path — ``profile list``, ``auth check``,
         ``login --refresh`` — without any durable promotion at all.
@@ -664,7 +710,7 @@ class TestAllThreeEntryPathsReachTheOneShot:
         by construction: there is no profile directory and therefore no legacy
         sibling to promote. The path is covered by being vacuous, not by
         scheduling anything — pinned so a future change that gives env-auth a
-        storage path notices it now owes this path a one-shot."""
+        storage path notices it now owes this path reconciliation."""
         from notebooklm._auth import refresh as _refresh
 
         payload = {

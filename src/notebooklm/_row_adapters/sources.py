@@ -49,6 +49,7 @@ __all__ = [
     "SourceGuideRow",
     "SourceRow",
     "SourceRowShape",
+    "unwrap_add_source_rows",
 ]
 
 
@@ -92,6 +93,80 @@ class SourceRowShape(str, Enum):
     ENTRY = "entry"
 
 
+def _looks_like_source_entry(value: Any) -> bool:
+    """Whether ``value`` resembles one already-unwrapped Source row."""
+    if not isinstance(value, list) or not value:
+        return False
+    # An entry's second field is its title. Reject a nested list here so a
+    # repeated collection of short rows (``[[id-a], [id-b]]``) is not mistaken
+    # for one entry whose id envelope happens to be the first row.
+    if len(value) > 1 and value[1] is not None and not isinstance(value[1], str):
+        return False
+    raw_id = value[0]
+    if isinstance(raw_id, str):
+        return True
+    if not isinstance(raw_id, list) or not raw_id:
+        return False
+    if isinstance(raw_id[0], str):
+        return True
+    return (
+        len(raw_id) == 3
+        and raw_id[0] is None
+        and isinstance(raw_id[2], list)
+        and bool(raw_id[2])
+        and isinstance(raw_id[2][0], str)
+    )
+
+
+def _unwrap_source_entry(value: Any) -> list[Any] | None:
+    """Unwrap one flat/medium/deep Source payload to its entry, if recognized."""
+    candidate = value
+    for _ in range(3):
+        if _looks_like_source_entry(candidate):
+            return candidate
+        if not isinstance(candidate, list) or len(candidate) != 1:
+            return None
+        candidate = candidate[0]
+    return None
+
+
+def unwrap_add_source_rows(payload: Any) -> list[list[Any]]:
+    """Extract repeated Source payloads from known ``AddSources`` envelopes.
+
+    A single result historically decodes as one medium/deep Source payload;
+    a multi-entry response may be either a flat repeated-row list or carry one
+    additional outer list. Anything else is schema drift: the general Source
+    parser intentionally degrades malformed listing rows, which is unsafe for a
+    mutating response whose returned ids are the only proof of which writes
+    committed. Recognized per-row wrappers are deliberately retained so
+    :meth:`SourceRow.from_unknown_shape` can preserve shape-dependent decoding,
+    including the legacy deeply-nested ``metadata[0]`` URL fallback.
+    """
+    if not isinstance(payload, list) or not payload:
+        raise DecodingError(
+            "Unrecognized ADD_SOURCE response envelope",
+            raw_response=repr(payload),
+            method_id=RPCMethod.ADD_SOURCE.value,
+        )
+    single = _unwrap_source_entry(payload)
+    if single is not None:
+        return [payload]
+
+    repeated = [_unwrap_source_entry(item) for item in payload]
+    if all(item is not None for item in repeated):
+        return list(payload)
+
+    if len(payload) == 1 and isinstance(payload[0], list) and payload[0]:
+        wrapped_repeated = [_unwrap_source_entry(item) for item in payload[0]]
+        if all(item is not None for item in wrapped_repeated):
+            return list(payload[0])
+    raise DecodingError(
+        "Unrecognized ADD_SOURCE response envelope",
+        raw_response=repr(payload),
+        method_id=RPCMethod.ADD_SOURCE.value,
+    )
+
+
 @dataclass(frozen=True)
 class SourceRow:
     """Typed view of a single source row.
@@ -118,6 +193,12 @@ class SourceRow:
            ``GET_NOTEBOOK`` source-list rows); ``[3][3]`` is the
            :class:`~notebooklm.rpc.types.DriveSourceStatus` Drive-side code,
            populated on Drive-backed rows only (see :attr:`drive_status`).
+    5      Direct download URL for the original uploaded file, when present
+           (see :attr:`download_url`).
+    6      Drive viewer URL for the uploaded file, when present (see
+           :attr:`viewer_url`).
+    7      Content blob descriptor; ``[7][2]`` is the source's true content
+           MIME type (see :attr:`content_mime`).
     =====  ============================================================
 
     **Metadata sub-list layout** (``self._raw[2]``):
@@ -130,8 +211,13 @@ class SourceRow:
            :attr:`drive_document_id`). Legacy shapes put a bare
            ``http(s)://...`` URL here, honored only under
            ``url_allow_bare_http``.
+    1      Source word/size count (see :attr:`word_count`). The meaning is
+           inferred from live values because the mobile schema leaves the
+           field unnamed.
     2      timestamp block; ``[2][0]`` is the creation timestamp
            (seconds since epoch).
+    3      Revision handle ``[revision_id, [seconds, nanos]]`` (see
+           :attr:`revision_id` and :attr:`revision_timestamp`).
     4      type code (int — see
            :class:`notebooklm._types.sources.SourceType` mapping in
            ``_types/sources.py``).
@@ -144,6 +230,8 @@ class SourceRow:
            ``[document_id, kind_int, mime, ""]``; ``[9][0]`` is the
            ``documentId`` (see :attr:`drive_document_id`), ``[9][2]`` the
            MIME.
+    14     Last-modified timestamp block ``[seconds, nanos]`` (see
+           :attr:`last_modified_at`).
     19     top-level MIME string for Drive-hosted sources. Used with
            ``[9][2]`` to disambiguate the type-code ``14`` overload
            (native Sheet vs Drive-hosted PDF) — see :attr:`mime`.
@@ -194,11 +282,21 @@ class SourceRow:
     # ``SourceSettings.userDriveSourceStatus`` (tag 4) inside the same settings
     # block the ingestion status is read from (#2111).
     _DRIVE_STATUS_INNER_POS: ClassVar[int] = 3
+    # Source tags 6-8 are unnamed ``addUnused()`` slots in the recovered
+    # mobile schema, but are populated together on uploaded-file rows (#2112).
+    _DOWNLOAD_URL_POS: ClassVar[int] = 5
+    _VIEWER_URL_POS: ClassVar[int] = 6
+    _CONTENT_DESCRIPTOR_POS: ClassVar[int] = 7
+    _CONTENT_DESCRIPTOR_MIME_POS: ClassVar[int] = 2
 
     # Metadata sub-list positions. Index 0 is googleDocsMetadata, not a URL
     # slot (the old _META_BARE_URL_POS name meant only the legacy fallback).
     _META_GOOGLE_DOCS_POS: ClassVar[int] = 0
+    # These three fields are also unnamed in the recovered mobile schema. Their
+    # semantics are inferred from live values and context (#2114).
+    _META_WORD_COUNT_POS: ClassVar[int] = 1
     _META_TIMESTAMP_POS: ClassVar[int] = 2
+    _META_REVISION_POS: ClassVar[int] = 3
     _META_TYPE_POS: ClassVar[int] = 4
     _META_YOUTUBE_POS: ClassVar[int] = 5
     _META_URL_POS: ClassVar[int] = 7
@@ -208,6 +306,7 @@ class SourceRow:
     # overload (native Sheet vs Drive PDF), which the URL slots can't — Drive
     # rows have no URL (metadata[5]/[7] null; metadata[0] is the Drive block).
     _META_DRIVE_DESCRIPTOR_POS: ClassVar[int] = 9
+    _META_LAST_MODIFIED_POS: ClassVar[int] = 14
     _META_MIME_POS: ClassVar[int] = 19
     # Position of the MIME string inside the drive-file descriptor at [9].
     _DRIVE_DESCRIPTOR_MIME_POS: ClassVar[int] = 2
@@ -215,6 +314,8 @@ class SourceRow:
     # GoogleDocsSourceMetadata and GoogleDriveSourceMetadata both declare it as
     # tag 1, so one constant covers both blocks.
     _DRIVE_DOCUMENT_ID_POS: ClassVar[int] = 0
+    _REVISION_ID_POS: ClassVar[int] = 0
+    _REVISION_TIMESTAMP_POS: ClassVar[int] = 1
 
     # Id-envelope inner positions (the three layouts at ``self._raw[0]``).
     _ID_ENVELOPE_PLAIN_POS: ClassVar[int] = 0
@@ -389,6 +490,37 @@ class SourceRow:
         """
         return bool(self.id)
 
+    def listing_shape_error(self) -> str | None:
+        """Return why this row cannot support a strict source-list snapshot.
+
+        The general row adapter intentionally degrades incomplete shapes to
+        ``None`` / ``UNKNOWN`` because non-listing RPCs may omit metadata or a
+        status block. ``GET_NOTEBOOK`` source-list rows have a stronger shape:
+        strict filtering/counting needs both the type and status discriminants
+        to be present and integer-valued. Keeping this check on the adapter
+        preserves its ownership of all positional wire knowledge.
+        """
+        metadata = self.metadata
+        if metadata is None:
+            return "metadata block is missing or malformed"
+        if len(metadata) <= self._META_TYPE_POS:
+            return "metadata type code is missing"
+        type_code = metadata[self._META_TYPE_POS]
+        if not isinstance(type_code, int) or isinstance(type_code, bool):
+            return "metadata type code is malformed"
+
+        if len(self._raw) <= self._STATUS_BLOCK_POS:
+            return "status block is missing"
+        status_block = self._raw[self._STATUS_BLOCK_POS]
+        if not isinstance(status_block, list):
+            return "status block is malformed"
+        if len(status_block) <= self._STATUS_INNER_POS:
+            return "status code is missing"
+        status_code = status_block[self._STATUS_INNER_POS]
+        if not isinstance(status_code, int) or isinstance(status_code, bool):
+            return "status code is malformed"
+        return None
+
     @property
     def title(self) -> str | None:
         """Source title — ``None`` when absent (preserves legacy contract).
@@ -424,6 +556,98 @@ class SourceRow:
             return None
         value = self._raw[self._METADATA_POS]
         return value if isinstance(value, list) else None
+
+    def _top_level_string(self, position: int) -> str | None:
+        """Return a non-empty string from a top-level source slot."""
+        if len(self._raw) <= position:
+            return None
+        value = self._raw[position]
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def download_url(self) -> str | None:
+        """Direct URL for downloading the original uploaded file.
+
+        This is ``Source`` tag 6 (row index 5), populated only for source kinds
+        whose original bytes remain downloadable. The mobile schema leaves the
+        slot unnamed; the meaning is established by live URLs on the
+        ``contribution.usercontent.google.com/download`` endpoint (#2112).
+        """
+        return self._top_level_string(self._DOWNLOAD_URL_POS)
+
+    @property
+    def viewer_url(self) -> str | None:
+        """Drive viewer URL for the original uploaded file, when available.
+
+        This is the live-confirmed ``Source`` tag-7 slot (row index 6). It is
+        independent of :attr:`url`, which identifies URL/YouTube sources.
+        """
+        return self._top_level_string(self._VIEWER_URL_POS)
+
+    @property
+    def content_mime(self) -> str | None:
+        """True content MIME from the source blob descriptor, when present.
+
+        ``Source`` tag 8 carries a blob descriptor whose third element is the
+        MIME. Unlike :attr:`mime`, this is not Drive-specific and therefore
+        covers uploaded files such as Markdown sources (#2112).
+        """
+        if len(self._raw) <= self._CONTENT_DESCRIPTOR_POS:
+            return None
+        descriptor = self._raw[self._CONTENT_DESCRIPTOR_POS]
+        if not isinstance(descriptor, list) or len(descriptor) <= self._CONTENT_DESCRIPTOR_MIME_POS:
+            return None
+        value = descriptor[self._CONTENT_DESCRIPTOR_MIME_POS]
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def word_count(self) -> int | None:
+        """Inferred source word/size count from ``metadata[1]``.
+
+        The field is populated on every sampled source row, but its proto name
+        was not recovered. Values and the surrounding per-source word-limit
+        contract strongly indicate a word count; callers should treat that
+        semantic label as inferred rather than schema-confirmed (#2114).
+        """
+        metadata = self.metadata
+        if metadata is None or len(metadata) <= self._META_WORD_COUNT_POS:
+            return None
+        value = metadata[self._META_WORD_COUNT_POS]
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    def _revision_handle(self) -> list[Any] | None:
+        """Return the inferred ``[revision_id, timestamp]`` block."""
+        metadata = self.metadata
+        if metadata is None or len(metadata) <= self._META_REVISION_POS:
+            return None
+        value = metadata[self._META_REVISION_POS]
+        return value if isinstance(value, list) else None
+
+    @property
+    def revision_id(self) -> str | None:
+        """Opaque source revision identifier from ``metadata[3][0]``."""
+        handle = self._revision_handle()
+        if handle is None or len(handle) <= self._REVISION_ID_POS:
+            return None
+        value = handle[self._REVISION_ID_POS]
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def revision_timestamp_raw(self) -> int | float | None:
+        """Raw revision timestamp seconds from ``metadata[3][1][0]``."""
+        handle = self._revision_handle()
+        if handle is None or len(handle) <= self._REVISION_TIMESTAMP_POS:
+            return None
+        return self._timestamp_raw_from_block(
+            handle[self._REVISION_TIMESTAMP_POS],
+            source="SourceRow.revision_timestamp_raw",
+        )
+
+    @property
+    def revision_timestamp(self) -> datetime | None:
+        """Revision timestamp as a timezone-aware UTC datetime."""
+        raw = self.revision_timestamp_raw
+        return _datetime_from_timestamp(raw) if raw is not None else None
 
     @property
     def type_code(self) -> int | None:
@@ -628,6 +852,32 @@ class SourceRow:
             return candidate
         return None
 
+    def _timestamp_raw_from_block(
+        self,
+        timestamp_block: Any,
+        *,
+        source: str,
+        allow_bool: bool = False,
+    ) -> int | float | None:
+        """Decode seconds from a ``[seconds, nanos]`` block.
+
+        ``allow_bool`` exists only for the legacy metadata helper, whose
+        long-standing public behavior treats booleans as integers.
+        """
+        if not isinstance(timestamp_block, list) or not timestamp_block:
+            return None
+        value = safe_index(
+            timestamp_block,
+            0,
+            method_id=self.method_id,
+            source=source,
+        )
+        return (
+            value
+            if isinstance(value, (int, float)) and (allow_bool or not isinstance(value, bool))
+            else None
+        )
+
     @property
     def created_at_raw(self) -> int | float | None:
         """Raw creation timestamp (seconds since epoch) at ``metadata[2][0]``.
@@ -645,16 +895,10 @@ class SourceRow:
         metadata = self.metadata
         if metadata is None or len(metadata) <= self._META_TIMESTAMP_POS:
             return None
-        timestamp_block = metadata[self._META_TIMESTAMP_POS]
-        if not isinstance(timestamp_block, list) or not timestamp_block:
-            return None
-        value = safe_index(
-            timestamp_block,
-            0,
-            method_id=self.method_id,
+        return self._timestamp_raw_from_block(
+            metadata[self._META_TIMESTAMP_POS],
             source="SourceRow.created_at_raw",
         )
-        return value if isinstance(value, (int, float)) else None
 
     @property
     def created_at(self) -> datetime | None:
@@ -663,6 +907,23 @@ class SourceRow:
         if raw is None:
             return None
         return _datetime_from_timestamp(raw)
+
+    @property
+    def last_modified_at_raw(self) -> int | float | None:
+        """Raw last-modified timestamp seconds from ``metadata[14][0]``."""
+        metadata = self.metadata
+        if metadata is None or len(metadata) <= self._META_LAST_MODIFIED_POS:
+            return None
+        return self._timestamp_raw_from_block(
+            metadata[self._META_LAST_MODIFIED_POS],
+            source="SourceRow.last_modified_at_raw",
+        )
+
+    @property
+    def last_modified_at(self) -> datetime | None:
+        """Last-modified timestamp as a timezone-aware UTC datetime."""
+        raw = self.last_modified_at_raw
+        return _datetime_from_timestamp(raw) if raw is not None else None
 
     # ---- Metadata-only entry points (legacy ``_types.sources`` helpers) --
     # ``_types/sources._extract_source_url`` / ``_extract_source_created_at``
@@ -679,9 +940,8 @@ class SourceRow:
     def _from_metadata(cls, metadata: Any) -> SourceRow:
         """Wrap a bare metadata sub-list as a row whose ``metadata`` is it.
 
-        Used only by :meth:`created_at_from_metadata` so the timestamp walk
-        reuses the strict :attr:`created_at` property unchanged. ``_raw[0]``
-        / ``_raw[1]`` are placeholders the timestamp path never reads.
+        Used only by :meth:`created_at_from_metadata`. ``_raw[0]`` / ``_raw[1]``
+        are placeholders the timestamp path never reads.
         """
         return cls(_raw=[None, None, metadata])
 
@@ -698,7 +958,17 @@ class SourceRow:
         """
         if not isinstance(metadata, list):
             return None
-        return cls._from_metadata(metadata).created_at
+        if len(metadata) <= cls._META_TIMESTAMP_POS:
+            return None
+        row = cls._from_metadata(metadata)
+        raw = row._timestamp_raw_from_block(
+            metadata[cls._META_TIMESTAMP_POS],
+            source="SourceRow.created_at_raw",
+            # The legacy public helper treated bool as an int. Preserve that
+            # compatibility here while real SourceRow properties reject it.
+            allow_bool=True,
+        )
+        return _datetime_from_timestamp(raw) if raw is not None else None
 
     @classmethod
     def url_from_metadata(cls, metadata: Any, *, allow_bare_http: bool = True) -> str | None:

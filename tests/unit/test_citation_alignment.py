@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,7 @@ from notebooklm.types import (
     ListStyle,
     SourceFulltext,
     StructuredDocument,
+    TableCell,
     TextSpan,
     utf16_len,
 )
@@ -578,6 +580,226 @@ class TestReadableRendering:
         assert StructuredDocument().render() == ""
         # A negative lower bound is clamped, not reinterpreted end-relative.
         assert document.render(-4, 5) == "hello"
+
+    def test_a_table_renders_one_line_per_row_with_its_cells_separated(self) -> None:
+        """The #2230 shape, isolated from the capture.
+
+        A table is the one block kind that is not one line: its rows are the
+        lines and its cells are separated within them. Both boundaries come
+        from ``table_rows`` — a cell is several runs, so neither is recoverable
+        from the spans, which is exactly why the parse carries them.
+        """
+        document = StructuredDocument(
+            blocks=(
+                DocumentBlock(
+                    0,
+                    16,
+                    (
+                        TextSpan(0, 2, "OS"),
+                        # Two runs, one cell — separating runs would split it.
+                        TextSpan(2, 9, "Android"),
+                        TextSpan(9, 12, " 10"),
+                        TextSpan(12, 16, "Cost"),
+                    ),
+                    kind=BlockKind.TABLE,
+                    table_rows=(
+                        (TableCell(0, 2), TableCell(2, 12)),
+                        (TableCell(12, 16),),
+                    ),
+                ),
+            )
+        )
+        assert document.render() == "OS\tAndroid 10\nCost"
+        # The layout is untouched: no separator, one line, same offsets.
+        assert document.text == "OSAndroid 10Cost"
+        assert document.blocks[0].text == "OSAndroid 10Cost"
+
+    def test_a_table_row_renders_only_the_cells_the_window_selects(self) -> None:
+        """A window through a table stays a window, as it does through prose.
+
+        Rows and cells outside the range contribute nothing and are dropped
+        with their separators, so a citation window over one cell does not read
+        as the whole grid.
+        """
+        document = StructuredDocument(
+            blocks=(
+                DocumentBlock(
+                    0,
+                    12,
+                    (TextSpan(0, 3, "aaa"), TextSpan(3, 6, "bbb"), TextSpan(6, 12, "cccddd")),
+                    kind=BlockKind.TABLE,
+                    table_rows=(
+                        (TableCell(0, 3), TableCell(3, 6)),
+                        (TableCell(6, 9), TableCell(9, 12)),
+                    ),
+                ),
+            )
+        )
+        assert document.render() == "aaa\tbbb\nccc\tddd"
+        assert document.render(0, 6) == "aaa\tbbb"
+        assert document.render(6, 12) == "ccc\tddd"
+        # A window inside one cell renders that cell alone, no separator.
+        assert document.render(4, 6) == "bb"
+        # A row the window misses entirely is dropped, not rendered blank.
+        assert document.render(0, 3) == "aaa"
+
+    def test_an_empty_cell_keeps_its_column_but_not_a_trailing_separator(self) -> None:
+        """Where the separator survives an empty cell, and where it does not.
+
+        A *leading* empty cell keeps its separator, so a value stays in the
+        column it was written in rather than sliding left into a neighbour's. A
+        *trailing* one has no column to hold open, so it drops its separator
+        with it — and a row that is empty all the way across drops entirely,
+        like any other block with nothing to read.
+        """
+        document = StructuredDocument(
+            blocks=(
+                DocumentBlock(
+                    0,
+                    9,
+                    (TextSpan(3, 6, "mid"),),
+                    kind=BlockKind.TABLE,
+                    table_rows=(
+                        (TableCell(0, 3), TableCell(3, 6), TableCell(6, 9)),
+                        (TableCell(6, 9), TableCell(6, 9)),
+                    ),
+                ),
+            )
+        )
+        assert document.render() == "\tmid"
+
+    def test_an_empty_column_holds_its_place_instead_of_shifting_the_row(self) -> None:
+        """A cell with no characters is still a column (#2230 review).
+
+        An empty cell's natural range is zero-width, and dropping it would
+        slide every value after it one column left — a three-column row of
+        ``A`` / *nothing* / ``C`` reading as ``A\\tC``, which says ``C`` is in
+        column two. The boundary is kept; only a row that is *nothing but*
+        empty columns goes, since it has no positions to hold.
+        """
+        block = DocumentBlock(
+            0,
+            2,
+            (TextSpan(0, 1, "A"), TextSpan(1, 2, "C")),
+            kind=BlockKind.TABLE,
+            table_rows=(
+                (TableCell(0, 1), TableCell(1, 1), TableCell(1, 2)),
+                (TableCell(2, 2), TableCell(2, 2)),  # nothing but empty columns
+            ),
+        )
+        assert block.table_rows == ((TableCell(0, 1), TableCell(1, 1), TableCell(1, 2)),)
+        assert StructuredDocument(blocks=(block,)).render() == "A\t\tC"
+
+    def test_a_cells_own_tab_survives_the_row_join(self) -> None:
+        """Trailing empty *cells* are dropped, not trailing separator characters.
+
+        A run keeps its own whitespace (:attr:`TextSpan.text` is the literal
+        run), so a cell can legitimately end in a tab. Stripping the joined
+        line would eat that character along with the separator, silently
+        editing the source's text — which a rendering may never do.
+
+        Both review findings meet in one row here: an empty middle column that
+        must keep its separator, and a final cell whose own tab must survive
+        the rule that removes trailing ones. Hand-built rather than taken from
+        a capture because no capture in this repo contains either shape — the
+        infobox's cells are all non-empty and none ends in a tab.
+        """
+        document = StructuredDocument(
+            blocks=(
+                DocumentBlock(
+                    0,
+                    3,
+                    (TextSpan(0, 1, "A"), TextSpan(1, 3, "C\t")),
+                    kind=BlockKind.TABLE,
+                    table_rows=((TableCell(0, 1), TableCell(1, 1), TableCell(1, 3)),),
+                ),
+            )
+        )
+        assert document.render() == "A\t\tC\t"
+
+    def test_cells_are_ordered_and_clamped_like_every_other_offset_here(self) -> None:
+        """``table_rows`` gets the guarantees ``spans`` gets, for the same reasons.
+
+        Container order is not authoritative; a cell claiming positions its
+        block does not own is drift and is clamped to the block, or dropped
+        when nothing survives; and a row left with no cells goes with them.
+        """
+        block = DocumentBlock(
+            0,
+            6,
+            (TextSpan(0, 3, "abc"), TextSpan(3, 6, "def")),
+            kind=BlockKind.TABLE,
+            table_rows=(
+                (TableCell(20, 30),),  # wholly outside — dropped, and its row with it
+                (TableCell(3, 9),),  # overruns the block — clamped to 3..6
+                (TableCell(0, 3),),  # arrives after the row that follows it
+            ),
+        )
+        assert block.table_rows == ((TableCell(0, 3),), (TableCell(3, 6),))
+        assert StructuredDocument(blocks=(block,)).render() == "abc\ndef"
+
+    def test_rows_that_interleave_degrade_to_the_stray_line_not_to_a_wrong_cell(
+        self,
+    ) -> None:
+        """The bound on the forward walk's monotonicity assumption (#2230 review).
+
+        :func:`_spans_by_cell` walks the flattened cells once, so its cursor
+        assumes they advance. Rows are ordered by position and cells within a
+        row are too, but a hand-built block can still *interleave* them — a
+        later row starting inside an earlier one — and no decoded document can
+        (row and cell bounds come from successive narrowings of the table's own
+        range).
+
+        What matters is which way it fails. A run is only ever assigned to a
+        cell that actually contains its start, so it can never be rendered in
+        the wrong column; the cursor can only make it match *fewer* cells than
+        it overlaps, and a run matching none becomes the trailing stray line.
+        Fewer columns and a visible extra line, never a value silently sitting
+        under the wrong header.
+        """
+        document = StructuredDocument(
+            blocks=(
+                DocumentBlock(
+                    0,
+                    30,
+                    (
+                        TextSpan(0, 5, "aaaaa"),
+                        TextSpan(10, 15, "bbbbb"),
+                        TextSpan(20, 30, "cccccccccc"),
+                    ),
+                    kind=BlockKind.TABLE,
+                    # The second row opens inside the first row's span.
+                    table_rows=((TableCell(0, 5), TableCell(20, 30)), (TableCell(10, 15),)),
+                ),
+            )
+        )
+        assert document.render() == "aaaaa\tcccccccccc\nbbbbb"
+        # Every run still reaches the rendering, and the layout is untouched.
+        assert document.text == "aaaaa￼￼￼￼￼bbbbb￼￼￼￼￼cccccccccc"
+
+    def test_a_run_no_cell_claims_is_rendered_rather_than_dropped(self) -> None:
+        """The regrouping may not lose text, however inconsistent its input.
+
+        Unreachable from a decoded document — every run in a table block was
+        read out of one of its cells — but ``DocumentBlock`` is public and can
+        be built with cells that do not cover its spans. Such a run renders
+        after the grid rather than vanishing into it.
+        """
+        document = StructuredDocument(
+            blocks=(
+                DocumentBlock(
+                    0,
+                    9,
+                    (TextSpan(0, 3, "aaa"), TextSpan(3, 6, "bbb"), TextSpan(6, 9, "ccc")),
+                    kind=BlockKind.TABLE,
+                    table_rows=((TableCell(0, 3), TableCell(6, 9)),),
+                ),
+            )
+        )
+        assert document.render() == "aaa\tccc\nbbb"
+        # It is still a windowed rendering: a window that excludes the stray
+        # drops its line rather than emitting a blank one.
+        assert document.render(0, 3) == "aaa"
 
     @pytest.mark.asyncio
     async def test_fulltext_exposes_the_rendering_without_moving_content(
@@ -1421,24 +1643,27 @@ class TestFragmentDescent:
         assert tables[0].text.startswith("Android2026.01.06")
         assert "Operating system" in tables[1].text
 
-    def test_a_tables_cells_run_together_because_the_parse_flattens_them(self) -> None:
-        """The readable rendering's one known blind spot, pinned (#2230).
+    def test_a_tables_cells_are_separated_by_the_boundaries_the_parse_carries(self) -> None:
+        """The readable rendering's former blind spot, fixed (#2230).
 
         ``render()`` joins a block's runs with no separator, which is right for
-        a paragraph and lossy for a table: the parse flattens every row and
-        cell into the table block's spans, so cell values end up adjacent.
+        a paragraph and was lossy for a table: the parse flattens every row and
+        cell into the table block's spans, so cell values used to end up
+        adjacent — ``"Operating systemAndroid 10+, iOS 17+ [a]Included
+        with…"``.
 
-        Pinned rather than fixed because the obvious cheap fix is wrong on this
-        very capture — a single cell is *several* runs (``"Android 10"``,
-        ``"+, "``, ``"iOS 17"``, ``"+ "``, ``"[a]"`` are one cell), so
-        separating spans would split cells as often as it separated them.
-        Nothing at this level can tell a cell boundary from a formatting
-        change; the boundary has to survive the parse first.
+        Separating *runs* was never the fix, and this capture is why: a single
+        cell is several runs (``"Android 10"``, ``"+, "``, ``"iOS 17"``,
+        ``"+ "``, ``"[a]"`` are one cell), so run separation would split cells
+        as often as it separated them. The boundary has to survive the parse,
+        which is what :attr:`DocumentBlock.table_rows` now carries — as
+        offsets, so nothing about the coordinate space moves.
         """
         elements = json.loads((FIXTURES_DIR / "citation_fragment_with_tables.json").read_text())
         document = StructuredDocument(blocks=tuple(build_blocks(elements)))
         table = document.blocks[1]
         assert table.kind is BlockKind.TABLE
+        # The runs are still flattened, and still cut across cell values.
         assert [span.text for span in table.spans][:5] == [
             "Operating system",
             "Android 10",
@@ -1446,14 +1671,130 @@ class TestFragmentDescent:
             "iOS 17",
             "+ ",
         ]
-        rendered = document.render(table.start_index, table.end_index)
-        assert (
-            rendered
-            == "Operating systemAndroid 10+, iOS 17+ [a]Included withGeminiWebsitenotebooklm.google"
+        # The capture declares *four* rows; the first is zero-width and holds
+        # no positions, so it is dropped rather than rendered as a line of
+        # separators with nothing between them.
+        assert len(elements[1][4][2]) == 4
+        assert table.table_rows == (
+            (TableCell(1610, 1626), TableCell(1626, 1650)),
+            (TableCell(1650, 1663), TableCell(1663, 1669)),
+            (TableCell(1669, 1676), TableCell(1676, 1693)),
         )
-        # ...and the same reading ``cited_text`` already gives, so this is a
-        # limitation inherited from the parse, not one introduced here.
-        assert rendered == table.text
+        assert document.render(table.start_index, table.end_index) == (
+            "Operating system\tAndroid 10+, iOS 17+ [a]\n"
+            "Included with\tGemini\n"
+            "Website\tnotebooklm.google"
+        )
+        # The cell ranges are the document's own offsets, not a rendering
+        # artefact: each one resolves on the addressable surface.
+        assert [
+            document.slice(cell.start_index, cell.end_index) for cell in table.table_rows[0]
+        ] == [
+            "Operating system",
+            "Android 10+, iOS 17+ [a]",
+        ]
+        # ...and ``DocumentBlock.text`` — the reading ``cited_text`` gives —
+        # is deliberately unchanged, because no character was added anywhere.
+        assert table.text == (
+            "Operating systemAndroid 10+, iOS 17+ [a]Included withGeminiWebsitenotebooklm.google"
+        )
+
+    def test_carrying_the_cell_boundaries_moves_no_offset(self) -> None:
+        """The regression the fix had to avoid, asserted directly (#2230).
+
+        ``StructuredDocument.text`` is the coordinate space every citation
+        offset indexes, so the cheap version of this fix — inserting a
+        separator into the layout — would have shifted every offset after the
+        capture's first table and broken the alignment #2226 / #2210 landed.
+        The boundaries are therefore carried as *offsets*: the document laid
+        out with them is byte-identical to the same document with every one of
+        them stripped, which is what the parse produced before this change.
+        """
+        elements = json.loads((FIXTURES_DIR / "citation_fragment_with_tables.json").read_text())
+        blocks = build_blocks(elements)
+        document = StructuredDocument(blocks=blocks)
+        stripped = StructuredDocument(blocks=tuple(replace(b, table_rows=()) for b in blocks))
+
+        assert any(block.table_rows for block in document.blocks)
+        assert not any(block.table_rows for block in stripped.blocks)
+        assert document.text == stripped.text
+        assert utf16_len(document.text) == document.extent == stripped.extent == 2089
+        assert [(b.start_index, b.end_index, b.text) for b in document.blocks] == [
+            (b.start_index, b.end_index, b.text) for b in stripped.blocks
+        ]
+        # The rendering's separator exists in the rendering alone.
+        assert "\t" not in document.text
+        assert "\t" in document.render()
+        # Spot-check the space itself against the capture: the two cells that
+        # straddle the fix, and the paragraph that follows both tables.
+        assert document.slice(1610, 1626) == "Operating system"
+        assert document.slice(1626, 1650) == "Android 10+, iOS 17+ [a]"
+        assert document.slice(1693, 1727) == "Duration: 11 minutes and 15 second"
+
+    def test_the_parse_keeps_an_empty_cell_as_a_column(self) -> None:
+        """An empty cell is a boundary the decode must keep (#2230 review).
+
+        The capture proves the shape: its second table's declared header cells
+        are literally ``[1610, 1610]`` — a zero-width range, which is how an
+        empty cell arrives. The text walk rightly skips such a cell (there is
+        nothing to descend into), and the *boundary* walk must not, or a row of
+        ``A`` / *nothing* / ``C`` decodes as two columns and reports ``C`` in
+        column two.
+
+        The rows below are built in the capture's own positional shape —
+        ``StructuralElement = [start, end, paragraph]``, ``Table = [rows,
+        columns, tableRows]``, ``TableCell = [start, end, content]`` — because
+        no captured table has an empty interior cell to read this off.
+        """
+        elements = json.loads((FIXTURES_DIR / "citation_fragment_with_tables.json").read_text())
+        assert elements[1][4][2][0][2][0] == [1610, 1610]  # the wire's empty cell
+
+        def paragraph(start: int, end: int, text: str) -> list[Any]:
+            return [start, end, [[[start, end, [text, None]]], [None, 1]]]
+
+        table = [
+            0,
+            3,
+            None,
+            None,
+            [
+                1,
+                3,
+                [[0, 3, [[0, 1, [paragraph(0, 1, "A")]], [1, 1], [1, 3, [paragraph(1, 3, "C")]]]]],
+            ],
+        ]
+        block = build_blocks([table])[0]
+        assert block.kind is BlockKind.TABLE
+        assert block.table_rows == ((TableCell(0, 1), TableCell(1, 1), TableCell(1, 3)),)
+        assert StructuredDocument(blocks=(block,)).render() == "A\t\tC"
+        # ...and the empty column costs the coordinate space nothing.
+        assert StructuredDocument(blocks=(block,)).text == "AC￼"
+
+    def test_the_legacy_flat_rendering_does_not_see_the_cells_at_all(self) -> None:
+        """``SourceFulltext.content`` is byte-frozen, and stays that way (#2230).
+
+        It is harvested by a separate recursive string walk over the raw rows —
+        every string in traversal order, structure discarded — so a change to
+        the parsed tree cannot reach it. Asserted rather than assumed, because
+        "the legacy rendering is unaffected" is exactly the claim a decoder
+        change is most likely to break silently.
+        """
+        from notebooklm._source.content import SourceContentRenderer
+
+        elements = json.loads((FIXTURES_DIR / "citation_fragment_with_tables.json").read_text())
+        flat = "\n".join(SourceContentRenderer(None).extract_all_text(elements))
+
+        # One line per *run* (and per link URL), the pre-#2128 behaviour.
+        assert flat.split("\n")[:3] == [
+            "Android",
+            "2026.01.06 (Build 853388154) / 8 January 2026; 4 months ago ( 2026-01-08) ",
+            "[1]",
+        ]
+        assert (
+            "Operating system\nhttps://en.wikipedia.org/wiki/Operating_system\n"
+            "Android 10\nhttps://en.wikipedia.org/wiki/Android_10\n+, \niOS 17"
+        ) in flat
+        assert "\t" not in flat
 
     def test_absent_fragment_degrades_to_all_none(self) -> None:
         assert extract_text_passages([None, None, 0.5, [[None, 0, 5]]]) == (None, None, None)

@@ -275,6 +275,8 @@ def get_artifact_type_display(artifact: Artifact) -> str:
         ArtifactType.INFOGRAPHIC: "🖼️ Infographic",
         ArtifactType.SLIDE_DECK: "📊 Slide Deck",
         ArtifactType.DATA_TABLE: "📈 Data Table",
+        ArtifactType.FANTASY_MAP: "🗺️ Fantasy Map",
+        ArtifactType.FILE: "📎 File",
     }
 
     if kind == ArtifactType.REPORT:

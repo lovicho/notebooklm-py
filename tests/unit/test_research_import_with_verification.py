@@ -846,7 +846,7 @@ class TestImportSourcesWithVerification:
         assert research.import_sources.await_count == 2
         assert mock_source_lister.list.await_count == 3
         assert all(
-            awaited_call.kwargs.get("strict") is True
+            awaited_call.kwargs.get("strict") is False
             for awaited_call in mock_source_lister.list.await_args_list
         )
         assert research.import_sources.await_args_list[0].args[2] == sources
@@ -855,6 +855,35 @@ class TestImportSourcesWithVerification:
             {"url": "https://three.example.com", "title": "Source 3"},
         ]
         mock_sleep.assert_awaited_once_with(5)
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_snapshots_tolerate_duplicate_row_collisions(self):
+        """Review regression: research probes must keep tolerant row semantics.
+
+        ``strict=True`` now rejects conflicting duplicate IDs for exact-count
+        callers. Research import recovery instead needs the first normalized
+        occurrence so a backend duplicate collision cannot disable the
+        idempotency baseline or turn a committed timeout into a blind retry.
+        """
+        new_src = MagicMock(id="src_new", title="Source 1", url="https://example.com")
+        research, _, mock_source_lister = _make_research()
+        mock_source_lister.list = AsyncMock(side_effect=[[], [new_src]])
+        research.import_sources = AsyncMock(
+            side_effect=RPCTimeoutError("Timed out", timeout_seconds=30.0)
+        )
+
+        imported = await research.import_sources_with_verification(
+            "nb_123",
+            "task_123",
+            [{"url": "https://example.com", "title": "Source 1"}],
+        )
+
+        assert imported == [{"id": "src_new", "title": "Source 1"}]
+        assert research.import_sources.await_count == 1
+        assert [call.kwargs for call in mock_source_lister.list.await_args_list] == [
+            {"strict": False},
+            {"strict": False},
+        ]
 
     @pytest.mark.asyncio
     async def test_all_requested_urls_already_present_skips_import_entirely(self):

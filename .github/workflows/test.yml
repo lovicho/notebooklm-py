@@ -91,7 +91,14 @@ jobs:
       run: uv run pre-commit run --all-files
 
     - name: Run type checking
-      run: uv run mypy src/notebooklm --ignore-missing-imports
+      # `scripts/_live_auth_scenarios` is included deliberately: those modules
+      # are the live-auth matrix cells that used to be `python -c` source
+      # strings (#2180). Type-checking them is most of the point of extracting
+      # them — they cannot be exercised without live Google credentials, so the
+      # checker is the only thing standing between a typo and a maintainer's
+      # release run. `--ignore-missing-imports` keeps this green on the lean
+      # install this job uses (no `mcp`/`server` extras).
+      run: uv run mypy src/notebooklm scripts/_live_auth_scenarios --ignore-missing-imports
 
     - name: Assert workflow permissions are scoped
       run: uv run python scripts/check_workflow_permissions.py

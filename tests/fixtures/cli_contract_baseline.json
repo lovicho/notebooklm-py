@@ -493,7 +493,9 @@
               "infographic",
               "data-table",
               "mind-map",
-              "report"
+              "report",
+              "fantasy-map",
+              "file"
             ],
             "name": "choice"
           }

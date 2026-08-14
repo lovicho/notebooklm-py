@@ -818,7 +818,7 @@
       "path": "src/notebooklm/_auth/login_wait_trace.py"
     },
     {
-      "lines": 455,
+      "lines": 469,
       "name": "master_token",
       "path": "src/notebooklm/_auth/master_token.py"
     },
@@ -833,12 +833,12 @@
       "path": "src/notebooklm/_auth/master_token_file.py"
     },
     {
-      "lines": 68,
+      "lines": 70,
       "name": "master_token_types",
       "path": "src/notebooklm/_auth/master_token_types.py"
     },
     {
-      "lines": 194,
+      "lines": 208,
       "name": "mint_service",
       "path": "src/notebooklm/_auth/mint_service.py"
     },
@@ -858,7 +858,7 @@
       "path": "src/notebooklm/_auth/profile_document.py"
     },
     {
-      "lines": 602,
+      "lines": 636,
       "name": "profile_migration",
       "path": "src/notebooklm/_auth/profile_migration.py"
     },
@@ -893,7 +893,7 @@
       "path": "src/notebooklm/_auth/single_flight.py"
     },
     {
-      "lines": 1090,
+      "lines": 1089,
       "name": "storage",
       "path": "src/notebooklm/_auth/storage.py"
     },
@@ -913,7 +913,7 @@
       "path": "src/notebooklm/_auth/storage_writer.py"
     },
     {
-      "lines": 889,
+      "lines": 894,
       "name": "tokens",
       "path": "src/notebooklm/_auth/tokens.py"
     }
@@ -926,7 +926,7 @@
     "function_local_edges": 12,
     "module_edges": 130,
     "modules": 41,
-    "total_lines": 16081,
+    "total_lines": 16149,
     "unique_edges": 142
   },
   "version": 1

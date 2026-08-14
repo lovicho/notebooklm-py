@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from ..rpc.types import ChatGoal, ChatResponseLength
+from ..rpc.types import ChatGoal, ChatResponseLength, MagicArtifactType
 from .documents import StructuredDocument
 
 
@@ -394,6 +394,27 @@ class ChatReference:
         self.__dict__["answer_end_char"] = self.__dict__["fragment_end_char"]
 
 
+@dataclass(frozen=True)
+class NextStepSuggestion:
+    """A backend-suggested follow-up action shown beneath a chat answer.
+
+    ``type_code`` is preserved verbatim so a newly introduced server value is
+    never dropped. :attr:`kind` provides the typed enum when the installed
+    client recognizes that value.
+    """
+
+    question: str
+    type_code: int
+
+    @property
+    def kind(self) -> MagicArtifactType | None:
+        """Known ``MagicArtifactType`` member, or ``None`` for a new code."""
+        try:
+            return MagicArtifactType(self.type_code)
+        except ValueError:
+            return None
+
+
 @dataclass
 class AskResult:
     """Result of asking the notebook a question.
@@ -434,6 +455,9 @@ class AskResult:
             optional. ``turn_key.session_id`` is a raw wire value and is **not**
             a substitute for :attr:`conversation_id`; see
             :class:`ConversationTurnKey`.
+        next_steps: Suggested follow-up questions/actions volunteered with the
+            winning answer row. Empty when the stream omitted the optional
+            ``NextStepSuggestions`` block.
     """
 
     answer: str
@@ -444,3 +468,4 @@ class AskResult:
     raw_response: str = ""
     answer_document: StructuredDocument = field(default_factory=StructuredDocument, repr=False)
     turn_key: ConversationTurnKey | None = None
+    next_steps: list[NextStepSuggestion] = field(default_factory=list)

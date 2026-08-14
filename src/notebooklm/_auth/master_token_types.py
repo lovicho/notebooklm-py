@@ -9,8 +9,10 @@ from typing import Any
 class MasterTokenError(Exception):
     """The master token (or its exchange) was rejected — re-bootstrap needed.
 
-    Raised for revoked/expired master tokens, gpsoauth failures, and a minted
-    cookie jar missing the cookies the web client needs. Carries no secrets.
+    Raised for revoked/expired master tokens, failures from an installed
+    ``gpsoauth``, and a minted cookie jar missing the cookies the web client
+    needs. A missing ``gpsoauth`` install is ``MissingDependencyError`` instead.
+    Carries no secrets.
     """
 
 

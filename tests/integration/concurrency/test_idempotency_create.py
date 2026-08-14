@@ -321,6 +321,9 @@ async def test_notebooks_create_baseline_failure_warns_but_proceeds(auth_tokens,
     reach a handler, though: the ``notebooklm`` logger defaults to WARNING, so
     the old DEBUG line was dropped before anything could see it and the call ran
     with a degraded probe in silence.
+
+    Pins the resilience half of the #2232 sentinel: an unavailable baseline
+    disarms the *probe*, it must never fail a create that otherwise succeeds.
     """
     title = "Baseline Blind"
     nb_id = "nb_created"
@@ -350,7 +353,120 @@ async def test_notebooks_create_baseline_failure_warns_but_proceeds(auth_tokens,
     assert notebook.id == nb_id
     assert list_rpc_count == 1
     # Emitted at a level the default configuration actually passes through.
-    assert "falling back to an empty baseline" in caplog.text
+    # The distinctive clause, not just "baseline list() failed" — that substring
+    # was in the pre-#2232 message too, so it no longer pins what the record says.
+    assert "baseline list() failed" in caplog.text
+    assert "surface as an ambiguity error" in caplog.text
+
+
+async def test_notebooks_create_baseline_failure_refuses_to_adopt_a_pre_existing_notebook(
+    auth_tokens,
+) -> None:
+    """The #2232 scenario end to end: no baseline + one same-titled notebook.
+
+    The baseline read fails, the create fails at the transport level, and the
+    probe then finds a notebook with the requested title that was *already*
+    there. Pre-fix the failed baseline degraded to an empty ``set()``, the
+    ``nb.id not in baseline_ids`` filter matched everything, and the caller was
+    handed ``nb_pre_existing`` as if ``create`` had just made it — after which
+    every ``sources.add_*`` and ``chat.ask`` in that session writes into someone
+    else's notebook, with nothing anywhere to signal it.
+
+    The load-bearing assertion is negative: whatever else happens, the call must
+    not *return* that notebook.
+    """
+    title = "Quarterly Review"
+    pre_existing_id = "nb_pre_existing"
+
+    create_rpc_count = 0
+    list_rpc_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal create_rpc_count, list_rpc_count
+        rpc_id = _rpc_id_in_request(request)
+        if rpc_id == RPCMethod.LIST_NOTEBOOKS.value:
+            list_rpc_count += 1
+            if list_rpc_count == 1:
+                # Baseline read is undecodable -> baseline unavailable.
+                return httpx.Response(
+                    200, text=_wrb_response(RPCMethod.LIST_NOTEBOOKS.value, "nonsense")
+                )
+            # Probe: the same-titled notebook that was there all along. The
+            # create never committed, so this is NOT ours.
+            return httpx.Response(200, text=_list_notebooks_response([(pre_existing_id, title)]))
+        if rpc_id == RPCMethod.CREATE_NOTEBOOK.value:
+            create_rpc_count += 1
+            return httpx.Response(502, text="bad gateway")
+        return httpx.Response(404, text="unexpected")
+
+    transport = httpx.MockTransport(handler)
+    client = _make_client_with_transport(transport, auth_tokens)
+    try:
+        with pytest.raises(RPCError, match="disambiguate") as exc_info:
+            await client.notebooks.create(title)
+    finally:
+        await client._collaborators.kernel.get_http_client().aclose()
+
+    # Names the row the caller is being sent to look at, and says why it cannot
+    # be attributed — otherwise "check your notebook list" is unactionable.
+    assert pre_existing_id in str(exc_info.value)
+    assert "baseline" in str(exc_info.value)
+    # Unconfirmed, exactly like the sibling source paths: nothing threw inside
+    # the probe, so without the marker this reads as a plain rejection and the
+    # adapters would hand the caller a "retry me" hint for a create that may
+    # already have landed.
+    assert getattr(exc_info.value, "unconfirmed", False) is True
+    assert classify(exc_info.value).category is ErrorCategory.RPC
+    assert classify(exc_info.value).retriable is False
+    # The ambiguity aborts the loop rather than firing a second create.
+    assert create_rpc_count == 1, f"expected 1 CREATE_NOTEBOOK, got {create_rpc_count}"
+
+
+async def test_notebooks_create_baseline_failure_still_retries_when_probe_finds_nothing(
+    auth_tokens,
+) -> None:
+    """No baseline and no match is still evidence: the create did not land.
+
+    The sentinel must gate on *matches*, not on its own absence. A probe that
+    lists cleanly and finds no notebook with this title has answered the
+    question the baseline was only ever needed to disambiguate, so the retry
+    proceeds and the create succeeds. Raising here instead would turn every
+    blipped baseline into a hard failure on an otherwise recoverable 502 —
+    the regression a blanket ``if baseline_ids is None: raise`` would cause.
+    """
+    title = "Nothing There Yet"
+    nb_id_new = "nb_after_retry"
+
+    create_rpc_count = 0
+    list_rpc_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal create_rpc_count, list_rpc_count
+        rpc_id = _rpc_id_in_request(request)
+        if rpc_id == RPCMethod.LIST_NOTEBOOKS.value:
+            list_rpc_count += 1
+            if list_rpc_count == 1:
+                return httpx.Response(
+                    200, text=_wrb_response(RPCMethod.LIST_NOTEBOOKS.value, "nonsense")
+                )
+            # Probe: a notebook exists, but not one with this title.
+            return httpx.Response(200, text=_list_notebooks_response([("nb_other", "Unrelated")]))
+        if rpc_id == RPCMethod.CREATE_NOTEBOOK.value:
+            create_rpc_count += 1
+            if create_rpc_count == 1:
+                return httpx.Response(502, text="bad gateway")
+            return httpx.Response(200, text=_create_notebook_response(nb_id_new, title))
+        return httpx.Response(404, text="unexpected")
+
+    transport = httpx.MockTransport(handler)
+    client = _make_client_with_transport(transport, auth_tokens)
+    try:
+        notebook = await client.notebooks.create(title)
+    finally:
+        await client._collaborators.kernel.get_http_client().aclose()
+
+    assert notebook.id == nb_id_new
+    assert create_rpc_count == 2, f"expected 2 CREATE_NOTEBOOK, got {create_rpc_count}"
 
 
 async def test_notebooks_create_raises_on_ambiguous_probe(auth_tokens) -> None:

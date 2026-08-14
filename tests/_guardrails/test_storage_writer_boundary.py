@@ -765,7 +765,8 @@ _SCHEDULER_STATE_NAMES = frozenset(
     {
         "_process_default_scheduler",
         "_registry_lock",
-        "_once_paths",
+        "_active_paths",
+        "_attempted_paths",
         "_workers",
         "_thread_factory",
         "_PROMOTION_EXIT_JOIN_SECONDS",

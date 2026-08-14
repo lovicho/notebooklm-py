@@ -367,6 +367,12 @@
       "module": "refresh"
     },
     {
+      "attribute": "_fetch_tokens_with_refresh_core",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "refresh"
+    },
+    {
       "attribute": "_poke_session",
       "count": 2,
       "idiom": "monkeypatch.setattr",
@@ -375,6 +381,12 @@
     {
       "attribute": "_replace_cookie_jar",
       "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "refresh"
+    },
+    {
+      "attribute": "_resolve_token_route_kwargs",
+      "count": 3,
       "idiom": "monkeypatch.setattr",
       "module": "refresh"
     },
@@ -483,9 +495,9 @@
   ],
   "summary": {
     "TOTAL": {
-      "private": 157,
+      "private": 161,
       "public": 135,
-      "total": 292
+      "total": 296
     },
     "account": {
       "private": 2,
@@ -563,9 +575,9 @@
       "total": 15
     },
     "refresh": {
-      "private": 39,
+      "private": 43,
       "public": 28,
-      "total": 67
+      "total": 71
     },
     "single_flight": {
       "private": 0,

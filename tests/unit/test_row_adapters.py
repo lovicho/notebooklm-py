@@ -1530,28 +1530,37 @@ class TestSourceRowPositionContract:
     """
 
     def test_top_level_positions(self) -> None:
-        """Entry-level positions: id, title, metadata, status block."""
+        """Entry-level positions: identity, settings, and downloadable content."""
         assert SourceRow._ID_POS == 0
         assert SourceRow._TITLE_POS == 1
         assert SourceRow._METADATA_POS == 2
         assert SourceRow._STATUS_BLOCK_POS == 3
         assert SourceRow._STATUS_INNER_POS == 1
+        assert SourceRow._DOWNLOAD_URL_POS == 5
+        assert SourceRow._VIEWER_URL_POS == 6
+        assert SourceRow._CONTENT_DESCRIPTOR_POS == 7
+        assert SourceRow._CONTENT_DESCRIPTOR_MIME_POS == 2
 
     def test_metadata_positions(self) -> None:
         """Metadata-sub-list positions: google-docs block, timestamp, type, yt, url."""
         assert SourceRow._META_GOOGLE_DOCS_POS == 0
+        assert SourceRow._META_WORD_COUNT_POS == 1
         assert SourceRow._META_TIMESTAMP_POS == 2
+        assert SourceRow._META_REVISION_POS == 3
         assert SourceRow._META_TYPE_POS == 4
         assert SourceRow._META_YOUTUBE_POS == 5
         assert SourceRow._META_URL_POS == 7
         # Drive-hosted MIME positions used to disambiguate the type_code==14
         # overload (native Sheet vs Drive PDF) — live-captured #1832.
         assert SourceRow._META_DRIVE_DESCRIPTOR_POS == 9
+        assert SourceRow._META_LAST_MODIFIED_POS == 14
         assert SourceRow._META_MIME_POS == 19
         assert SourceRow._DRIVE_DESCRIPTOR_MIME_POS == 2
         # Drive documentId position — one constant for both blocks, since
         # GoogleDocs/GoogleDrive SourceMetadata both declare it as tag 1 (#2113).
         assert SourceRow._DRIVE_DOCUMENT_ID_POS == 0
+        assert SourceRow._REVISION_ID_POS == 0
+        assert SourceRow._REVISION_TIMESTAMP_POS == 1
 
     def test_id_envelope_positions(self) -> None:
         """Id-envelope positions: plain id at [0]; drive-backed at [2][0]."""
@@ -1575,20 +1584,29 @@ class TestSourceRowPositionContract:
             SourceRow._METADATA_POS,
             SourceRow._STATUS_BLOCK_POS,
             SourceRow._STATUS_INNER_POS,
+            SourceRow._DOWNLOAD_URL_POS,
+            SourceRow._VIEWER_URL_POS,
+            SourceRow._CONTENT_DESCRIPTOR_POS,
+            SourceRow._CONTENT_DESCRIPTOR_MIME_POS,
             SourceRow._META_GOOGLE_DOCS_POS,
+            SourceRow._META_WORD_COUNT_POS,
             SourceRow._META_TIMESTAMP_POS,
+            SourceRow._META_REVISION_POS,
             SourceRow._META_TYPE_POS,
             SourceRow._META_YOUTUBE_POS,
             SourceRow._META_URL_POS,
             SourceRow._META_DRIVE_DESCRIPTOR_POS,
+            SourceRow._META_LAST_MODIFIED_POS,
             SourceRow._META_MIME_POS,
             SourceRow._DRIVE_DESCRIPTOR_MIME_POS,
             SourceRow._DRIVE_DOCUMENT_ID_POS,
+            SourceRow._REVISION_ID_POS,
+            SourceRow._REVISION_TIMESTAMP_POS,
             SourceRow._ID_ENVELOPE_PLAIN_POS,
             SourceRow._ID_ENVELOPE_DRIVE_PAYLOAD_POS,
             SourceRow._ID_ENVELOPE_DRIVE_INNER_POS,
             SourceRow._LIST_FIRST_POS,
-        ) == (0, 1, 2, 3, 1, 0, 2, 4, 5, 7, 9, 19, 2, 0, 0, 2, 0, 0)
+        ) == (0, 1, 2, 3, 1, 5, 6, 7, 2, 0, 1, 2, 3, 4, 5, 7, 9, 14, 19, 2, 0, 0, 1, 0, 2, 0, 0)
 
 
 # ---------------------------------------------------------------------------

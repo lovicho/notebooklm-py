@@ -37,6 +37,8 @@ _ARTIFACT_TYPE_CODES_BY_KIND = {
     ArtifactType.INFOGRAPHIC: ArtifactTypeCode.INFOGRAPHIC.value,
     ArtifactType.SLIDE_DECK: ArtifactTypeCode.SLIDE_DECK.value,
     ArtifactType.DATA_TABLE: ArtifactTypeCode.DATA_TABLE.value,
+    ArtifactType.FANTASY_MAP: ArtifactTypeCode.FANTASY_MAP.value,
+    ArtifactType.FILE: ArtifactTypeCode.FILE.value,
 }
 _KNOWN_ARTIFACT_TYPE_CODES = frozenset(_ARTIFACT_TYPE_CODES_BY_KIND.values())
 
@@ -70,7 +72,7 @@ def _matches_artifact_type(artifact: Artifact, artifact_type: ArtifactType | Non
             and artifact._variant == FLASHCARDS_VARIANT
         )
     if artifact_type == ArtifactType.MIND_MAP:
-        # Two backings: note-backed (synthetic type 5) and interactive
+        # Two backings: note-backed (adapted as genuine mind-map type 5) and interactive
         # (studio artifact, type 4 / variant 4). Match either.
         return (
             artifact._artifact_type == ArtifactTypeCode.MIND_MAP.value

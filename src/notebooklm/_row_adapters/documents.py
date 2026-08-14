@@ -59,7 +59,7 @@ from __future__ import annotations
 import logging
 import reprlib
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 from .._types.documents import (
     BlockKind,
@@ -69,6 +69,7 @@ from .._types.documents import (
     ListInfo,
     ListStyle,
     StructuredDocument,
+    TableCell,
     TextSpan,
 )
 
@@ -79,6 +80,7 @@ __all__ = [
     "ParagraphElementRow",
     "ParagraphRow",
     "StructuralElementRow",
+    "TableContent",
     "TableRow",
     "TextRunRow",
     "build_blocks",
@@ -291,6 +293,20 @@ class ParagraphRow:
         return BulletInfoRow(raw).info
 
 
+class TableContent(NamedTuple):
+    """What a ``Table`` decodes to: flattened runs, and the grid holding them.
+
+    Two views of the same walk, which is why they are returned together rather
+    than by two properties that would each have to make it. ``spans`` is the
+    offset-bearing sequence :class:`~notebooklm.types.DocumentBlock` carries
+    like any other block's; ``rows`` is the boundary information that
+    flattening those runs into one sequence destroys (#2230).
+    """
+
+    spans: tuple[TextSpan, ...]
+    rows: tuple[tuple[TableCell, ...], ...]
+
+
 @dataclass(frozen=True)
 class TableRow:
     """Typed view of a ``Table`` — ``[rows, columns, tableRows]``.
@@ -324,8 +340,8 @@ class TableRow:
     _CELL_END_POS: ClassVar[int] = 1
     _CELL_CONTENT_POS: ClassVar[int] = 2
 
-    def spans(self, depth: int, bounds: tuple[int, int]) -> tuple[TextSpan, ...]:
-        """Every text run in the table, row-major, in document order.
+    def decode(self, depth: int, bounds: tuple[int, int]) -> TableContent:
+        """Every text run in the table, row-major, **and** the grid it came from.
 
         ``bounds`` is the enclosing table element's range, narrowed at each
         level by the row's and then the cell's own declared range. A cell's
@@ -334,23 +350,45 @@ class TableRow:
         down: a child block whose own range overruns its cell is valid relative
         to itself, and only the container knows better. Without this, one
         malformed cell's text overlaps — and so displaces — its sibling's.
+
+        The runs stay flattened, because the flat sequence is what
+        :attr:`~notebooklm.types.StructuredDocument.text` lays out at the
+        backend's offsets. What changed in #2230 is that the *cell bounds* this
+        walk computes are no longer thrown away one line later: they are
+        returned alongside as :class:`~notebooklm.types.TableCell` ranges, so a
+        reader can tell a cell boundary from a formatting change. They are the
+        narrowed bounds — the same ranges the cell's own blocks were clamped
+        to — so a cell can never claim a position its table does not own, and
+        carrying them adds no character to the coordinate space.
+
+        A cell holding a nested table contributes that table's text to *its*
+        cell rather than its own cells to the grid: the inner boundaries would
+        overlap the outer cell that contains them, and a grid of overlapping
+        cells cannot be rendered as rows. Nested tables therefore read as they
+        did before — one cell of run-together text.
         """
         collected: list[TextSpan] = []
+        rows: list[tuple[TableCell, ...]] = []
         for row in _as_list(_at(self._raw, self._TABLE_ROWS_POS)) or []:
             row_bounds = _narrow(bounds, _at(row, self._ROW_START_POS), _at(row, self._ROW_END_POS))
             if row_bounds is None:
                 continue
+            cells: list[TableCell] = []
             for cell in _as_list(_at(row, self._ROW_CELLS_POS)) or []:
-                cell_bounds = _narrow(
+                cell_bounds = _clamp(
                     row_bounds, _at(cell, self._CELL_START_POS), _at(cell, self._CELL_END_POS)
                 )
-                if cell_bounds is None:
-                    continue
+                cell_start, cell_end = cell_bounds
+                cells.append(TableCell(start_index=cell_start, end_index=cell_end))
+                if cell_start == cell_end:
+                    continue  # an empty column: a boundary to keep, no text to walk
                 for block in build_blocks(
                     _at(cell, self._CELL_CONTENT_POS), depth, bounds=cell_bounds
                 ):
                     collected.extend(block.spans)
-        return tuple(collected)
+            if any(cell.start_index < cell.end_index for cell in cells):
+                rows.append(tuple(cells))
+        return TableContent(spans=tuple(collected), rows=tuple(rows))
 
 
 @dataclass(frozen=True)
@@ -423,11 +461,13 @@ class StructuralElementRow:
                 return None
         kind = self.kind
         if kind is BlockKind.TABLE:
+            table = TableRow(_at(self._raw, self._TABLE_POS)).decode(depth, (start, end))
             return DocumentBlock(
                 start_index=start,
                 end_index=end,
-                spans=TableRow(_at(self._raw, self._TABLE_POS)).spans(depth, (start, end)),
+                spans=table.spans,
                 kind=kind,
+                table_rows=table.rows,
             )
         paragraph = ParagraphRow(_at(self._raw, self._PARAGRAPH_POS))
         return DocumentBlock(
@@ -524,12 +564,16 @@ class DocumentBodyRow:
         return self._container(self._ANNOTATIONS_POS, "annotation_entries")
 
 
-def _narrow(bounds: tuple[int, int], raw_start: Any, raw_end: Any) -> tuple[int, int] | None:
-    """``bounds`` intersected with a declared child range, or ``None`` if empty.
+def _clamp(bounds: tuple[int, int], raw_start: Any, raw_end: Any) -> tuple[int, int]:
+    """``bounds`` intersected with a declared child range, empty result kept.
 
     A malformed child range cannot widen its parent — only narrow it — so an
     absent or unusable one leaves the parent's bounds untouched rather than
-    dropping the subtree.
+    dropping the subtree. An intersection that is *empty* comes back as a
+    zero-width range at the intersection point rather than as ``None``: for
+    text that means "nothing here" (see :func:`_narrow`), but for a **table
+    cell** it means "a column that holds no characters", which is information a
+    reader needs — a row of ``A``, ``""``, ``C`` must not read as two columns.
     """
     start, end = bounds
     child_start = _as_index(raw_start)
@@ -538,6 +582,16 @@ def _narrow(bounds: tuple[int, int], raw_start: Any, raw_end: Any) -> tuple[int,
         start = max(start, child_start)
     if child_end is not None:
         end = min(end, child_end)
+    return (start, max(start, end))
+
+
+def _narrow(bounds: tuple[int, int], raw_start: Any, raw_end: Any) -> tuple[int, int] | None:
+    """:func:`_clamp`, with an empty intersection reported as ``None``.
+
+    What every caller that is descending after *text* wants: a subtree
+    occupying no positions can carry none, so there is nothing to walk.
+    """
+    start, end = _clamp(bounds, raw_start, raw_end)
     return None if end <= start else (start, end)
 
 

@@ -61,7 +61,12 @@ def generate_android_id() -> str:
 
 def exchange_master_token(email: str, oauth_token: str, android_id: str) -> str:
     """One-time: a single-use EmbeddedSetup ``oauth_token`` -> durable ``aas_et/``
-    master token. Raises :class:`MasterTokenError` on rejection (no secret leak)."""
+    master token.
+
+    Raises :class:`MasterTokenError` on rejection (no secret leak), or
+    :class:`~notebooklm.exceptions.MissingDependencyError` when the optional
+    ``headless`` dependency is absent.
+    """
     caller_exception = sys.exc_info()[1]
     try:
         token = MintService().exchange(email, oauth_token, android_id)
@@ -77,6 +82,10 @@ def exchange_master_token(email: str, oauth_token: str, android_id: str) -> str:
         )
     else:
         return token.secret
+    finally:
+        # Public dependency/configuration failures bypass the translation;
+        # remove the single-use token from this escaping adapter frame.
+        del oauth_token
     caller_exception = None
     error = MasterTokenError(error_snapshot[0])
     try:
@@ -97,7 +106,8 @@ async def mint_cookies(email: str, master_token: str, android_id: str) -> httpx.
     perform_oauth (sync, offloaded once) -> ya29, then
     OAuthLogin?issueuberauth=1 -> uberauth -> MergeSession -> Set-Cookie jar.
     Raises :class:`MasterTokenError` if the token is revoked or the jar lacks the
-    cookies the web client needs.
+    cookies the web client needs. A missing optional ``headless`` dependency
+    raises :class:`~notebooklm.exceptions.MissingDependencyError` instead.
     """
     caller_exception = sys.exc_info()[1]
     try:
@@ -116,6 +126,10 @@ async def mint_cookies(email: str, master_token: str, android_id: str) -> httpx.
         )
     else:
         return jar
+    finally:
+        # Public dependency/configuration failures bypass the translation;
+        # remove the durable token from this escaping adapter frame.
+        del master_token
     caller_exception = None
     error = MasterTokenError(error_snapshot[0])
     try:

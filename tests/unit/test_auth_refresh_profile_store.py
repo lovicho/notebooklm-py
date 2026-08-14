@@ -431,6 +431,7 @@ async def test_public_merge_receives_exact_selected_baseline(
 async def test_route_callback_preserves_raw_refresh_raw_timing_and_explicit_precedence(
     tmp_path: Path,
     exact_fetch: _ExactFetchHarness,
+    monkeypatch: pytest.MonkeyPatch,
     authuser: int | None,
     account_email: str | None,
     expected: dict[str, Any],
@@ -440,6 +441,15 @@ async def test_route_callback_preserves_raw_refresh_raw_timing_and_explicit_prec
     _write(raw, _auth_payload(account={"authuser": 3, "email": "raw@example.com"}))
     _write(refresh_path, _auth_payload(account={"authuser": 7, "email": "refresh@example.com"}))
     routes: list[dict[str, Any]] = []
+    route_threads: list[int] = []
+    event_loop_thread = threading.get_ident()
+    real_resolve = refresh._resolve_token_route_kwargs
+
+    def record_route_thread(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        route_threads.append(threading.get_ident())
+        return real_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(refresh, "_resolve_token_route_kwargs", record_route_thread)
 
     async def inspect_routes(call: dict[str, Any]) -> tuple[str, str, CookieJar]:
         resolver = call["resolve_route"]
@@ -467,6 +477,36 @@ async def test_route_callback_preserves_raw_refresh_raw_timing_and_explicit_prec
         assert routes[1] == {"authuser": 7, "account_email": "explicit@example.com"}
     else:
         assert routes[1] == expected
+    assert route_threads and all(thread_id != event_loop_thread for thread_id in route_threads)
+
+
+@pytest.mark.asyncio
+async def test_compatibility_route_callback_runs_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mapping-compatible refresh path also owns blocking profile reads."""
+    storage = tmp_path / "storage_state.json"
+    route_threads: list[int] = []
+    event_loop_thread = threading.get_ident()
+
+    def resolve(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        route_threads.append(threading.get_ident())
+        return {"authuser": 4}
+
+    async def core(*args: Any, **kwargs: Any):
+        assert await kwargs["resolve_route"](storage) == {"authuser": 4}
+        return "csrf", "session", False, None, None
+
+    monkeypatch.setattr(refresh, "_resolve_token_route_kwargs", resolve)
+    monkeypatch.setattr(refresh, "_fetch_tokens_with_refresh_core", core)
+
+    assert await refresh._fetch_tokens_with_refresh(httpx.Cookies(), storage) == (
+        "csrf",
+        "session",
+        False,
+        None,
+    )
+    assert route_threads and all(thread_id != event_loop_thread for thread_id in route_threads)
 
 
 class _CountingStore(ProfileStore):

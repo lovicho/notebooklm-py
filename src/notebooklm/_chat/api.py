@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from .._conversation_cache import ConversationCache
 from .._logging import get_request_id, reset_request_id, set_request_id
 from .._loop_bound import LoopBoundPrimitive
-from .._notebook_metadata import NotebookSourceIdProvider
+from .._notebook_metadata import CreatedChatSessionProvider, NotebookSourceIdProvider
 from .._notebooks import build_get_notebook_params
 from .._request_types import AuthSnapshot
 from .._row_adapters.chat import (
@@ -65,6 +65,7 @@ from ..types import (
     ChatSettings,
     ConversationTurn,
     ConversationTurnKey,
+    NextStepSuggestion,
     Note,
 )
 
@@ -90,6 +91,8 @@ class _PostedAsk:
     #: The backend's key for this turn, or ``None`` when the stream carried
     #: none. Threaded onto :attr:`AskResult.turn_key` (#2122).
     turn_key: ConversationTurnKey | None
+    #: Suggested follow-up actions decoded from NextStepSuggestions (#2119).
+    next_steps: list[NextStepSuggestion]
 
 
 class ChatAPI(LoopBoundPrimitive):
@@ -123,6 +126,7 @@ class ChatAPI(LoopBoundPrimitive):
         chat_response_max_bytes: int | None = DEFAULT_CHAT_RESPONSE_MAX_BYTES,
         conversation_cache: ConversationCache | None = None,
         notebooks: NotebookSourceIdProvider | None = None,
+        created_chat_sessions: CreatedChatSessionProvider | None = None,
     ):
         """Initialize the chat API.
 
@@ -150,6 +154,9 @@ class ChatAPI(LoopBoundPrimitive):
             notebooks: Optional source-id resolver; defaults to a
                 ``NotebooksAPI`` around ``rpc`` so a bare ``ChatAPI(...)`` still
                 resolves source ids without callers wiring the full graph.
+            created_chat_sessions: Optional one-shot provider for the initial
+                session id returned by ``CREATE_NOTEBOOK``. The assembled
+                client passes its shared ``NotebooksAPI`` instance.
         """
         self._rpc = rpc
         self._transport = transport
@@ -167,7 +174,10 @@ class ChatAPI(LoopBoundPrimitive):
             from .._notebooks import NotebooksAPI
 
             notebooks = NotebooksAPI(rpc)
+            if created_chat_sessions is None:
+                created_chat_sessions = notebooks
         self._notebooks = notebooks
+        self._created_chat_sessions = created_chat_sessions
         self._cache = conversation_cache if conversation_cache is not None else ConversationCache()
         # Per-``conversation_id`` lock serializing follow-up asks on the same
         # conversation. Without it, two ``asyncio.gather``'d asks read identical
@@ -445,6 +455,7 @@ class ChatAPI(LoopBoundPrimitive):
                 raw_response=response.text,
                 answer_document=answer_document,
                 turn_key=parsed.turn_key,
+                next_steps=parsed.next_steps,
             )
 
         def cache_turn(
@@ -469,7 +480,23 @@ class ChatAPI(LoopBoundPrimitive):
         # resolve and this POST.
         if is_new_conversation:
             async with self._get_new_conversation_lock(notebook_id):
-                current_id = await self.get_conversation_id(notebook_id)
+                # CREATE_NOTEBOOK already returned this notebook's initial
+                # ChatSession. Consume that one-shot hint before falling back
+                # to hPTbtc, avoiding an immediate re-fetch of data the server
+                # just volunteered (#2133). Keep its provenance: unlike an id
+                # resolved from hPTbtc, the create hint must be bound to the
+                # POST below. Otherwise another client changing the notebook's
+                # current session between create() and ask() would make the
+                # null-session POST land elsewhere while we still reported the
+                # stale create id.
+                created_session_id = (
+                    self._created_chat_sessions._take_created_chat_session_id(notebook_id)
+                    if self._created_chat_sessions is not None
+                    else None
+                )
+                current_id = created_session_id
+                if current_id is None:
+                    current_id = await self.get_conversation_id(notebook_id)
                 if current_id is None:
                     # First-ever conversation: no id to lock on, so serialize the
                     # create under the notebook lock; recover the id post-POST.
@@ -497,7 +524,14 @@ class ChatAPI(LoopBoundPrimitive):
                         is_follow_up = prior_turn_count > 0
                     posted = await perform_request(
                         conversation_history=None,
-                        active_conversation_id=None,
+                        # A CREATE hint is a genuine server-issued session id,
+                        # not the client-minted UUID forbidden by #659. Bind
+                        # the first ask to it so the returned id and the POST
+                        # target cannot diverge if the server's current pointer
+                        # changed in another client meanwhile.
+                        active_conversation_id=(
+                            override if created_session_id is not None else None
+                        ),
                         resolved_id_override=override,
                     )
                     turn_number = cache_turn(
@@ -528,6 +562,7 @@ class ChatAPI(LoopBoundPrimitive):
             raw_response=posted.raw_response[:1000],
             answer_document=posted.answer_document,
             turn_key=posted.turn_key,
+            next_steps=posted.next_steps,
         )
 
     async def get_conversation_turns(

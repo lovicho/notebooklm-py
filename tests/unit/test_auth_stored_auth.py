@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import threading
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,11 @@ from notebooklm._auth.cookies import (
 )
 from notebooklm._auth.profile_account import ProfileAccount
 from notebooklm._auth.profile_document import ProfileDocument
-from notebooklm._auth.profile_migration import LegacyAccountMigrator, LegacyPromotionScheduler
+from notebooklm._auth.profile_migration import (
+    LegacyAccountContext,
+    LegacyAccountMigrator,
+    LegacyPromotionScheduler,
+)
 from notebooklm._auth.profile_store import (
     CookieMergeDisposition,
     CookieMergeResult,
@@ -335,6 +340,49 @@ async def test_inline_route_uses_captured_raw_boolean_and_stripped_email() -> No
     assert account is not None
     assert account.authuser is True
     assert account.email == "a@example.com"
+
+
+@pytest.mark.asyncio
+async def test_file_route_detects_stale_legacy_cleanup_off_the_event_loop(tmp_path: Path) -> None:
+    path = tmp_path / "storage_state.json"
+    path.write_text(
+        json.dumps(_document(account={"authuser": 7, "email": "fresh@example.com"}).to_json()),
+        encoding="utf-8",
+    )
+    (tmp_path / "context.json").write_text(
+        json.dumps({"account": {"authuser": 1, "email": "stale@example.com"}}),
+        encoding="utf-8",
+    )
+    context_threads: list[int] = []
+
+    class _ThreadRecordingContext(LegacyAccountContext):
+        def read(self, storage_path: Path):
+            context_threads.append(threading.get_ident())
+            return super().read(storage_path)
+
+    class _RecordingScheduler(LegacyPromotionScheduler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[tuple[object, object]] = []
+
+        def schedule(self, store, migrator):
+            self.calls.append((store, migrator))
+            return True
+
+    migrator = LegacyAccountMigrator(_ThreadRecordingContext())
+    scheduler = _RecordingScheduler()
+    resolver = AccountRouteResolver(
+        FileAuthSource(ProfileStore(path), "work"),
+        migrator=migrator,
+        promotions=scheduler,
+    )
+    event_loop_thread = threading.get_ident()
+
+    account = await resolver.resolve()
+
+    assert account == ProfileAccount(7, "fresh@example.com")
+    assert scheduler.calls and scheduler.calls[0][1] is migrator
+    assert context_threads and all(thread_id != event_loop_thread for thread_id in context_threads)
 
 
 class _FakeAcquirer:

@@ -141,6 +141,10 @@ def test_real_notebooklm_type_round_trips() -> None:
         "modified_at": None,
         "role": 1,
         "last_viewed_at": None,
+        "emoji": None,
+        "premium_features": None,
+        "chat_sessions": [],
+        "chat_settings": None,
     }
     json.dumps(result)
 
@@ -153,9 +157,36 @@ def test_notebook_view_adds_role_label() -> None:
 
     assert view["role"] == SharePermission.VIEWER.value
     assert view["role_label"] == "viewer"
-    # The projection is additive — every dataclass field still ships.
+    # The established transport fields remain intact.
     assert view["is_owner"] is False
     assert view["id"] == "nb-1"
+
+
+def test_notebook_view_does_not_auto_expand_for_project_only_fields() -> None:
+    """Python Project metadata must not silently change MCP/REST contracts."""
+    from notebooklm._app.views import notebook_view
+
+    notebook = Notebook.from_api_response(
+        [
+            "N",
+            None,
+            "nb-1",
+            "📖",
+            None,
+            None,
+            None,
+            [[2, "persona"], [4]],
+            None,
+            [True, True, False],
+            None,
+            [["session-1"]],
+        ],
+        include_chat_settings=True,
+    )
+
+    view = notebook_view(notebook)
+
+    assert {"emoji", "premium_features", "chat_sessions", "chat_settings"}.isdisjoint(view)
 
 
 def test_notebook_viewed_keys_returns_the_new_key_and_its_alias() -> None:
@@ -226,6 +257,38 @@ def test_source_view_drive_status_label_is_none_when_absent() -> None:
     assert unreadable["drive_status_label"] == "unknown"
     # A state we cannot name is not evidence of degradation.
     assert unreadable["is_drive_degraded"] is False
+
+
+def test_source_view_does_not_publish_python_only_source_metadata() -> None:
+    """Enriching ``Source`` must not implicitly widen the MCP/REST contract."""
+    from notebooklm._app.views import source_view
+    from notebooklm.types import Source
+
+    source = Source(
+        id="src-1",
+        download_url="https://example.test/download",
+        viewer_url="https://example.test/view",
+        content_mime="text/markdown",
+        word_count=123,
+        revision_id="revision-1",
+        revision_timestamp=datetime(2026, 8, 13, tzinfo=timezone.utc),
+        last_modified_at=datetime(2026, 8, 14, tzinfo=timezone.utc),
+    )
+
+    view = source_view(source)
+
+    assert (
+        not {
+            "download_url",
+            "viewer_url",
+            "content_mime",
+            "word_count",
+            "revision_id",
+            "revision_timestamp",
+            "last_modified_at",
+        }
+        & view.keys()
+    )
 
 
 def test_source_summary_stays_narrow_so_add_envelopes_do_not_widen() -> None:
@@ -310,3 +373,20 @@ def test_ask_result_view_turn_key_is_none_when_the_stream_carried_none() -> None
         AskResult(answer="a", conversation_id="conv-1", turn_number=1, is_follow_up=False)
     )
     assert view["turn_key"] is None
+
+
+def test_ask_result_view_carries_next_step_suggestions() -> None:
+    from notebooklm._app.views import ask_result_view
+    from notebooklm.types import AskResult, NextStepSuggestion
+
+    view = ask_result_view(
+        AskResult(
+            answer="a",
+            conversation_id="conv-1",
+            turn_number=1,
+            is_follow_up=False,
+            next_steps=[NextStepSuggestion("What next?", 9)],
+        )
+    )
+
+    assert view["next_steps"] == [{"question": "What next?", "type_code": 9}]

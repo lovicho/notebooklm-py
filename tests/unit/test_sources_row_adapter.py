@@ -433,6 +433,186 @@ def test_non_14_type_code_with_pdf_mime_is_untouched() -> None:
     assert src.kind == SourceType.WEB_PAGE
 
 
+# --- #2112 + #2114: retained source content and revision metadata ----------
+
+
+def _live_enriched_source_row(
+    *,
+    type_code: int = 8,
+    content_mime: str = "text/markdown",
+    drive_mime: str | None = None,
+) -> SourceRow:
+    """Build the live shape shared by the two source-enrichment issues."""
+    metadata: list[object] = [None] * 20
+    metadata[1] = 1498
+    metadata[2] = [1_754_560_000, 123_000_000]
+    metadata[3] = ["a25483bc-01fc-4e64-9deb-d2c2cf001887", [1_754_560_100, 456_000_000]]
+    metadata[4] = type_code
+    metadata[14] = [1_754_560_200, 789_000_000]
+    metadata[19] = drive_mime
+    return SourceRow.from_entry(
+        [
+            ["source-id"],
+            "The AI-Enabled Organization.md",
+            metadata,
+            [None, SourceStatus.READY],
+            None,
+            "https://contribution.usercontent.google.com/download?c=token&filename=source.md",
+            "https://drive.google.com/viewer/upload?ds=token",
+            [
+                "/contrib_service/blobrefs/notebooklm/nos_files/MediaDataBlobref/global::0000",
+                None,
+                content_mime,
+                [["opaque-token"]],
+            ],
+        ]
+    )
+
+
+def test_source_row_decodes_original_file_links_and_content_mime() -> None:
+    row = _live_enriched_source_row()
+
+    assert row.download_url == (
+        "https://contribution.usercontent.google.com/download?c=token&filename=source.md"
+    )
+    assert row.viewer_url == "https://drive.google.com/viewer/upload?ds=token"
+    assert row.content_mime == "text/markdown"
+
+
+def test_source_row_decodes_word_revision_and_last_modified_metadata() -> None:
+    row = _live_enriched_source_row()
+
+    assert row.word_count == 1498
+    assert row.revision_id == "a25483bc-01fc-4e64-9deb-d2c2cf001887"
+    assert row.revision_timestamp_raw == 1_754_560_100
+    assert row.revision_timestamp == _datetime_from_timestamp(1_754_560_100)
+    assert row.last_modified_at_raw == 1_754_560_200
+    assert row.last_modified_at == _datetime_from_timestamp(1_754_560_200)
+
+
+def test_source_from_row_surfaces_every_enriched_field() -> None:
+    from notebooklm._types.sources import Source
+
+    source = Source.from_row(_live_enriched_source_row())
+
+    assert source.download_url is not None
+    assert source.viewer_url is not None
+    assert source.content_mime == "text/markdown"
+    assert source.word_count == 1498
+    assert source.revision_id == "a25483bc-01fc-4e64-9deb-d2c2cf001887"
+    assert source.revision_timestamp == _datetime_from_timestamp(1_754_560_100)
+    assert source.last_modified_at == _datetime_from_timestamp(1_754_560_200)
+
+
+def test_source_repr_omits_signed_capability_urls() -> None:
+    """Routine logging must not persist access-bearing source URL tokens."""
+    from notebooklm._types.sources import Source
+
+    download_token = "download-capability-token"
+    viewer_token = "viewer-capability-token"
+    source = Source(
+        id="source-id",
+        download_url=f"https://example.test/download?token={download_token}",
+        viewer_url=f"https://example.test/view?token={viewer_token}",
+    )
+
+    rendered = repr(source)
+
+    assert download_token not in rendered
+    assert viewer_token not in rendered
+    assert source.download_url is not None
+    assert source.viewer_url is not None
+
+
+def test_content_mime_disambiguates_drive_pdf_without_drive_metadata_mime() -> None:
+    """The true content MIME is preferred over the older Drive-only slots."""
+    from notebooklm._types.sources import Source, SourceType
+
+    source = Source.from_row(
+        _live_enriched_source_row(type_code=14, content_mime="application/pdf")
+    )
+
+    assert source.kind is SourceType.PDF
+
+
+@pytest.mark.parametrize(
+    "content_mime",
+    ["application/octet-stream", "application/pdf; charset=binary"],
+)
+def test_drive_mime_disambiguates_when_content_mime_is_unrecognized(
+    content_mime: str,
+) -> None:
+    """An unusable content MIME must not mask the proven Drive MIME fallback."""
+    from notebooklm._types.sources import Source, SourceType
+
+    source = Source.from_row(
+        _live_enriched_source_row(
+            type_code=14,
+            content_mime=content_mime,
+            drive_mime="application/pdf",
+        )
+    )
+
+    assert source.kind is SourceType.PDF
+
+
+def test_enriched_fields_are_none_on_short_rows() -> None:
+    row = SourceRow.from_entry([["source-id"], "Title"])
+
+    assert row.download_url is None
+    assert row.viewer_url is None
+    assert row.content_mime is None
+    assert row.word_count is None
+    assert row.revision_id is None
+    assert row.revision_timestamp_raw is None
+    assert row.revision_timestamp is None
+    assert row.last_modified_at_raw is None
+    assert row.last_modified_at is None
+
+
+def test_enriched_fields_reject_malformed_values() -> None:
+    metadata: list[object] = [None] * 15
+    metadata[1] = True
+    metadata[3] = [42, "not-a-timestamp"]
+    metadata[14] = ["not-numeric"]
+    row = SourceRow.from_entry(
+        [
+            ["source-id"],
+            "Title",
+            metadata,
+            [None, SourceStatus.READY],
+            None,
+            42,
+            "",
+            ["blobref", None, 123],
+        ]
+    )
+
+    assert row.download_url is None
+    assert row.viewer_url is None
+    assert row.content_mime is None
+    assert row.word_count is None
+    assert row.revision_id is None
+    assert row.revision_timestamp is None
+    assert row.last_modified_at is None
+
+
+def test_source_row_rejects_boolean_timestamps() -> None:
+    """JSON booleans are not numeric timestamps despite subclassing ``int``."""
+    metadata: list[object] = [None] * 15
+    metadata[2] = [True]
+    metadata[3] = ["revision-id", [False]]
+    metadata[14] = [True]
+    row = SourceRow.from_entry([["source-id"], "Title", metadata, [None, SourceStatus.READY]])
+
+    assert row.created_at_raw is None
+    assert row.created_at is None
+    assert row.revision_timestamp_raw is None
+    assert row.revision_timestamp is None
+    assert row.last_modified_at_raw is None
+    assert row.last_modified_at is None
+
+
 # --- #2113: SourceRow.drive_document_id (the add_drive idempotency key) ------
 
 #: A Drive file id as it appears on the wire (44-char Base64URL), taken from the

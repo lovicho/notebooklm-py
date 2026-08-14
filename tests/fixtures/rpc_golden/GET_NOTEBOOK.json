@@ -78,6 +78,10 @@
     "is_owner": true,
     "modified_at": "2024-01-02T00:00:00+00:00",
     "role": 1,
-    "last_viewed_at": "2024-01-02T00:00:00+00:00"
+    "last_viewed_at": "2024-01-02T00:00:00+00:00",
+    "emoji": "📓",
+    "premium_features": null,
+    "chat_sessions": [],
+    "chat_settings": null
   }
 }

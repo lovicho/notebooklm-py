@@ -258,7 +258,7 @@ async def test_studio_list_kind_enum_matches_studio_kinds(mcp_list_tools) -> Non
     schema = next(t for t in tools if t.name == "studio_list").inputSchema
     enum = _schema_enum(schema["properties"]["kind"])
     assert enum == STUDIO_KINDS
-    assert enum is not None and len(enum) == 10
+    assert enum is not None and len(enum) == 12
     assert "cinematic-video" not in enum
 
 

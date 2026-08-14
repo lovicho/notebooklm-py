@@ -726,7 +726,8 @@ async def _fetch_tokens_with_refresh(
     )
 
     async def resolve_route(path: Path | None) -> dict[str, Any]:
-        return _resolve_token_route_kwargs(
+        return await asyncio.to_thread(
+            _resolve_token_route_kwargs,
             path,
             authuser=explicit_authuser,
             account_email=account_email,
@@ -1101,7 +1102,8 @@ async def fetch_tokens_with_domains(
     live = pair.live
 
     async def resolve_route(route_path: Path | None) -> dict[str, Any]:
-        return _resolve_token_route_kwargs(
+        return await asyncio.to_thread(
+            _resolve_token_route_kwargs,
             route_path,
             authuser=authuser,
             account_email=account_email,
@@ -1144,18 +1146,14 @@ async def fetch_tokens_passive(
     read-only. Unlike that function it:
 
     * never runs ``NOTEBOOKLM_REFRESH_CMD`` (no re-auth hook / subprocess);
-    * never fires the layer-1 keepalive poke that rotates ``__Secure-1PSIDTS``
-      server-side;
-    * never fires the inline ``RotateCookies`` PSIDTS recovery (it loads the jar
-      with the no-recovery strict loader, so a missing/expired PSIDTS surfaces as
-      a plain ``ValueError`` instead of a network POST + disk write); and
+    * never fires the layer-1 keepalive poke that rotates ``__Secure-1PSIDTS`` server-side;
+    * never fires inline ``RotateCookies`` recovery: the strict loader raises ``ValueError``
+      for missing/expired PSIDTS instead of issuing a network POST + disk write; and
     * never writes rotated cookies back to ``storage_state.json``.
 
-    This is the readiness probe an unattended monitor (systemd / cron health
-    check) wants: it answers "do the cookies currently on disk authenticate?"
-    without mutating state, spawning a refresh subprocess, or racing concurrent
-    real work (issue #1569). Pair it with a passive ``auth check --test`` or
-    ``auth refresh --verify``.
+    This unattended-readiness probe answers "do the cookies currently on disk authenticate?"
+    without mutation, a refresh subprocess, or races with real work (issue #1569). Pair it with
+    a passive ``auth check --test`` or ``auth refresh --verify``.
 
     Args:
         path: Path to storage_state.json. If provided, takes precedence over env vars.
@@ -1174,11 +1172,13 @@ async def fetch_tokens_passive(
         ValueError: If tokens cannot be extracted (e.g. redirected to sign-in).
     """
     path = _auth_cookies.resolve_auth_storage_path(path, profile)
-    # Strict (no-recovery) loader: a missing/expired PSIDTS raises ``ValueError``
-    # rather than triggering the inline ``RotateCookies`` rotation + save. A
-    # readiness probe reports "not authenticated"; it does not heal. Offloaded.
+    # Strict (no-recovery) loader: missing/expired PSIDTS reports unauthenticated; no healing.
     jar = await asyncio.to_thread(_build_httpx_cookies_from_storage_strict, path)
-    route_kwargs = _resolve_token_route_kwargs(path, authuser=authuser, account_email=account_email)
-    # poke=False + no save_cookies_to_storage ⇒ zero side effects on disk or
-    # on the server-side cookie rotation state.
+    route_kwargs = await asyncio.to_thread(
+        _resolve_token_route_kwargs,
+        path,
+        authuser=authuser,
+        account_email=account_email,
+    )
+    # poke=False and no save keep disk and server-side rotation state untouched.
     return await _fetch_tokens_with_jar(jar, path, poke=False, **route_kwargs)

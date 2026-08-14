@@ -28,6 +28,7 @@ Position contracts (pinned by ``tests/unit/test_chat_row_adapter.py``):
   =====  ============================================================
   0      the answer record consumed by :class:`AnswerRow`
   4      ``isFinalResponse`` (bool) — ``True`` on exactly the last chunk
+  5      ``NextStepSuggestions``; ``[5][0]`` is its suggestion-row list
   =====  ============================================================
 
 * :class:`AnswerRow` — one populated answer record (``inner_data[0]``):
@@ -107,6 +108,7 @@ __all__ = [
     "ChatSettingsRow",
     "ConversationTurnRow",
     "ErrorPayloadRow",
+    "NextStepSuggestionRow",
     "StreamEnvelopeRow",
     "StreamFrameRow",
     "SavedChatNoteRow",
@@ -606,9 +608,9 @@ class StreamEnvelopeRow:
 
     The ``wrb.fr`` frame's inner JSON decodes to a
     ``GenerateFreeFormStreamedResponse``: the answer record at index 0 (wrapped
-    by :class:`AnswerRow`) and ``isFinalResponse`` at index 4. Heartbeat frames
-    decode to ``[]`` and answer the ``is_final_response`` question with
-    ``False``.
+    by :class:`AnswerRow`), ``isFinalResponse`` at index 4, and optional
+    ``NextStepSuggestions`` at index 5. Heartbeat frames decode to ``[]`` and
+    answer the optional-field questions with their empty defaults.
 
     This adapter owns only the ``isFinalResponse`` read; the ``inner_data[0]``
     answer-row descent stays in ``_chat/wire.py``, which raises its own typed
@@ -628,6 +630,8 @@ class StreamEnvelopeRow:
     # (#2122, two probes): ``False`` on every chunk but the last and ``True``
     # on exactly the last, across a 5-chunk and a 6-chunk stream.
     _IS_FINAL_RESPONSE_POS: ClassVar[int] = 4
+    _NEXT_STEPS_POS: ClassVar[int] = 5
+    _NEXT_STEPS_ROWS_POS: ClassVar[int] = 0
 
     @property
     def is_final_response(self) -> bool:
@@ -643,6 +647,25 @@ class StreamEnvelopeRow:
         if not isinstance(self._raw, list) or len(self._raw) <= self._IS_FINAL_RESPONSE_POS:
             return False
         return self._raw[self._IS_FINAL_RESPONSE_POS] is True
+
+    @property
+    def next_step_rows(self) -> list[NextStepSuggestionRow]:
+        """Typed follow-up suggestion rows from ``inner_data[5][0]``.
+
+        Suggestions are optional UI sugar and older cassette frames omit the
+        block entirely, so every absent/malformed container degrades to ``[]``
+        without affecting the answer itself. Individual malformed rows are
+        retained as adapters and filtered by the consumer.
+        """
+        if not isinstance(self._raw, list) or len(self._raw) <= self._NEXT_STEPS_POS:
+            return []
+        block = self._raw[self._NEXT_STEPS_POS]
+        if not isinstance(block, list) or len(block) <= self._NEXT_STEPS_ROWS_POS:
+            return []
+        rows = block[self._NEXT_STEPS_ROWS_POS]
+        if not isinstance(rows, list):
+            return []
+        return [NextStepSuggestionRow(row) for row in rows]
 
 
 @dataclass(frozen=True)
@@ -713,6 +736,40 @@ class ErrorPayloadRow:
             return None
         value = entry[0]
         return value if isinstance(value, str) else None
+
+
+@dataclass(frozen=True)
+class NextStepSuggestionRow:
+    """One ``NextStep`` row: ``[suggestion, MagicArtifactType]``."""
+
+    _raw: Any = field(repr=False)
+
+    _QUESTION_POS: ClassVar[int] = 0
+    _TYPE_CODE_POS: ClassVar[int] = 1
+    _MIN_LEN: ClassVar[int] = 2
+
+    @property
+    def question(self) -> str | None:
+        if not isinstance(self._raw, list) or len(self._raw) <= self._QUESTION_POS:
+            return None
+        value = self._raw[self._QUESTION_POS]
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def type_code(self) -> int | None:
+        if not isinstance(self._raw, list) or len(self._raw) <= self._TYPE_CODE_POS:
+            return None
+        value = self._raw[self._TYPE_CODE_POS]
+        return value if type(value) is int else None
+
+    @property
+    def is_well_formed(self) -> bool:
+        return (
+            isinstance(self._raw, list)
+            and len(self._raw) >= self._MIN_LEN
+            and self.question is not None
+            and self.type_code is not None
+        )
 
 
 @dataclass(frozen=True)

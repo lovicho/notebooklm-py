@@ -804,7 +804,12 @@ class ResearchAPI:
         baseline: list[Source] | None
         baseline_ids: set[str] | None
         try:
-            baseline = await self._source_lister.list(notebook_id, strict=True)
+            # Research reconciliation needs every uniquely addressable row it
+            # can recover, even when GET_NOTEBOOK repeats one ID with drifted
+            # metadata. Envelope drift still raises in tolerant row mode; only
+            # row-level skips/first-occurrence dedup remain enabled so a known
+            # duplicate collision cannot disable the idempotency baseline.
+            baseline = await self._source_lister.list(notebook_id, strict=False)
             baseline_ids = {src.id for src in baseline}
         except (NetworkError, RPCError) as snapshot_exc:
             logger.warning(
@@ -925,7 +930,9 @@ class ResearchAPI:
 
                 if requested_urls_norm:
                     try:
-                        current = await self._source_lister.list(notebook_id, strict=True)
+                        # As above, verification must not turn a known duplicate
+                        # row collision into a blind non-idempotent retry.
+                        current = await self._source_lister.list(notebook_id, strict=False)
                         outcome = _reconcile_import_probe(
                             current=current,
                             baseline_ids=baseline_ids,

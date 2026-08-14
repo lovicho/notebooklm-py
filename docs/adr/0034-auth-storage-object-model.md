@@ -30,7 +30,7 @@ Extract by owned state/invariant, not headings. `A -> B` below means A may depen
 | `StorageLockManager` | Shared process default or injected isolate; owns raw-path locks, registry, OS gateway, warning-once | Same raw lock path serializes stores; only cookie CAS blocks; secure-parent prep stays operation-specific | Lock primitives/values only |
 | `CookiePersistence` | Per client; typed baselines by canonical path plus a legacy projection adapter | Baselines never cross profiles; outcome table alone advances order; closes with client | Store, snapshots, thread-dispatch seam |
 | `LegacyAccountMigrator` | Stateless service over store and legacy-context collaborator | Owns two-file resolve/promote/scrub and two-read anti-race sequence | Store/account values and dedicated context I/O leaf |
-| `LegacyPromotionScheduler` | Process-default canonical once-per-path registry, daemon workers, injected isolates | No 90-second write deadline in per-RPC reads; bounded exit drain on one shared budget, reported when incomplete | Store, migrator, thread/exit primitives |
+| `LegacyPromotionScheduler` | Process-default canonical active-path registry, daemon workers, injected isolates | No 90-second write deadline in per-RPC reads; concurrent reads share one worker; settled failures are retryable; bounded exit drain is reported when incomplete | Store, migrator, thread/exit primitives |
 | `LoadedAuth` | Closed `InlineLoadedAuth | FileLoadedAuth` value | File result always carries exact auth/store/baseline; inline carries neither store nor baseline | Loader outputs and immutable values |
 | `SessionSeedLoader` | Concrete per-attempt service | Initial `HEAL_THEN_NAME_ONLY`, recovery CAS, reread, post-heal baseline precede acquisition | Source, store, browser/recovery leaf, values |
 | `StoredAuthLoader` | Concrete per-load application service | Source/store/baseline remain paired through seed, acquisition, merge, result | Seed loader, sole `TokenAcquirer` protocol, migrator, scheduler, source/store/values |
@@ -180,9 +180,10 @@ two-read resolution, typed sanitization, only-if-absent promotion, and embed-bef
 Its closed results are `InBandAccount | LegacyAccount | NoAccount` and
 `Promoted | AlreadyInBand | NoLegacyRecord | PromotionFailed`. `LegacyAccountContext` alone owns
 `context.json` read/scrub, its 10-second `FileLock`, public atomic write, and error/log behavior.
-`LegacyPromotionScheduler` owns canonical process-once state, daemon workers/injection, and the
-exit drain on one shared, operator-tunable budget that warns when a worker
-outlives it (#2223); per-RPC reads never wait for the 90-second writer.
+`LegacyPromotionScheduler` owns active paths, daemon workers/injection, and the shared-budget exit
+drain warning (#2223); per-RPC reads never wait for the 90-second writer. Settled paths are retryable,
+and an in-band winner with a stale legacy sibling schedules scrub-only reconciliation, so lock
+failure and a stop between embed and scrub self-heal (#2228).
 `LoginProfileWriter` reconciles only after `APPLIED` and lock release using the literal raw-key rule;
 `AccountMetadataWriter` preserves write/clear-specific post-operation scrub and exception ordering.
 At that stage, `storage.py` remained the v0.x signature/result facade. Exact pins were storage 1,127,

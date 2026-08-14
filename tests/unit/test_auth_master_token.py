@@ -21,6 +21,7 @@ import pytest
 from notebooklm._auth import master_token as mt
 from notebooklm._auth.master_token import BootstrapOutcome, MasterTokenError
 from notebooklm._auth.master_token_bootstrap import MasterTokenBootstrapper
+from notebooklm.exceptions import MissingDependencyError
 
 _OAUTHLOGIN_RE = re.compile(r"^https://accounts\.google\.com/OAuthLogin")
 _MERGESESSION_RE = re.compile(r"^https://accounts\.google\.com/MergeSession")
@@ -511,5 +512,5 @@ def test_generate_android_id_is_16_hex():
 
 def test_missing_gpsoauth_raises_actionable(monkeypatch):
     monkeypatch.setitem(sys.modules, "gpsoauth", None)  # `import gpsoauth` -> ImportError
-    with pytest.raises(MasterTokenError, match=r"notebooklm-py\[headless\]"):
+    with pytest.raises(MissingDependencyError, match=r"notebooklm-py\[headless\]"):
         mt.exchange_master_token("e@x.com", "tok", "abc")

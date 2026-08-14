@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import pytest
 
-from notebooklm import ConversationTurnKey
+from notebooklm import ConversationTurnKey, MagicArtifactType
 from notebooklm._chat.wire import (
     StreamingChatParseResult,
     build_streaming_chat_request,
@@ -69,6 +69,7 @@ def _chunk(
     citations: list[Any] | None = None,
     is_final: bool = True,
     turn_key: list[Any] | None = None,
+    suggestions: list[list[Any]] | None = None,
 ) -> str:
     """Build one ``wrb.fr`` frame around a ``GenerateFreeFormStreamedResponse``.
 
@@ -82,7 +83,11 @@ def _chunk(
     type_info = [[], None, None, citations or [], marker] if response_doc else None
     if turn_key is None and conversation_id is not None:
         turn_key = [conversation_id, 123]
-    inner_json = json.dumps([[text, None, turn_key, None, type_info], None, None, None, is_final])
+    answer_row: list[Any] = [text, None, turn_key, None, type_info]
+    inner_data: list[Any] = [answer_row, None, None, None, is_final]
+    if suggestions is not None:
+        inner_data.append([suggestions])
+    inner_json = json.dumps(inner_data)
     return json.dumps([["wrb.fr", None, inner_json]])
 
 
@@ -346,6 +351,45 @@ def test_marked_answer_beats_longer_unmarked_text() -> None:
     result = parse_streaming_chat_response(_length_prefixed(unmarked, marked))
 
     assert result.answer == "Marked."
+
+
+def test_next_step_suggestions_decode_and_preserve_unknown_codes() -> None:
+    result = parse_streaming_chat_response(
+        _length_prefixed(
+            _chunk(
+                "Answer.",
+                suggestions=[
+                    ["What happens next?", 9],
+                    ["A future suggestion", 99],
+                    ["missing code"],
+                ],
+            )
+        )
+    )
+
+    assert [(step.question, step.type_code) for step in result.next_steps] == [
+        ("What happens next?", 9),
+        ("A future suggestion", 99),
+    ]
+    assert result.next_steps[0].kind is MagicArtifactType.CONVERSATIONAL_TEXT_CHIP
+    assert result.next_steps[1].kind is None
+
+
+def test_next_steps_are_collected_from_a_textless_chunk() -> None:
+    body = _length_prefixed(
+        _chunk(
+            "",
+            response_doc=False,
+            is_final=False,
+            suggestions=[["Try this follow-up", 9]],
+        ),
+        _chunk("Final answer.", suggestions=None),
+    )
+
+    result = parse_streaming_chat_response(body)
+
+    assert result.answer == "Final answer."
+    assert [step.question for step in result.next_steps] == ["Try this follow-up"]
 
 
 def test_unmarked_fallback_logs_under_chat_logger(caplog) -> None:

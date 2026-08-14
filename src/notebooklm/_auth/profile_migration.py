@@ -224,7 +224,7 @@ def _load_profile_pair_pure(
 
 
 class LegacyAccountMigrator:
-    """Own lossless account resolution and embed-before-scrub promotion."""
+    """Own lossless account resolution and retryable embed-before-scrub promotion."""
 
     def __init__(self, contexts: LegacyAccountContext | None = None) -> None:
         self._contexts = contexts if contexts is not None else LegacyAccountContext()
@@ -279,6 +279,21 @@ class LegacyAccountMigrator:
         result, _compatibility = self._resolve_with_projection(store)
         return result
 
+    def needs_reconciliation(self, storage_path: Path, resolution: ResolvedAccount) -> bool:
+        """Return whether a background promotion or stale-copy scrub is needed.
+
+        A legacy resolution always needs promotion. An in-band resolution still
+        needs reconciliation when ``context.json`` retains an account copy: the
+        process may have stopped after the durable write but before the privacy
+        scrub. Checking that second case makes the two-step migration self-heal
+        on the next read instead of leaving the email at rest forever (#2228).
+        """
+        if isinstance(resolution, LegacyAccount):
+            return True
+        return (
+            isinstance(resolution, InBandAccount) and self._contexts.read(storage_path) is not None
+        )
+
     def promote(self, store: ProfileStore) -> PromotionResult:
         if not store.path.exists():
             return NoLegacyRecord()
@@ -310,13 +325,18 @@ ThreadFactory: TypeAlias = Callable[..., threading.Thread]
 
 
 class LegacyPromotionScheduler:
-    """Own the process one-shot registry and detached promotion workers."""
+    """Own per-profile active-work deduplication and detached reconciliation."""
 
     _process_default_scheduler: ClassVar[LegacyPromotionScheduler]
 
     def __init__(self, thread_factory: ThreadFactory | None = None) -> None:
         self._registry_lock = threading.Lock()
-        self._once_paths: set[str] = set()
+        # Only an *active* worker suppresses another attempt. A completed,
+        # failed, or interrupted attempt must be eligible on the next read so
+        # 90-second lock contention and write-then-scrub interruption heal
+        # instead of becoming permanent process-lifetime loss (#2228).
+        self._active_paths: set[str] = set()
+        self._attempted_paths: set[str] = set()
         # Worker -> the profile whose promotion it owns, so an incomplete drain
         # can name the file that may not have been migrated.
         self._workers: dict[threading.Thread, Path] = {}
@@ -344,17 +364,25 @@ class LegacyPromotionScheduler:
                     store.path,
                 )
                 return False
-            if canonical in self._once_paths:
+            if canonical in self._active_paths:
                 return False
-            self._once_paths.add(canonical)
-            worker = self._thread_factory(
-                target=self._run,
-                args=(store, migrator),
-                name="notebooklm-account-promotion",
-                daemon=True,
-            )
-            self._workers[worker] = store.path
-            worker.start()
+            self._active_paths.add(canonical)
+            self._attempted_paths.add(canonical)
+            worker: threading.Thread | None = None
+            try:
+                worker = self._thread_factory(
+                    target=self._run,
+                    args=(store, migrator),
+                    name="notebooklm-account-promotion",
+                    daemon=True,
+                )
+                self._workers[worker] = store.path
+                worker.start()
+            except BaseException:
+                self._active_paths.discard(canonical)
+                if worker is not None:
+                    self._workers.pop(worker, None)
+                raise
             return True
 
     def _run(self, store: ProfileStore, migrator: LegacyAccountMigrator) -> None:
@@ -373,6 +401,7 @@ class LegacyPromotionScheduler:
         finally:
             with self._registry_lock:
                 self._workers.pop(threading.current_thread(), None)
+                self._active_paths.discard(str(store.ordering_key))
 
     def drain(self, timeout: float) -> bool:
         """Join outstanding promotion workers within one overall deadline.
@@ -434,7 +463,11 @@ class LegacyPromotionScheduler:
 
     def _scheduled_paths_for_tests(self) -> frozenset[str]:
         with self._registry_lock:
-            return frozenset(self._once_paths)
+            return frozenset(self._attempted_paths)
+
+    def _active_paths_for_tests(self) -> frozenset[str]:
+        with self._registry_lock:
+            return frozenset(self._active_paths)
 
     def _workers_for_tests(self) -> frozenset[threading.Thread]:
         with self._registry_lock:
@@ -444,7 +477,8 @@ class LegacyPromotionScheduler:
         with self._registry_lock:
             if self._workers:
                 raise RuntimeError("promotion workers must be drained before reset")
-            self._once_paths.clear()
+            self._active_paths.clear()
+            self._attempted_paths.clear()
             # Tests drain the process-default scheduler between cases; without
             # reopening it, every later test's promotion would be refused.
             self._drain_closed = False

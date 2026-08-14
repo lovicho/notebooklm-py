@@ -989,6 +989,54 @@ class TestAskServerAssignedConversationId:
         return json.loads(f_req[1])
 
     @pytest.mark.asyncio
+    async def test_create_session_hint_skips_hptbtc_and_reaches_ask_result(
+        self,
+        auth_tokens,
+        httpx_mock: HTTPXMock,
+        build_rpc_response,
+    ) -> None:
+        """CREATE's session binds the POST and replaces the redundant hPTbtc read (#2133)."""
+        session_id = "created-session-id"
+        httpx_mock.add_response(
+            url=re.compile(r".*batchexecute.*rpcids=khqZz.*"),
+            content=build_rpc_response(RPCMethod.GET_CONVERSATION_TURNS, [[]]).encode(),
+            method="POST",
+        )
+        answer_row = [
+            "Answer with suggestions.",
+            None,
+            [session_id, "turn-id", 7],
+            None,
+            [[], None, None, [], 1],
+        ]
+        inner_json = json.dumps([answer_row, None, None, None, True, [[["What next?", 9]]]])
+        chunk_json = json.dumps([["wrb.fr", None, inner_json]])
+        httpx_mock.add_response(
+            url=re.compile(r".*GenerateFreeFormStreamed.*"),
+            content=f")]}}'\n{len(chunk_json)}\n{chunk_json}\n".encode(),
+            method="POST",
+        )
+
+        async with NotebookLMClient(auth_tokens) as client:
+            client.notebooks._created_chat_session_ids["nb-created"] = session_id
+            result = await client.chat.ask(
+                "nb-created",
+                "Question?",
+                source_ids=["src-1"],
+            )
+
+        assert result.conversation_id == session_id
+        assert result.is_follow_up is False
+        assert [step.question for step in result.next_steps] == ["What next?"]
+        assert not any("rpcids=hPTbtc" in str(request.url) for request in httpx_mock.get_requests())
+        chat_request = next(
+            request
+            for request in httpx_mock.get_requests()
+            if "GenerateFreeFormStreamed" in str(request.url)
+        )
+        assert self._decode_params(chat_request)[4] == session_id
+
+    @pytest.mark.asyncio
     async def test_new_conversation_sends_null_conversation_id_in_request(
         self,
         auth_tokens,

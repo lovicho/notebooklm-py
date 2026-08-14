@@ -315,7 +315,7 @@ Language-aware generate commands (`audio`, `video`, `cinematic-video`, `report`,
 
 | Command | Arguments | Options | Example |
 |---------|-----------|---------|---------|
-| `list` | - | `--type [all\|audio\|video\|slide-deck\|quiz\|flashcard\|infographic\|data-table\|mind-map\|report]`, `--limit N`, `--no-truncate`, `--json` | `artifact list --type audio --limit 5` |
+| `list` | - | `--type [all\|audio\|video\|slide-deck\|quiz\|flashcard\|infographic\|data-table\|mind-map\|report\|fantasy-map\|file]`, `--limit N`, `--no-truncate`, `--json` | `artifact list --type audio --limit 5` |
 | `get <id>` | Artifact ID | `--json` | `artifact get art123` |
 | `get-prompt <id>` | Artifact ID | `--json` | `artifact get-prompt art123` |
 | `rename <id> <title>` | Artifact ID, title | `--json` | `artifact rename art123 "Title"` |
@@ -1397,7 +1397,7 @@ notebooklm artifact <list|get|get-prompt|rename|delete|export|poll|wait|retry|su
 
 | Subcommand | Required arguments | Options |
 |---|---|---|
-| `list` | (none) | `--type [all\|audio\|video\|slide-deck\|quiz\|flashcard\|infographic\|data-table\|mind-map\|report]`, `--limit N` (default: unlimited), `--no-truncate`, `--json` |
+| `list` | (none) | `--type [all\|audio\|video\|slide-deck\|quiz\|flashcard\|infographic\|data-table\|mind-map\|report\|fantasy-map\|file]`, `--limit N` (default: unlimited), `--no-truncate`, `--json` |
 | `get` | `ARTIFACT_ID` | `--json` |
 | `get-prompt` | `ARTIFACT_ID` | `--json` |
 | `rename` | `ARTIFACT_ID NEW_TITLE` | `--json` |

@@ -19,7 +19,14 @@ from ..rpc.types import (
     QUIZ_VARIANT,
     ArtifactStatus,
     ArtifactTypeCode,
+    ReportFormat,
     artifact_status_to_str,
+)
+from .artifact_content import (
+    ArtifactInfographic,
+    ArtifactMedia,
+    ArtifactSlide,
+    ArtifactUserState,
 )
 from .common import UnknownTypeWarning
 
@@ -47,6 +54,8 @@ class ArtifactType(str, Enum):
     INFOGRAPHIC = "infographic"
     SLIDE_DECK = "slide_deck"
     DATA_TABLE = "data_table"
+    FANTASY_MAP = "fantasy_map"
+    FILE = "file"
     UNKNOWN = "unknown"
 
 
@@ -58,9 +67,20 @@ _ARTIFACT_TYPE_CODE_MAP: dict[int, ArtifactType] = {
     2: ArtifactType.REPORT,
     3: ArtifactType.VIDEO,
     5: ArtifactType.MIND_MAP,
+    6: ArtifactType.FANTASY_MAP,
     7: ArtifactType.INFOGRAPHIC,
     8: ArtifactType.SLIDE_DECK,
     9: ArtifactType.DATA_TABLE,
+    10: ArtifactType.FILE,
+}
+
+
+_REPORT_KIND_MAP: dict[str, ReportFormat] = {
+    "Briefing Doc": ReportFormat.BRIEFING_DOC,
+    "Study Guide": ReportFormat.STUDY_GUIDE,
+    "Blog Post": ReportFormat.BLOG_POST,
+    "Concept Explanation": ReportFormat.CONCEPT_EXPLANATION,
+    "Custom Report": ReportFormat.CUSTOM,
 }
 
 
@@ -69,7 +89,8 @@ def _map_artifact_kind(artifact_type: int, variant: int | None) -> ArtifactType:
 
     Args:
         artifact_type: Raw ArtifactTypeCode integer from LIST_ARTIFACTS, or the
-            library's synthetic note-backed mind-map code.
+            genuine backend mind-map code also used for adapted note-backed
+            mind maps.
         variant: Optional variant code (e.g., for quiz vs flashcards vs
             interactive mind map).
 
@@ -84,7 +105,7 @@ def _map_artifact_kind(artifact_type: int, variant: int | None) -> ArtifactType:
             return ArtifactType.QUIZ
         elif variant == INTERACTIVE_MIND_MAP_VARIANT:
             # Interactive mind map: a studio artifact in the type-4 family,
-            # distinct from the note-backed mind map (synthetic type 5).
+            # distinct from the note-backed mind map (adapted as type 5).
             return ArtifactType.MIND_MAP
         else:
             key = (artifact_type, variant)
@@ -183,6 +204,26 @@ class Artifact:
     #: (#1925). ``None`` on prompt-position drift — the read is guarded so a
     #: reshaped payload never breaks ``artifacts.list``.
     generation_prompt: str | None = None
+    #: Every streaming/download URL returned for an audio or video artifact.
+    #: The historical :attr:`url` remains the preferred single URL.
+    media_urls: tuple[ArtifactMedia, ...] = ()
+    #: Audio/video duration in seconds, including the nanosecond fraction.
+    duration_seconds: float | None = None
+    #: Rendered slides with image dimensions, alt text, and full text.
+    slides: tuple[ArtifactSlide, ...] = ()
+    #: Rendered infographics with image dimensions, alt text, and full text.
+    infographics: tuple[ArtifactInfographic, ...] = ()
+    #: Backend report-kind label (for example ``"Concept Explanation"``).
+    #: Unknown labels are retained verbatim rather than collapsed.
+    report_kind: str | None = None
+    #: Source IDs used to generate this artifact, in backend order.
+    source_ids: tuple[str, ...] = ()
+    #: Last server-side modification time, distinct from :attr:`created_at`.
+    last_modified_at: datetime | None = None
+    #: Artifact revision etag, when returned by the listing RPC.
+    etag: str | None = None
+    #: Per-user audio resume or flashcard study state.
+    user_state: ArtifactUserState | None = None
 
     @property
     def kind(self) -> ArtifactType:
@@ -233,6 +274,15 @@ class Artifact:
             url=url,
             _variant=row.variant,
             generation_prompt=generation_prompt,
+            media_urls=row.media_urls,
+            duration_seconds=row.duration_seconds,
+            slides=row.slides,
+            infographics=row.infographics,
+            report_kind=row.report_kind,
+            source_ids=row.source_ids,
+            last_modified_at=row.last_modified_at,
+            etag=row.etag,
+            user_state=row.user_state,
         )
 
     @classmethod
@@ -356,8 +406,8 @@ class Artifact:
 
         Interactive mind maps are studio artifacts in the type-4 family
         (``type 4 / variant 4``), as opposed to note-backed mind maps which
-        the library surfaces with the synthetic type code 5. Both report
-        ``kind == ArtifactType.MIND_MAP``; this distinguishes the backing.
+        the library surfaces using the genuine backend mind-map code 5. Both
+        report ``kind == ArtifactType.MIND_MAP``; this distinguishes the backing.
         """
         return (
             self._artifact_type == ArtifactTypeCode.QUIZ.value
@@ -397,6 +447,18 @@ class Artifact:
         elif title_lower.startswith("blog post"):
             return "blog_post"
         return "report"
+
+    @property
+    def report_format(self) -> ReportFormat | None:
+        """Mapped :class:`ReportFormat` for a known backend report kind.
+
+        Unknown report-kind labels remain available on :attr:`report_kind` and
+        return ``None`` here, providing a graceful path for future backend
+        additions without pretending they are ``CUSTOM``.
+        """
+        if self._artifact_type != ArtifactTypeCode.REPORT.value or self.report_kind is None:
+            return None
+        return _REPORT_KIND_MAP.get(self.report_kind)
 
 
 class GenerationState(str, Enum):
