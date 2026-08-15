@@ -1,12 +1,12 @@
 """Shared cookie-jar enumeration helper.
 
-Contains :func:`_enumerate_one_jar` — probes one rookiepy cookie set
+Contains :func:`_enumerate_one_jar` — probes one rookie-cookies cookie set
 against ``?authuser=N`` to return tagged :class:`Account` records. Both
 the legacy single-jar path (``_read_browser_cookies``) and the Chromium
 multi-profile fan-out path call this helper.
 
-Also owns :data:`_ROOKIEPY_BROWSER_ALIASES` — the user-facing browser
-name → rookiepy function-name map (referenced by
+Also owns :data:`_ROOKIE_COOKIES_BROWSER_ALIASES` — the user-facing browser
+name → rookie-cookies function-name map (referenced by
 :mod:`.browser_accounts._read_browser_cookies` for the named-browser
 dispatch path).
 
@@ -54,8 +54,8 @@ from .outcomes import (
 if TYPE_CHECKING:
     from .io_seam import LoginIO
 
-# Maps user-facing browser names to rookiepy function names.
-_ROOKIEPY_BROWSER_ALIASES: dict[str, str] = {
+# Maps user-facing browser names to rookie-cookies function names.
+_ROOKIE_COOKIES_BROWSER_ALIASES: dict[str, str] = {
     "arc": "arc",
     "brave": "brave",
     "chrome": "chrome",
@@ -72,6 +72,7 @@ _ROOKIEPY_BROWSER_ALIASES: dict[str, str] = {
     "vivaldi": "vivaldi",
     "zen": "zen",
 }
+_ROOKIEPY_BROWSER_ALIASES = _ROOKIE_COOKIES_BROWSER_ALIASES
 
 
 def _enumerate_one_jar(
@@ -90,7 +91,7 @@ def _enumerate_one_jar(
     fan-out caller can route writes back to the right source.
 
     Args:
-        raw_cookies: rookiepy cookie dicts for one source.
+        raw_cookies: rookie-cookies cookie dicts for one source.
         browser_name: The browser the cookies came from (for error messages).
         browser_profile: Tag attached to each Account (``"Default"``,
             ``"Profile 1"``, ...) or ``None`` for the legacy single-jar path.

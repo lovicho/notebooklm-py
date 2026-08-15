@@ -117,8 +117,8 @@ Appendix-A2 races) is a symptom of that duplication. So the destination is:
 
 ```python
 @dataclass(frozen=True)
-class AuthTokens:                    # a BOOTSTRAP credential, not a live-state bag
-    initial_cookies: CookieJar       # immutable seed — read ONCE to open the client, never re-read
+class AuthTokens:  # a BOOTSTRAP credential, not a live-state bag
+    initial_cookies: CookieJar  # immutable seed — read ONCE to open the client, never re-read
     csrf_token: str
     session_id: str
     authuser: int

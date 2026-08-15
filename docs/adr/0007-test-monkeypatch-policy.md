@@ -46,6 +46,7 @@ Going forward, every test that needs to substitute a collaborator on `Session` o
 ```python
 from tests._fixtures import make_fake_core
 
+
 async def test_notebooks_list_returns_payload() -> None:
     fake = make_fake_core(rpc_call=AsyncMock(return_value=[fake_payload]))
     api = NotebooksAPI(fake.rpc_executor)

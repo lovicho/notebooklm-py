@@ -63,7 +63,11 @@ from .cookie_domains import (
     _resolve_optional_cookie_domains,
     _warn_missing_optional_domains,
 )
-from .cookie_jar import _ROOKIEPY_BROWSER_ALIASES, _enumerate_one_jar
+from .cookie_jar import (
+    _ROOKIE_COOKIES_BROWSER_ALIASES,
+    _ROOKIEPY_BROWSER_ALIASES,
+    _enumerate_one_jar,
+)
 from .cookie_writes import (
     _select_account,
     _select_refresh_account,
@@ -98,6 +102,7 @@ __all__ = [
     "_resolve_optional_cookie_domains",
     "_warn_missing_optional_domains",
     # Cookie jar enumeration.
+    "_ROOKIE_COOKIES_BROWSER_ALIASES",
     "_ROOKIEPY_BROWSER_ALIASES",
     "_enumerate_one_jar",
     # Browser-account discovery + reading.

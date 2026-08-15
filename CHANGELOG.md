@@ -1574,7 +1574,7 @@ Maintenance patch on the 0.7.x line. Backports two fixes from `main`
   from notebooklm import ResearchStatus
 
   result = await client.research.poll(nb_id)
-  if result.status == ResearchStatus.COMPLETED:   # also == "completed"
+  if result.status == ResearchStatus.COMPLETED:  # also == "completed"
       for source in result.sources:
           print(source.title, source.url)
 
@@ -1600,11 +1600,12 @@ Maintenance patch on the 0.7.x line. Backports two fixes from `main`
   `except TimeoutError` clauses keep catching every wait timeout unchanged.
   ```python
   from notebooklm import WaitTimeoutError
+
   try:
       await client.sources.wait_until_ready(nb_id, src_id)
       await client.artifacts.wait_for_completion(nb_id, task_id)
       await client.research.wait_for_completion(nb_id, research_task_id)
-  except WaitTimeoutError:   # was three separate / inconsistent timeout types
+  except WaitTimeoutError:  # was three separate / inconsistent timeout types
       ...
   ```
 - **`ResearchError` / `ResearchTimeoutError`.** The research domain gained a
@@ -2212,10 +2213,10 @@ Items that need attention when upgrading from 0.4.x. Full migration prose lives 
 - **`.kind` property** - Unified type access across `Source`, `Artifact`, and `SourceFulltext`:
   ```python
   # Works with both enum and string comparison
-  source.kind == SourceType.PDF        # True
-  source.kind == "pdf"                 # Also True
+  source.kind == SourceType.PDF  # True
+  source.kind == "pdf"  # Also True
   artifact.kind == ArtifactType.AUDIO  # True
-  artifact.kind == "audio"             # Also True
+  artifact.kind == "audio"  # Also True
   ```
 - **`UnknownTypeWarning`** - Warning (deduplicated) when API returns unknown type codes
 - **`SourceStatus.PREPARING`** - New status (5) for sources in upload/preparation phase

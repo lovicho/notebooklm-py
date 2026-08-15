@@ -194,8 +194,8 @@ def _assert_json_error_contract(result, case_id: str) -> dict:
     return payload
 
 
-def _auth_inspect_rookiepy_cookies() -> list[dict[str, object]]:
-    """Return a minimal valid rookiepy cookie list for account-discovery tests."""
+def _auth_inspect_rookie_cookies() -> list[dict[str, object]]:
+    """Return a minimal valid rookie-cookies cookie list for account-discovery tests."""
     return [
         {
             "domain": ".google.com",
@@ -785,14 +785,14 @@ def test_auth_inspect_unknown_browser(runner: CliRunner) -> None:
 
 def test_auth_inspect_network_failure(runner: CliRunner) -> None:
     """``auth inspect --json`` must envelope account-discovery transport errors."""
-    mock_rookiepy = MagicMock()
-    mock_rookiepy.chrome = MagicMock(return_value=_auth_inspect_rookiepy_cookies())
+    mock_rookie_cookies = MagicMock()
+    mock_rookie_cookies.chrome = MagicMock(return_value=_auth_inspect_rookie_cookies())
 
     async def fail_enumerate(*args, **kwargs):
         raise httpx.RequestError("offline")
 
     with (
-        patch.dict("sys.modules", {"rookiepy": mock_rookiepy}),
+        patch.dict("sys.modules", {"rookie_cookies": mock_rookie_cookies}),
         patch.object(chromium_profiles, "discover_chromium_profiles", return_value=[]),
         patch.object(auth_module, "enumerate_accounts", new=fail_enumerate),
     ):
