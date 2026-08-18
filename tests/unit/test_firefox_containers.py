@@ -820,6 +820,20 @@ class TestRowToRookieCookiesDict:
         result = _row_to_rookie_cookies_dict(row, expiry_in_ms=True)
         assert result["expires"] == 9_999_999_999
 
+    def test_zero_expiry_is_session_cookie_not_epoch(self):
+        # moz_cookies.expiry == 0 is Firefox's sentinel for "session cookie,
+        # no persistent expiry" (matching rookie_cookies' own 0 -> None
+        # mapping). Passing 0 through as a dated value makes it read as
+        # 1970-01-01 -- i.e. permanently expired -- downstream.
+        row = (".google.com", "SID", "v", "/", 0, 1, 0, 0)
+        result = _row_to_rookie_cookies_dict(row, expiry_in_ms=False)
+        assert result["expires"] is None
+
+    def test_zero_expiry_is_session_cookie_regardless_of_ms_schema(self):
+        row = (".google.com", "SID", "v", "/", 0, 1, 0, 0)
+        result = _row_to_rookie_cookies_dict(row, expiry_in_ms=True)
+        assert result["expires"] is None
+
     def test_none_values_get_defaults(self):
         row = (None, None, None, None, None, 0, 0, None)
         result = _row_to_rookie_cookies_dict(row, expiry_in_ms=False)

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import configparser
 import json
+import logging
 import re
 import shutil
 import sqlite3
@@ -47,6 +48,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 # ``"none"`` is a sentinel for the no-container default. An ``int`` selects a
 # specific container by ``userContextId``. ``None`` means "no filter at all"
@@ -352,17 +355,26 @@ def _row_to_rookie_cookies_dict(row: tuple[Any, ...], *, expiry_in_ms: bool) -> 
     Columns match the SELECT in :func:`_select_for_container` exactly:
     ``(host, name, value, path, expiry, isSecure, isHttpOnly, sameSite)``.
 
-    rookie-cookies' Firefox path emits the same shape, so the resulting list
+    The output keys match rookie-cookies' Firefox row shape, so the result
     can flow into :func:`notebooklm.auth.convert_rookiepy_cookies_to_storage_state`
-    unchanged.
+    unchanged, but the ``expires`` *value* is not a blind passthrough:
+    ``moz_cookies.expiry`` uses ``0`` as Firefox's "session cookie, no
+    persistent expiry" sentinel (rookie-cookies maps this to ``None``), and
+    schema version >= 16 stores it in milliseconds rather than seconds.
     """
     host, name, value, path, expiry, is_secure, is_http_only, same_site = row
-    if expiry_in_ms and expiry is not None:
+    if expiry == 0:
+        expiry = None
+    elif expiry_in_ms and expiry is not None:
         try:
             expiry = expiry // 1000
         except TypeError:
-            # best-effort: cookie expiry is non-numeric; leave as-is.
-            pass
+            logger.warning(
+                "Firefox cookie %r on %r has non-numeric expiry %r; leaving as-is",
+                name,
+                host,
+                expiry,
+            )
     return {
         "domain": host or "",
         "name": name or "",

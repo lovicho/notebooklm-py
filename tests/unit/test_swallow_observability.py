@@ -305,9 +305,11 @@ def _file_contains_best_effort_after_except(filepath: Path, except_line: int) ->
 # best-effort rewrite-from-scratch) was retired — that branch now
 # uses :func:`notebooklm._atomic_io.atomic_update_json` with explicit
 # JSONDecodeError handling that re-runs the mutator on an empty dict.
+# Note: the previous ``cli/_firefox_containers.py:364`` site
+# (``_row_to_rookie_cookies_dict``'s non-numeric-expiry branch) is no longer
+# silent — it now logs a warning instead of passing.
 _SILENT_SITES = [
     ("cli/_firefox_containers.py", 133),
-    ("cli/_firefox_containers.py", 364),
     ("notebooklm_cli.py", 66),
 ]
 

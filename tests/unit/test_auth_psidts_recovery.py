@@ -241,7 +241,12 @@ class TestPsidtsExpiryGate:
     """
 
     _PAST = 1_000_000_000  # 2001-09-09, comfortably in the past
-    _FUTURE = 99_999_999_999  # year 5138, comfortably in the future
+    # Year 2100, comfortably in the future. Matches the project-wide
+    # "far future" sentinel used elsewhere (e.g. tests/unit/cli/_session_helpers.py)
+    # rather than a value that would exceed cookie_semantics.py's
+    # millisecond-plausibility bound (_MAX_PLAUSIBLE_EXPIRY_SECONDS, year 3000)
+    # and get misread as a millisecond timestamp.
+    _FUTURE = 4_102_444_800
 
     @staticmethod
     def _with_psidts(*, expires) -> list[dict]:
@@ -734,7 +739,7 @@ class TestPsidtsExpiryGate:
                     "value": "rotated",
                     "domain": ".google.com",
                     "path": "/",
-                    "expires": 99_999_999_999,
+                    "expires": 4_102_444_800,
                 },
             ],
         )
@@ -975,7 +980,7 @@ class TestRecoveryConcurrentCasRejection:
             "value": "sibling_fresh_value",
             "domain": ".google.com",
             "path": "/",
-            "expires": 99_999_999_999,  # comfortably in the future
+            "expires": 4_102_444_800,  # comfortably in the future
         }
         self._install_concurrent_write(
             httpx_mock,
@@ -1499,7 +1504,7 @@ class TestMalformedExpiresAcrossLoaders:
                     "value": "fresh",
                     "domain": ".google.com",
                     "path": "/",
-                    "expires": 99_999_999_999,
+                    "expires": 4_102_444_800,
                 }
             )
         rows.append(
@@ -1792,7 +1797,7 @@ class TestEdgeCases:
                 "value": "healed_by_sibling",
                 "domain": ".google.com",
                 "path": "/",
-                "expires": 99_999_999_999,
+                "expires": 4_102_444_800,
             }
         ]
         _stage_storage_reads(

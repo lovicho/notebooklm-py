@@ -492,7 +492,7 @@ def test_phase_13_caller_cleanup_modules_are_measured_exactly() -> None:
         "cli/services/login/browser_accounts.py": 365,
         "cli/services/login/chromium_accounts.py": 268,
         "cli/services/login/cookie_domains.py": 155,
-        "cli/services/login/cookie_jar.py": 245,
+        "cli/services/login/cookie_jar.py": 244,
         "cli/services/login/master_token.py": 152,
         "cli/services/login/profile_targets.py": 150,
         "cli/services/playwright_login.py": 542,

@@ -105,6 +105,34 @@ class TestConstructorEquivalence:
         assert next(iter(jar)).expires is None
         assert jar.to_storage_state()["cookies"][0]["expires"] == -1
 
+    def test_firefox_millisecond_expiry_rescaled_through_the_full_pipeline(self) -> None:
+        """A schema-16 Firefox millisecond expiry survives conversion as seconds.
+
+        ``rookie_cookies.firefox()``/``any_browser()`` (the unscoped
+        ``--browser-cookies firefox``/``auto`` path) hand back Firefox 142+
+        expiry values in raw milliseconds with no unit tag —
+        ``_firefox_containers.py``'s schema-version correction only covers the
+        container-bypass path. Without a rescale, a live cookie's ms expiry
+        reads as a date thousands of years out, so it is never treated as
+        expired downstream. Pins that the full
+        ``convert_rookiepy_cookies_to_storage_state`` conversion catches this
+        regardless of which Firefox path the row came from.
+        """
+        near_term_seconds = 1_800_000_000  # a plausible near-term expiry
+        rows = [
+            {
+                "name": "__Secure-1PSIDTS",
+                "value": "psidts",
+                "domain": ".google.com",
+                "path": "/",
+                "expires": near_term_seconds * 1000,
+                "secure": True,
+                "http_only": True,
+            }
+        ]
+        legacy_state = _auth_cookies.convert_rookiepy_cookies_to_storage_state(rows)
+        assert legacy_state["cookies"][0]["expires"] == near_term_seconds
+
     def test_dated_minus_one_is_not_a_session_cookie(self) -> None:
         """``-1.0`` / ``"-1"`` are dated values, not the session sentinel.
 

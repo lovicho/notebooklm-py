@@ -4,7 +4,7 @@ This package is split across multiple modules to keep every
 implementation module ≤ 400 LOC, eliminate the
 ``_read_browser_cookies`` / ``_enumerate_browser_accounts`` circular-
 dispatch trap, and document the leaf-ward import DAG (chromium-family
-and firefox-family modules share ``cookie_jar`` + ``rookiepy_errors``
+and firefox-family modules share ``cookie_jar`` + ``rookie_cookies_errors``
 helpers; ``browser_accounts`` sits above both as the dispatcher;
 ``refresh`` is the top of the graph).
 
@@ -65,7 +65,6 @@ from .cookie_domains import (
 )
 from .cookie_jar import (
     _ROOKIE_COOKIES_BROWSER_ALIASES,
-    _ROOKIEPY_BROWSER_ALIASES,
     _enumerate_one_jar,
 )
 from .cookie_writes import (
@@ -103,7 +102,6 @@ __all__ = [
     "_warn_missing_optional_domains",
     # Cookie jar enumeration.
     "_ROOKIE_COOKIES_BROWSER_ALIASES",
-    "_ROOKIEPY_BROWSER_ALIASES",
     "_enumerate_one_jar",
     # Browser-account discovery + reading.
     "_enumerate_browser_accounts",

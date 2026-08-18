@@ -16,7 +16,7 @@ the caller sees a uniform outcome shape on the auth-inspect path.
 
 Imports from :mod:`.chromium_accounts`, :mod:`.firefox_accounts`,
 :mod:`.cookie_jar` (``_enumerate_one_jar`` + the
-``_ROOKIEPY_BROWSER_ALIASES`` map), :mod:`.rookiepy_errors`, and
+``_ROOKIE_COOKIES_BROWSER_ALIASES`` map), :mod:`.rookie_cookies_errors`, and
 :mod:`.cookie_domains` (the "auto" + named-alias branch of
 ``_read_browser_cookies`` builds its own domain list).
 """
@@ -226,7 +226,7 @@ def _read_browser_cookies(
 
     Args:
         browser_name: ``"auto"`` to use ``rookiepy.load()``, a specific
-            browser alias from :data:`_ROOKIEPY_BROWSER_ALIASES`, or
+            browser alias from :data:`_ROOKIE_COOKIES_BROWSER_ALIASES`, or
             ``"chrome::<profile-name-or-directory>"`` for a single Chromium
             user-data profile, or
             ``"firefox::<container-name>"`` (or ``"firefox::none"``) to
@@ -252,7 +252,7 @@ def _read_browser_cookies(
         :class:`.outcomes.UnsupportedBrowser` (rookiepy lacks the
         platform-specific function), :class:`.outcomes.CookieValidationFailure`
         (rookiepy not installed, empty Firefox container spec, or read
-        failure surfaced by :func:`_handle_rookiepy_error`).
+        failure surfaced by :func:`_handle_rookie_cookies_error`).
     """
     io = resolve_login_io(io)
     # Firefox container syntax: ``firefox::<name>`` or ``firefox::none``.

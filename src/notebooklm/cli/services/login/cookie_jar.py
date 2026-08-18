@@ -62,9 +62,9 @@ _ROOKIE_COOKIES_BROWSER_ALIASES: dict[str, str] = {
     "chromium": "chromium",
     "edge": "edge",
     "firefox": "firefox",
-    "ie": "ie",
+    "ie": "internet_explorer",
     "librewolf": "librewolf",
-    "octo": "octo",
+    "octo": "octo_browser",
     "opera": "opera",
     "opera-gx": "opera_gx",
     "opera_gx": "opera_gx",
@@ -72,7 +72,6 @@ _ROOKIE_COOKIES_BROWSER_ALIASES: dict[str, str] = {
     "vivaldi": "vivaldi",
     "zen": "zen",
 }
-_ROOKIEPY_BROWSER_ALIASES = _ROOKIE_COOKIES_BROWSER_ALIASES
 
 
 def _enumerate_one_jar(
