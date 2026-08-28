@@ -2,15 +2,16 @@
 
 This module provides a single entry point — :func:`make_fake_core` — that
 returns a ``FakeSession`` instance shaped to satisfy the **shared
-capability Protocols** in :mod:`notebooklm._runtime.contracts`
-(``RpcCaller``, ``LoopGuard``, ``Kernel``) plus the single-consumer
+capability Protocols** in :mod:`notebooklm._web.contracts`
+(``RpcCaller``, ``Kernel``) and :mod:`notebooklm._runtime.contracts`
+(``LoopGuard``), plus the single-consumer
 Protocols inlined into their owning feature modules in issue #1327
-(``AuthMetadata`` in ``notebooklm._source.upload``,
+(``AuthMetadata`` in ``notebooklm._web.sources.upload``,
 ``OperationScopeProvider`` in ``notebooklm._artifact.polling``). Feature APIs that
 need more than one capability take their direct collaborators by
-keyword-only constructor argument (``ChatAPI`` in ``notebooklm._chat.api``,
+keyword-only constructor argument (``ChatAPI`` in ``notebooklm._chat``,
 ``ArtifactsAPI`` in ``_artifacts.py``, ``SourceUploadPipeline`` in
-``notebooklm._source.upload``); the feature-local composite Protocols
+``notebooklm._web.sources.upload``); the feature-local composite Protocols
 ``ArtifactsRuntime`` and ``UploadRuntime`` (and their adapter
 dataclasses) were retired once it was clear they only hid three stable
 collaborators with one production satisfier. (``ChatRuntime`` was
@@ -24,7 +25,7 @@ feature API. Both attributes are wired to the same underlying mock so
 ``fake.rpc_call.assert_awaited`` and
 ``fake.rpc_executor.rpc_call.assert_awaited`` observe the same calls.
 Tests pass the result to a sub-client constructor (e.g.
-``NotebooksAPI(fake.rpc_executor)``) instead of constructing a real
+``WebNotebooksAPI(fake.rpc_executor)``) instead of constructing a real
 client/runtime stack and mutating its attributes after the fact.
 
 Phase 7 (refactor-history.md §Migration Plan step 10) deleted the broad
@@ -106,7 +107,7 @@ def make_fake_core(**overrides: Any) -> FakeSession:
     Example::
 
         fake = make_fake_core(rpc_call=AsyncMock(return_value=[payload]))
-        api = NotebooksAPI(fake.rpc_executor)
+        api = WebNotebooksAPI(fake.rpc_executor)
         result = await api.list()
         fake.rpc_executor.rpc_call.assert_awaited_once()
     """

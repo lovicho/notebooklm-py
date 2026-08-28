@@ -37,7 +37,7 @@ import httpx
 import pytest
 
 from notebooklm import NotebookLMClient, ServerError
-from notebooklm._idempotency import IDEMPOTENCY_REGISTRY, IdempotencyPolicy
+from notebooklm._web.policy import IDEMPOTENCY_REGISTRY, IdempotencyPolicy
 from notebooklm.rpc import RPCMethod
 from notebooklm.types import AskResult, ChatReference
 from tests._fixtures.kernel_test_helpers import install_http_client_for_test
@@ -125,7 +125,7 @@ def test_create_note_plain_variant_classified_non_idempotent() -> None:
 def test_create_note_saved_from_chat_variant_classified_non_idempotent() -> None:
     """The ``"saved_from_chat"`` variant is NON_IDEMPOTENT_NO_RETRY.
 
-    Used by ``_chat.notes.save_chat_answer_as_note`` (issue #660). The
+    Used by ``_web.chat.save_chat_answer_as_note`` (issue #660). The
     7-element params carry rich content; title-based probes break under
     server-side smart-title generation, and chat-answer fingerprints are
     not unique enough for safe dedupe.

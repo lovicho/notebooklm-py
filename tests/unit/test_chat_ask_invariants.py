@@ -5,7 +5,7 @@ These assertions pin down the new contract:
 - ``ask`` uses ``self._reqid.next_reqid()`` for the URL ``_reqid`` param (the
   ``_reqid_counter`` property + deprecation gesture were retired in the
   session-shrink arc; this test now guards against any new
-  ``DeprecationWarning`` escaping ``_chat/api.py``).
+  ``DeprecationWarning`` escaping ``_chat.py``).
 - ``authuser=`` is present on the chat URL when ``account_email`` is set on
   the auth tokens, mirroring the batchexecute path in
   ``RpcExecutor.build_url``. Previously omitted entirely on the chat endpoint.
@@ -32,8 +32,9 @@ import pytest
 
 from notebooklm import NotebookLMClient
 from notebooklm._chat import ChatAPI
-from notebooklm._request_types import AuthSnapshot
 from notebooklm._runtime.config import DEFAULT_CHAT_RESPONSE_MAX_BYTES
+from notebooklm._web.chat import WebChatAPI
+from notebooklm._web.transport.request_types import AuthSnapshot
 from notebooklm.auth import AuthTokens
 from notebooklm.exceptions import ChatError
 from tests._helpers.client_factory import build_client_shell_for_tests
@@ -122,11 +123,12 @@ class TestChatTimeoutRouting:
                 )
             )
         )
-        chat = ChatAPI(
+        chat = WebChatAPI(
             rpc=SimpleNamespace(rpc_call=AsyncMock(return_value=[[]])),
             transport=transport,
             reqid=SimpleNamespace(next_reqid=AsyncMock(return_value=100000)),
             loop_guard=SimpleNamespace(assert_bound_loop=lambda: None),
+            notebooks=SimpleNamespace(get_source_ids=AsyncMock(return_value=[])),
             chat_timeout=45.0,
             chat_response_max_bytes=987654,
         )
@@ -256,7 +258,7 @@ class TestChatReqid:
     async def test_ask_uses_next_reqid_no_deprecation_warning(
         self, httpx_mock, mock_get_conversation_id
     ):
-        """No ``DeprecationWarning`` is emitted by ``_chat/api.py`` during ask()."""
+        """No ``DeprecationWarning`` is emitted by ``_chat.py`` during ask()."""
         auth = AuthTokens(
             cookies={"SID": "x"},
             csrf_token="csrf",
@@ -281,10 +283,10 @@ class TestChatReqid:
             if issubclass(w.category, DeprecationWarning)
             and "_reqid_counter" in str(w.message)
             and "_chat" in str(w.filename)
-            and "api.py" in str(w.filename)
+            and "_chat.py" in str(w.filename)
         ]
         assert chat_dep_warnings == [], (
-            f"_chat/api.py must not emit _reqid_counter DeprecationWarning; "
+            f"_chat.py must not emit _reqid_counter DeprecationWarning; "
             f"got: {[(str(w.filename), str(w.message)) for w in chat_dep_warnings]}"
         )
 
@@ -411,18 +413,19 @@ class TestChatRefreshRetry:
             )
 
             # Wave 8 of session-decoupling (ADR-0014 Rule 2 Corollary):
-            # ``ChatAPI`` takes its four direct collaborators by keyword
+            # ``ChatAPI`` takes its five direct collaborators by keyword
             # arg. Wired here from the real ``Session`` under test so the
             # refresh path exercises the production transport/rpc/reqid
             # collaborators end-to-end.
             # Stage B1 PR 2 deleted the Stage A accessors
             # (``Session.session_transport`` / ``Session.collaborators``);
             # read the private slots directly instead.
-            api = ChatAPI(
+            api = WebChatAPI(
                 rpc=core._rpc_executor,
                 transport=core._composed.transport,
                 reqid=core._collaborators.reqid,
                 loop_guard=core._collaborators.lifecycle,
+                notebooks=SimpleNamespace(get_source_ids=AsyncMock(return_value=[])),
             )
             result = await api.ask("nb_x", "Q?", source_ids=["s1"])
 
@@ -533,11 +536,12 @@ class TestChatNewConversationLocks:
 
         loop_guard = MagicMock()
         loop_guard.assert_bound_loop = MagicMock()
-        return ChatAPI(
+        return WebChatAPI(
             rpc=MagicMock(),
             transport=MagicMock(),
             reqid=MagicMock(),
             loop_guard=loop_guard,
+            notebooks=MagicMock(),
         )
 
     def test_same_notebook_reuses_new_conversation_lock(self):
@@ -558,7 +562,7 @@ class TestChatNewConversationLocks:
 
     @pytest.mark.asyncio
     async def test_failed_post_ask_hptbtc_lookup_releases_new_conversation_lock(self):
-        class HptbtcFailureChatAPI(ChatAPI):
+        class HptbtcFailureChatAPI(WebChatAPI):
             def __init__(self, *, lookup_results: list[str | ChatError], **kwargs: Any) -> None:
                 super().__init__(**kwargs)
                 self._lookup_results = iter(lookup_results)
@@ -591,6 +595,7 @@ class TestChatNewConversationLocks:
             ),
             reqid=SimpleNamespace(next_reqid=AsyncMock(side_effect=[100000, 200000])),
             loop_guard=SimpleNamespace(assert_bound_loop=lambda: None),
+            notebooks=SimpleNamespace(get_source_ids=AsyncMock(return_value=[])),
             lookup_results=[ChatError("hPTbtc lookup failed"), "conv-after-failure"],
         )
         new_conversation_lock = chat._get_new_conversation_lock("nb-1")
@@ -624,11 +629,12 @@ class TestBuildChatRequestFactory:
         # are touched, so they are bare ``MagicMock()`` placeholders.
         from unittest.mock import MagicMock
 
-        return ChatAPI(
+        return WebChatAPI(
             rpc=MagicMock(),
             transport=MagicMock(),
             reqid=MagicMock(),
             loop_guard=MagicMock(),
+            notebooks=MagicMock(),
         )
 
     def test_build_request_omits_authuser_for_default_profile(self):

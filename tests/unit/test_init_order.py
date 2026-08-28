@@ -26,6 +26,8 @@ import pytest
 
 from notebooklm._artifacts import ArtifactsAPI
 from notebooklm._notes import NotesAPI
+from notebooklm._web.artifacts import WebArtifactsAPI
+from notebooklm._web.notes import WebNotesAPI
 from notebooklm.auth import AuthTokens
 from notebooklm.client import NotebookLMClient
 from tests._fixtures.fake_core import FakeSession, make_fake_core
@@ -146,7 +148,7 @@ def test_session_wires_seam_attributes_for_executor_and_chain() -> None:
 
 def test_kernel_http_client_is_read_only_property() -> None:
     """``Kernel.http_client`` MUST have no setter."""
-    from notebooklm._kernel import Kernel
+    from notebooklm._web.transport.kernel import Kernel
 
     descriptor = Kernel.__dict__["http_client"]
     assert isinstance(descriptor, property)
@@ -159,11 +161,11 @@ def test_kernel_http_client_is_read_only_property() -> None:
 
 def test_phase8_source_listing_service_name_and_facade_wiring_are_current() -> None:
     """Downstream notebook-metadata work depends on the finalized lister name."""
-    from notebooklm._source.listing import SourceLister
-    from notebooklm._sources import SourcesAPI
+    from notebooklm._web.sources import WebSourcesAPI
+    from notebooklm._web.sources.listing import SourceLister
 
     core = MagicMock()
-    api = SourcesAPI(core, uploader=MagicMock())
+    api = WebSourcesAPI(core, uploader=MagicMock())
 
     assert isinstance(api._lister, SourceLister)
 
@@ -181,7 +183,9 @@ def test_phase7_artifact_download_patch_seams_are_current() -> None:
     import notebooklm._artifact.downloads as artifact_downloads
     import notebooklm._artifact.formatters as artifact_formatters
     import notebooklm._artifacts as artifacts
-    import notebooklm._mind_map as mind_map
+    import notebooklm._web.artifact.downloads as web_downloads
+    import notebooklm._web.artifact.table as artifact_table
+    import notebooklm._web.mind_maps as mind_map
     import notebooklm.auth as auth
 
     tree = ast.parse((SRC_ROOT / "_artifact" / "downloads.py").read_text(encoding="utf-8"))
@@ -205,12 +209,27 @@ def test_phase7_artifact_download_patch_seams_are_current() -> None:
     assert artifacts._mind_map is mind_map
     assert not hasattr(artifact_downloads, "_artifact_seams")
     assert artifact_downloads.load_httpx_cookies is auth.load_httpx_cookies
-    assert artifact_downloads._extract_app_data is artifact_formatters._extract_app_data
+    assert web_downloads._extract_app_data is artifact_formatters._extract_app_data
     assert (
-        artifact_downloads._format_interactive_content
-        is artifact_formatters._format_interactive_content
+        web_downloads._format_interactive_content is artifact_formatters._format_interactive_content
     )
-    assert artifact_downloads._parse_data_table is artifact_formatters._parse_data_table
+    assert web_downloads._parse_data_table is artifact_table._parse_data_table
+
+
+def test_artifact_package_lazy_web_compatibility_exports_keep_identity() -> None:
+    """Moved package-level service exports stay lazy and preserve object identity."""
+    import notebooklm._artifact as artifact_package
+    from notebooklm._web.artifact import generation, listing
+    from notebooklm._web.artifact.downloads import ArtifactDownloadService
+    from notebooklm._web.params import artifacts as payloads
+
+    assert artifact_package.ArtifactDownloadService is ArtifactDownloadService
+    assert artifact_package.ArtifactListingService is listing.ArtifactListingService
+    assert artifact_package.find_artifact_row_by_id is listing.find_artifact_row_by_id
+    assert artifact_package.iter_artifact_rows is listing.iter_artifact_rows
+    assert artifact_package.generation is generation
+    assert artifact_package.listing is listing
+    assert artifact_package.payloads is payloads
 
 
 def test_notebooks_api_has_no_hidden_sources_api_runtime_dependency() -> None:
@@ -258,13 +277,13 @@ def test_client_constructs_sources_before_notebooks_and_injects_sources_api() ->
     sources_value = _assignment_value(sources_assignment)
     assert isinstance(sources_value, ast.Call)
     assert isinstance(sources_value.func, ast.Name)
-    assert sources_value.func.id == "SourcesAPI"
+    assert sources_value.func.id == "WebSourcesAPI"
 
     notebooks_value = _assignment_value(notebook_assignment)
     assert isinstance(notebooks_value, ast.Call)
     notebooks_call = notebooks_value
     assert isinstance(notebooks_call.func, ast.Name)
-    assert notebooks_call.func.id == "NotebooksAPI"
+    assert notebooks_call.func.id == "WebNotebooksAPI"
 
     assert (
         _owned_attr_name(_call_keyword_value(notebooks_call, "sources_api"), owner="client")
@@ -293,11 +312,11 @@ def test_artifacts_constructible_without_notes_api(mock_auth: AuthTokens) -> Non
     docs/refactor-history.md Step 4) — the parameter was removed in favor of
     explicit ``mind_maps`` + ``note_service`` (Phase 5). The mind-map
     decoupling is now structural."""
-    from notebooklm._mind_map import NoteBackedMindMapService
-    from notebooklm._note_service import NoteService
+    from notebooklm._web.mind_maps import NoteBackedMindMapService
+    from notebooklm._web.notes import NoteService
 
     core = MagicMock()
-    api = ArtifactsAPI(
+    api = WebArtifactsAPI(
         rpc=core,
         drain=core,
         lifecycle=core,
@@ -314,16 +333,16 @@ def test_artifacts_constructible_without_notes_api(mock_auth: AuthTokens) -> Non
 def test_artifacts_rejects_legacy_notes_api_kwarg(mock_auth: AuthTokens) -> None:
     """The legacy ``notes_api=`` kwarg was removed in Phase 3
     (docs/refactor-history.md Step 4). Passing it must raise ``TypeError``."""
-    from notebooklm._mind_map import NoteBackedMindMapService
-    from notebooklm._note_service import NoteService
+    from notebooklm._web.mind_maps import NoteBackedMindMapService
+    from notebooklm._web.notes import NoteService
 
     core = MagicMock()
-    notes = NotesAPI(
+    notes = WebNotesAPI(
         notes=MagicMock(spec=NoteService),
         mind_maps=MagicMock(spec=NoteBackedMindMapService),
     )
     with pytest.raises(TypeError):
-        ArtifactsAPI(  # type: ignore[call-arg]
+        WebArtifactsAPI(  # type: ignore[call-arg]
             core,
             notes_api=notes,
             notebooks=MagicMock(),
@@ -339,13 +358,13 @@ def test_artifacts_before_notes_construction_order(mock_auth: AuthTokens) -> Non
     dependency on each other; this test pins that building either one
     first still yields working APIs.
     """
-    from notebooklm._mind_map import NoteBackedMindMapService
-    from notebooklm._note_service import NoteService
+    from notebooklm._web.mind_maps import NoteBackedMindMapService
+    from notebooklm._web.notes import NoteService
 
     core = MagicMock()
 
     def _make_artifacts() -> ArtifactsAPI:
-        return ArtifactsAPI(
+        return WebArtifactsAPI(
             rpc=core,
             drain=core,
             lifecycle=core,
@@ -354,8 +373,8 @@ def test_artifacts_before_notes_construction_order(mock_auth: AuthTokens) -> Non
             note_service=MagicMock(spec=NoteService),
         )
 
-    def _make_notes() -> NotesAPI:
-        return NotesAPI(
+    def _make_notes() -> WebNotesAPI:
+        return WebNotesAPI(
             notes=MagicMock(spec=NoteService),
             mind_maps=MagicMock(spec=NoteBackedMindMapService),
         )
@@ -430,12 +449,12 @@ def _build_artifacts_with_real_mind_map_service(core: FakeSession) -> ArtifactsA
     instances backed by ``core.rpc_executor`` so the mind-map flow
     exercises the live RPC callbacks against the canned executor.
     """
-    from notebooklm._mind_map import NoteBackedMindMapService
-    from notebooklm._note_service import NoteService
+    from notebooklm._web.mind_maps import NoteBackedMindMapService
+    from notebooklm._web.notes import NoteService
 
     note_service = NoteService(core.rpc_executor)
     mind_maps = NoteBackedMindMapService(note_service)
-    return ArtifactsAPI(
+    return WebArtifactsAPI(
         rpc=core.rpc_executor,
         drain=core,
         lifecycle=core,

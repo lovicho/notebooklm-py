@@ -1,6 +1,6 @@
 """Tests for the ``POLL_RESEARCH`` row adapters (issue #1501).
 
-These adapters centralise the positional knowledge ``_research_task_parser.py``
+These adapters centralise the positional knowledge ``_web/rows/research_task.py``
 used to open-code as scattered single-level subscripts (``result[0]``,
 ``src[1]``, ``bundle[0]``, ``task_info[1][0]`` …). The tests cover three layers:
 
@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from notebooklm._row_adapters import research as research_adapters
-from notebooklm._row_adapters.research import (
+from notebooklm._web.rows import research as research_adapters
+from notebooklm._web.rows.research import (
     ImportedSourceRow,
     ResearchResultRow,
     ResearchStartRow,

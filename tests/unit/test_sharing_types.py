@@ -6,6 +6,7 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from notebooklm import NotebookLMClient
+from notebooklm.exceptions import UnknownRPCMethodError
 from notebooklm.rpc import RPCMethod
 from notebooklm.rpc.types import ShareAccess, SharePermission, ShareViewLevel
 from notebooklm.types import SharedUser, ShareStatus
@@ -36,6 +37,12 @@ class TestShareStatusCapacityAndPolicyFields:
     capture ``tests/fixtures/rpc_golden/GET_SHARE_STATUS.json`` is a real
     three-element response.
     """
+
+    @pytest.mark.parametrize("data", [True, 1, 1.2])
+    def test_truthy_non_list_preserves_structured_decode_error(self, data: object) -> None:
+        """The row extraction preserves the legacy first-slot decode ordering."""
+        with pytest.raises(UnknownRPCMethodError):
+            ShareStatus.from_api_response(data, "nb-1")  # type: ignore[arg-type]
 
     def test_decodes_both_fields_from_the_captured_row(self):
         """The live 8-slot shape yields the real cap and the real policy gate."""
@@ -167,23 +174,23 @@ class TestShareStatusCapacityAndPolicyFields:
         """
         import logging
 
-        from notebooklm._types import sharing as sharing_mod
+        from notebooklm._web.rows import sharing as sharing_rows
 
-        sharing_mod._warned_malformed_share_slots.clear()
+        sharing_rows._warned_malformed_share_slots.clear()
 
-        with caplog.at_level(logging.WARNING, logger=sharing_mod.__name__):
+        with caplog.at_level(logging.WARNING, logger="notebooklm._types.sharing"):
             ShareStatus.from_api_response([[], None, "1000", "yes"], "nb-1")
         assert "maxIndividualsShareLimit" in caplog.text
         assert "isPublicSharingAllowed" in caplog.text
 
         # A short response is normal, not drift, and must stay quiet.
         caplog.clear()
-        with caplog.at_level(logging.WARNING, logger=sharing_mod.__name__):
+        with caplog.at_level(logging.WARNING, logger="notebooklm._types.sharing"):
             ShareStatus.from_api_response([[], None], "nb-1")
         assert caplog.text == ""
 
         # An explicit null is absence too.
-        with caplog.at_level(logging.WARNING, logger=sharing_mod.__name__):
+        with caplog.at_level(logging.WARNING, logger="notebooklm._types.sharing"):
             ShareStatus.from_api_response([[], None, None, None], "nb-1")
         assert caplog.text == ""
 
@@ -195,15 +202,15 @@ class TestShareStatusCapacityAndPolicyFields:
         server, an MCP session). Keying on the *type* bounds it by construction:
         feeding 500 distinct malformed values adds one entry per (field, type).
         """
-        from notebooklm._types import sharing as sharing_mod
+        from notebooklm._web.rows import sharing as sharing_rows
 
-        sharing_mod._warned_malformed_share_slots.clear()
+        sharing_rows._warned_malformed_share_slots.clear()
 
         for i in range(500):
             ShareStatus.from_api_response([[], None, f"cap-{i}", f"gate-{i}"], "nb-1")
 
         # Two fields, one type (str) each — not 1000 entries.
-        assert sharing_mod._warned_malformed_share_slots == {
+        assert sharing_rows._warned_malformed_share_slots == {
             ("maxIndividualsShareLimit", "str"),
             ("isPublicSharingAllowed", "str"),
         }
@@ -211,8 +218,8 @@ class TestShareStatusCapacityAndPolicyFields:
         # A genuinely different failure mode is still reported once more, so
         # bounding the cache did not cost the signal it exists to carry.
         ShareStatus.from_api_response([[], None, [1], [2]], "nb-1")
-        assert ("maxIndividualsShareLimit", "list") in sharing_mod._warned_malformed_share_slots
-        assert len(sharing_mod._warned_malformed_share_slots) == 4
+        assert ("maxIndividualsShareLimit", "list") in sharing_rows._warned_malformed_share_slots
+        assert len(sharing_rows._warned_malformed_share_slots) == 4
 
     def test_malformed_slot_warns_once_per_failure_mode(self, caplog):
         """A polled notebook must not re-emit the same drift line every decode.
@@ -222,11 +229,11 @@ class TestShareStatusCapacityAndPolicyFields:
         """
         import logging
 
-        from notebooklm._types import sharing as sharing_mod
+        from notebooklm._web.rows import sharing as sharing_rows
 
-        sharing_mod._warned_malformed_share_slots.clear()
+        sharing_rows._warned_malformed_share_slots.clear()
 
-        with caplog.at_level(logging.WARNING, logger=sharing_mod.__name__):
+        with caplog.at_level(logging.WARNING, logger="notebooklm._types.sharing"):
             for _ in range(5):
                 ShareStatus.from_api_response([[], None, "1000", True], "nb-1")
 
@@ -579,11 +586,11 @@ class TestSharingAPIValidation:
         """Test that add_user rejects OWNER permission."""
         from unittest.mock import AsyncMock
 
-        from notebooklm._sharing import SharingAPI
+        from notebooklm._web.sharing import WebSharingAPI
         from tests._fixtures.fake_core import make_fake_core
 
         mock_core = make_fake_core(rpc_call=AsyncMock())
-        api = SharingAPI(mock_core)
+        api = WebSharingAPI(mock_core)
 
         with pytest.raises(ValueError, match="Cannot assign OWNER permission"):
             await api.add_user("nb_123", "test@example.com", SharePermission.OWNER)
@@ -596,11 +603,11 @@ class TestSharingAPIValidation:
         """Test that add_user rejects _REMOVE permission."""
         from unittest.mock import AsyncMock
 
-        from notebooklm._sharing import SharingAPI
+        from notebooklm._web.sharing import WebSharingAPI
         from tests._fixtures.fake_core import make_fake_core
 
         mock_core = make_fake_core(rpc_call=AsyncMock())
-        api = SharingAPI(mock_core)
+        api = WebSharingAPI(mock_core)
 
         with pytest.raises(ValueError, match="Use remove_user"):
             await api.add_user("nb_123", "test@example.com", SharePermission._REMOVE)
@@ -612,7 +619,7 @@ class TestSharingAPIValidation:
         """Test that add_user accepts EDITOR permission."""
         from unittest.mock import AsyncMock
 
-        from notebooklm._sharing import SharingAPI
+        from notebooklm._web.sharing import WebSharingAPI
         from tests._fixtures.fake_core import make_fake_core
 
         # Return empty list for share call, then mock get_status
@@ -628,7 +635,7 @@ class TestSharingAPIValidation:
                 ]
             )
         )
-        api = SharingAPI(mock_core)
+        api = WebSharingAPI(mock_core)
 
         status = await api.add_user("nb_123", "test@example.com", SharePermission.EDITOR)
 
@@ -641,7 +648,7 @@ class TestSharingAPIValidation:
         """Test that add_user accepts VIEWER permission (default)."""
         from unittest.mock import AsyncMock
 
-        from notebooklm._sharing import SharingAPI
+        from notebooklm._web.sharing import WebSharingAPI
         from tests._fixtures.fake_core import make_fake_core
 
         mock_core = make_fake_core(
@@ -656,7 +663,7 @@ class TestSharingAPIValidation:
                 ]
             )
         )
-        api = SharingAPI(mock_core)
+        api = WebSharingAPI(mock_core)
 
         # Use default permission (VIEWER)
         status = await api.add_user("nb_123", "test@example.com")

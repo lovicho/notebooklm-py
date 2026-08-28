@@ -4,10 +4,10 @@ This module pins, for every member of :class:`notebooklm.rpc.types.RPCMethod`:
 
 1. The string method ID itself (catches enum-value drift).
 2. The ``batchexecute`` ``f.req`` request envelope produced by
-   :func:`notebooklm.rpc.encoder.encode_rpc_request` for a representative
+   :func:`notebooklm._web.wire.encoder.encode_rpc_request` for a representative
    parameter list (catches encoder format drift and param-order regressions).
 3. The Python payload returned by
-   :func:`notebooklm.rpc.decoder.decode_response` when given a synthetic
+   :func:`notebooklm._web.wire.decoder.decode_response` when given a synthetic
    scrubbed response chunk for that method (catches decoder format drift).
 
 For methods that have a documented downstream parser / dataclass mapper,
@@ -36,7 +36,9 @@ from typing import Any, cast
 import pytest
 
 from notebooklm._app.serialize import to_jsonable
-from notebooklm._artifact.payloads import (
+from notebooklm._types.artifacts import Artifact, ArtifactType
+from notebooklm._types.sources import Source, SourceType
+from notebooklm._web.params.artifacts import (
     DEFAULT_QUIZ_DIFFICULTY,
     DEFAULT_QUIZ_QUANTITY,
     build_audio_artifact_params,
@@ -53,16 +55,21 @@ from notebooklm._artifact.payloads import (
     build_suggest_reports_params,
     build_video_artifact_params,
 )
-from notebooklm._row_adapters.artifacts import ArtifactRow
-from notebooklm._row_adapters.notes import NoteRow
-from notebooklm._row_adapters.sources import SourceRow, SourceRowShape
-from notebooklm._source.upload_payloads import (
+from notebooklm._web.params.sources import (
     build_register_file_source_params,
     build_rename_source_params,
     build_resumable_upload_start_request,
 )
-from notebooklm._types.artifacts import Artifact, ArtifactType
-from notebooklm._types.sources import Source, SourceType
+from notebooklm._web.rows.artifacts import ArtifactRow
+from notebooklm._web.rows.notes import NoteRow
+from notebooklm._web.rows.sources import SourceRow, SourceRowShape
+from notebooklm._web.wire.decoder import (
+    collect_rpc_ids,
+    decode_response,
+    parse_chunked_response,
+    strip_anti_xssi,
+)
+from notebooklm._web.wire.encoder import encode_rpc_request
 from notebooklm.exceptions import (
     ClientError,
     RateLimitError,
@@ -70,13 +77,6 @@ from notebooklm.exceptions import (
     UnknownRPCMethodError,
     ValidationError,
 )
-from notebooklm.rpc.decoder import (
-    collect_rpc_ids,
-    decode_response,
-    parse_chunked_response,
-    strip_anti_xssi,
-)
-from notebooklm.rpc.encoder import encode_rpc_request
 from notebooklm.rpc.types import (
     FLASHCARDS_VARIANT,
     INTERACTIVE_MIND_MAP_VARIANT,

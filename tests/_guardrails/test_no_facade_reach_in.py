@@ -46,7 +46,6 @@ _CORE_PRIVATE_GUARD_EXCLUDED_MODULES = {
     "_env.py",
     "_idempotency.py",
     "_logging.py",
-    "_mind_map.py",
     "_session.py",
     "_url_utils.py",
     "_version_check.py",
@@ -54,29 +53,34 @@ _CORE_PRIVATE_GUARD_EXCLUDED_MODULES = {
 
 _ARTIFACT_SERVICE_MODULES = [
     "_artifact/formatters.py",
-    "_artifact/listing.py",
     "_artifact/downloads.py",
-    "_artifact/generation.py",
     "_artifact/polling.py",
+    "_web/artifact/downloads.py",
+    "_web/artifact/generation.py",
+    "_web/artifact/listing.py",
+    "_web/artifact/table.py",
 ]
 
 _SOURCE_SERVICE_MODULES = [
-    "_source/listing.py",
+    "_web/sources/_upload_decode.py",
+    "_web/sources/add.py",
+    "_web/sources/batch.py",
+    "_web/sources/content.py",
+    "_web/sources/drive_import.py",
+    "_web/sources/listing.py",
+    "_web/sources/upload.py",
+    "_source/markdown.py",
     "_source/polling.py",
-    "_source/add.py",
-    "_source/upload.py",
-    "_source/content.py",
 ]
 
 _NOTEBOOK_COMPOSITION_SERVICE_MODULES = [
     "_notebook_metadata.py",
-    "_sharing_manager.py",
-    "_mind_map.py",
 ]
 
 _FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_NAMES = {
     "ArtifactsAPI",
     "ChatAPI",
+    "MindMapsAPI",
     "NotebookLMClient",
     "NotebooksAPI",
     "NotesAPI",
@@ -84,6 +88,14 @@ _FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_NAMES = {
     "SettingsAPI",
     "SharingAPI",
     "SourcesAPI",
+    "WebArtifactsAPI",
+    "WebChatAPI",
+    "WebNotebooksAPI",
+    "WebMindMapsAPI",
+    "WebNotesAPI",
+    "WebSettingsAPI",
+    "WebSharingAPI",
+    "WebSourcesAPI",
 }
 
 _FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_MODULES = {
@@ -91,24 +103,34 @@ _FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_MODULES = {
     "_chat",
     "_core",
     "_notebooks",
+    "_mind_maps_api",
     "_notes",
     "_research",
     "_session",
     "_settings",
     "_sharing",
     "_sources",
+    "_web.notebooks",
+    "_web.chat",
+    "_web.mind_maps",
+    "_web.sources",
     "client",
     "notebooklm",
     "notebooklm._artifacts",
     "notebooklm._chat",
     "notebooklm._core",
     "notebooklm._notebooks",
+    "notebooklm._mind_maps_api",
     "notebooklm._notes",
     "notebooklm._research",
     "notebooklm" + "." + "_session",
     "notebooklm._settings",
     "notebooklm._sharing",
     "notebooklm._sources",
+    "notebooklm._web.notebooks",
+    "notebooklm._web.chat",
+    "notebooklm._web.mind_maps",
+    "notebooklm._web.sources",
     "notebooklm.client",
 }
 
@@ -256,7 +278,7 @@ def test_feature_apis_do_not_add_direct_core_private_state_access() -> None:
 # Artifact-service "reach-in" guard
 #
 # Modeled on the core-private-access guard above. Pins the invariant that
-# artifact-service helper modules (currently ``_artifact/downloads.py``)
+# web artifact-service helper modules (under ``_web/artifact/``)
 # do not retain or call back into the ``ArtifactsAPI`` facade. Each helper
 # migration PR appends the helper's module name to
 # ``_REACH_IN_MIGRATED_MODULES`` below.
@@ -264,8 +286,10 @@ def test_feature_apis_do_not_add_direct_core_private_state_access() -> None:
 
 
 _REACH_IN_MIGRATED_MODULES: list[str] = [
-    "_artifact/downloads.py",
-    "_artifact/generation.py",
+    "_web/artifact/downloads.py",
+    "_web/artifact/generation.py",
+    "_web/artifact/listing.py",
+    "_web/artifact/table.py",
 ]
 
 
@@ -289,11 +313,8 @@ class _ApiReachInVisitor(ast.NodeVisitor):
     visible to attribute access in nested closures and comprehensions.
 
     ``_REACH_IN_MIGRATED_MODULES`` enumerates helpers already migrated to
-    constructor injection; this guard is actively enforced for those
-    modules. The migrated artifact-service helpers are
-    ``_artifact/downloads.py`` and ``_artifact/generation.py`` (the latter
-    re-extracted from the ``ArtifactsAPI`` facade as a constructor-injected
-    ``ArtifactGenerationService``).
+    explicit collaborators; this guard is actively enforced for those modules.
+    It covers all Web artifact download, generation, listing, and table helpers.
     """
 
     def __init__(self, module_name: str) -> None:
@@ -493,6 +514,31 @@ def test_deleted_session_module_is_not_importable() -> None:
     assert importlib.util.find_spec(deleted_module) is None
 
 
+def test_retired_note_service_module_is_not_importable() -> None:
+    """NoteService moved atomically to the web notes backend."""
+    assert not (SRC_ROOT / "_note_service.py").exists()
+    assert importlib.util.find_spec("notebooklm._note_service") is None
+
+
+def test_retired_mind_map_service_module_is_not_importable() -> None:
+    """The note-backed service moved atomically to the web mind-map backend."""
+    assert not (SRC_ROOT / "_mind_map.py").exists()
+    assert importlib.util.find_spec("notebooklm._mind_map") is None
+
+
+def test_retired_sharing_manager_module_is_not_importable() -> None:
+    """The sole share-URL helper now belongs to the neutral notebooks owner."""
+    assert not (SRC_ROOT / "_sharing_manager.py").exists()
+    assert importlib.util.find_spec("notebooklm._sharing_manager") is None
+
+
+def test_retired_chat_package_shell_is_not_importable() -> None:
+    """The neutral ChatAPI is flat; the old package and helpers stay retired."""
+    assert not (SRC_ROOT / "_chat").exists()
+    with pytest.raises(ModuleNotFoundError):
+        importlib.util.find_spec("notebooklm._chat.api")
+
+
 def test_runtime_import_visitor_detects_nested_forbidden_modules() -> None:
     """The import-boundary guard must catch nested forbidden module paths."""
     tree = ast.parse(
@@ -536,6 +582,101 @@ from notebooklm import NotebookLMClient
     visitor.visit(tree)
 
     assert visitor.forbidden == ["notebooklm", "notebooklm.NotebookLMClient"]
+
+
+def test_runtime_import_visitor_detects_web_notebooks_facade_and_module() -> None:
+    """Notebook composition services must not reach into the concrete web facade."""
+    tree = ast.parse(
+        "from notebooklm._web.notebooks import WebNotebooksAPI\n"
+        "import notebooklm._web.notebooks\n"
+        "WebNotebooksAPI(rpc)\n"
+    )
+    visitor = _RuntimeImportVisitor(
+        forbidden_names=_FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_NAMES,
+        forbidden_modules=_FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_MODULES,
+    )
+
+    visitor.visit(tree)
+
+    assert visitor.forbidden == [
+        "notebooklm._web.notebooks.WebNotebooksAPI",
+        "notebooklm._web.notebooks",
+    ]
+    assert _facade_construction_lines(
+        tree,
+        _FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_NAMES,
+    ) == {"WebNotebooksAPI": [3]}
+
+
+def test_runtime_import_visitor_detects_web_sources_facade_and_module() -> None:
+    """Neutral source services must not reach into the concrete web facade."""
+    tree = ast.parse(
+        "from notebooklm._web.sources import WebSourcesAPI\n"
+        "import notebooklm._web.sources\n"
+        "WebSourcesAPI(rpc, uploader=uploader)\n"
+    )
+    visitor = _RuntimeImportVisitor(
+        forbidden_names=_FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_NAMES,
+        forbidden_modules=_FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_MODULES,
+    )
+    visitor.visit(tree)
+
+    assert visitor.forbidden == [
+        "notebooklm._web.sources.WebSourcesAPI",
+        "notebooklm._web.sources",
+    ]
+    assert _facade_construction_lines(
+        tree,
+        _FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_NAMES,
+    ) == {"WebSourcesAPI": [3]}
+
+
+def test_runtime_import_visitor_detects_web_chat_facade_and_module() -> None:
+    """Private services must not reach into the concrete Web chat facade."""
+    tree = ast.parse(
+        "from notebooklm._web.chat import WebChatAPI\n"
+        "import notebooklm._web.chat\n"
+        "WebChatAPI(rpc=rpc)\n"
+    )
+    visitor = _RuntimeImportVisitor(
+        forbidden_names=_FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_NAMES,
+        forbidden_modules=_FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_MODULES,
+    )
+    visitor.visit(tree)
+    assert visitor.forbidden == [
+        "notebooklm._web.chat.WebChatAPI",
+        "notebooklm._web.chat",
+    ]
+    assert _facade_construction_lines(
+        tree,
+        _FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_NAMES,
+    ) == {"WebChatAPI": [3]}
+
+
+@pytest.mark.parametrize(
+    ("module", "facade"),
+    [
+        ("notes", "WebNotesAPI"),
+        ("mind_maps", "WebMindMapsAPI"),
+        ("settings", "WebSettingsAPI"),
+        ("sharing", "WebSharingAPI"),
+    ],
+)
+def test_runtime_import_visitor_detects_a8_web_facades(module: str, facade: str) -> None:
+    """The private-service guard must recognize every concrete A8 facade."""
+    tree = ast.parse(f"from notebooklm._web.{module} import {facade}\n{facade}(rpc)\n")
+    visitor = _RuntimeImportVisitor(
+        forbidden_names=_FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_NAMES,
+        forbidden_modules=_FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_MODULES,
+    )
+
+    visitor.visit(tree)
+
+    assert visitor.forbidden == [f"notebooklm._web.{module}.{facade}"]
+    assert _facade_construction_lines(
+        tree,
+        _FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_NAMES,
+    ) == {facade: [2]}
 
 
 def test_facade_construction_lines_detects_chained_facade_access() -> None:
@@ -626,6 +767,29 @@ def test_notebook_composition_services_do_not_runtime_import_facades_or_core() -
 
     assert forbidden_by_module == {}
     assert forbidden_construction_by_module == {}
+
+
+def test_notebook_metadata_has_no_concrete_lister_or_rpc_dependency() -> None:
+    """The neutral metadata module contains only protocols and composition service code."""
+    tree = ast.parse((SRC_ROOT / "_notebook_metadata.py").read_text(encoding="utf-8"))
+    visitor = _RuntimeImportVisitor(
+        forbidden_names={"RpcCaller", "SourceLister"},
+        forbidden_modules={
+            "_runtime.contracts",
+            "_web.sources.listing",
+            "notebooklm._web.contracts",
+            "notebooklm._web.sources.listing",
+        },
+    )
+
+    visitor.visit(tree)
+
+    assert visitor.forbidden == []
+    assert not any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "create_default_source_lister"
+        for node in tree.body
+    )
 
 
 @pytest.mark.parametrize("module_name", _NOTEBOOK_COMPOSITION_SERVICE_MODULES)

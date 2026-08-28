@@ -720,7 +720,7 @@ class IdempotencyVariantError(NotebookLMError):
 
     Methods that only have a ``(method, None)`` entry tolerate any variant
     name (the variant table is effectively empty, so there is no typo to
-    catch). See :func:`notebooklm._idempotency.IdempotencyRegistry.get_entry`.
+    catch). See :func:`notebooklm._web.policy.IdempotencyRegistry.get_entry`.
     """
 
 
@@ -850,7 +850,7 @@ class ChatError(NotebookLMError):
 class ChatResponseParseError(ChatError):
     """The streaming chat response yielded no parseable chunks.
 
-    Raised when :func:`notebooklm._chat.wire.parse_streaming_chat_response`
+    Raised when :func:`notebooklm._web.rows.chat_stream.parse_streaming_chat_response`
     iterates the streamed response and finds zero ``wrb.fr`` envelopes it
     could decode — that is, the wire protocol drifted or the response body
     was empty/malformed.

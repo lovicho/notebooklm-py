@@ -37,7 +37,7 @@ ID changes without renaming the file.
     "expected_decoded": /* the python payload decode_response must return */
   },
 
-  "mapper": "notebooklm._research_task_parser:parse_research_task_models",
+  "mapper": "notebooklm._web.rows.research_task:parse_research_task_models",
   "mapper_expected": [/* the public-dict shape (or list thereof) produced by the mapper */],
 
   "drift_cases": [
@@ -149,7 +149,7 @@ this:
 
 The byte count is the UTF-8 byte length of the chunk's compact JSON
 serialisation. The reconstructed body is fed to
-`notebooklm.rpc.decoder.decode_response`, which strips the anti-XSSI
+`notebooklm._web.wire.decoder.decode_response`, which strips the anti-XSSI
 prefix, parses the chunks, and extracts the result for the requested RPC
 ID.
 

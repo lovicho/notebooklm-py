@@ -21,12 +21,12 @@ SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "notebooklm"
 
 @pytest.mark.asyncio
 async def test_get_source_ids_warns_on_top_level_shape_drift(caplog):
-    """_notebooks.py:get_source_ids — non-list at notebook_data[0] triggers WARNING."""
-    from notebooklm._notebooks import NotebooksAPI
+    """Web get_source_ids: non-list at notebook_data[0] triggers WARNING."""
+    from notebooklm._web.notebooks import WebNotebooksAPI
     from tests._fixtures.fake_core import make_fake_core
 
     core = make_fake_core(rpc_call=AsyncMock(return_value=[{"unexpected": "dict"}]))
-    api = NotebooksAPI(core)
+    api = WebNotebooksAPI(core)
 
     with caplog.at_level(logging.WARNING, logger="notebooklm"):
         result = await api.get_source_ids("nb_drift")
@@ -43,13 +43,13 @@ async def test_get_source_ids_warns_on_top_level_shape_drift(caplog):
 
 @pytest.mark.asyncio
 async def test_get_source_ids_warns_on_inner_shape_drift(caplog):
-    """_notebooks.py:get_source_ids — notebook_info[1] not list triggers WARNING."""
-    from notebooklm._notebooks import NotebooksAPI
+    """Web get_source_ids: notebook_info[1] not list triggers WARNING."""
+    from notebooklm._web.notebooks import WebNotebooksAPI
     from tests._fixtures.fake_core import make_fake_core
 
     # notebook_data[0] is a list of length >1 but [1] is not a list
     core = make_fake_core(rpc_call=AsyncMock(return_value=[[None, "not a list", "x"]]))
-    api = NotebooksAPI(core)
+    api = WebNotebooksAPI(core)
 
     with caplog.at_level(logging.WARNING, logger="notebooklm"):
         result = await api.get_source_ids("nb_inner")
@@ -61,13 +61,13 @@ async def test_get_source_ids_warns_on_inner_shape_drift(caplog):
 @pytest.mark.asyncio
 async def test_get_source_ids_happy_path_no_warning(caplog):
     """Well-formed payload extracts source ids and emits no warning."""
-    from notebooklm._notebooks import NotebooksAPI
+    from notebooklm._web.notebooks import WebNotebooksAPI
     from tests._fixtures.fake_core import make_fake_core
 
     core = make_fake_core(
         rpc_call=AsyncMock(return_value=[[None, [[["src_alpha"]], [["src_beta"]]]]])
     )
-    api = NotebooksAPI(core)
+    api = WebNotebooksAPI(core)
 
     with caplog.at_level(logging.WARNING, logger="notebooklm"):
         result = await api.get_source_ids("nb_happy")
@@ -87,11 +87,11 @@ async def test_get_source_ids_empty_notebook_emits_no_drift_warning(caplog):
     erodes the one signal that must stay trustworthy — ``schema drift?`` is how
     an operator learns the positional payload shape really did change.
     """
-    from notebooklm._notebooks import NotebooksAPI
+    from notebooklm._web.notebooks import WebNotebooksAPI
     from tests._fixtures.fake_core import make_fake_core
 
     core = make_fake_core(rpc_call=AsyncMock(return_value=[[None] * 11]))
-    api = NotebooksAPI(core)
+    api = WebNotebooksAPI(core)
 
     with caplog.at_level(logging.WARNING, logger="notebooklm"):
         result = await api.get_source_ids("nb_empty")
@@ -110,11 +110,11 @@ async def test_get_source_ids_warns_when_the_sources_slot_is_absent(caplog):
     implementation ("return quietly whenever the slot expression is ``None``")
     folds this case in and silently drops the warning it used to emit.
     """
-    from notebooklm._notebooks import NotebooksAPI
+    from notebooklm._web.notebooks import WebNotebooksAPI
     from tests._fixtures.fake_core import make_fake_core
 
     core = make_fake_core(rpc_call=AsyncMock(return_value=[[None]]))
-    api = NotebooksAPI(core)
+    api = WebNotebooksAPI(core)
 
     with caplog.at_level(logging.WARNING, logger="notebooklm"):
         result = await api.get_source_ids("nb_short")
@@ -124,13 +124,13 @@ async def test_get_source_ids_warns_when_the_sources_slot_is_absent(caplog):
 
 
 def test_qa_pairs_raises_on_unguarded_shape():
-    """_chat/api.py: QA-pair parser raises when next_turn[4] is not indexable.
+    """Web chat QA-pair parser raises when next_turn[4] is not indexable.
 
     Strict decoding is the only mode (the ``NOTEBOOKLM_STRICT_DECODE=0``
     soft-mode opt-out was retired in v0.7.0), so a drifted answer turn raises
     ``UnknownRPCMethodError`` rather than silently producing an empty answer.
     """
-    from notebooklm._chat import ChatAPI
+    from notebooklm._web.chat import WebChatAPI
 
     # next_turn[4] is None → None[0] raises TypeError, surfaced by safe_index.
     turns_data = [
@@ -140,14 +140,13 @@ def test_qa_pairs_raises_on_unguarded_shape():
         ]
     ]
 
-    chat = ChatAPI.__new__(ChatAPI)
     with pytest.raises(UnknownRPCMethodError):
-        chat._parse_turns_to_qa_pairs(turns_data)  # type: ignore[arg-type]
+        WebChatAPI._parse_turns_to_qa_pairs(turns_data)
 
 
 @pytest.mark.asyncio
 async def test_summary_raises_on_indexerror_drift():
-    """_notebooks.py: summary extraction raises when result[0][0][0] drifts.
+    """Web notebook summary extraction raises when result[0][0][0] drifts.
 
     ``get_summary`` delegates the descent to ``_extract_summary`` (the single
     source of truth shared with ``get_description`` — #1485), so under strict
@@ -157,10 +156,10 @@ async def test_summary_raises_on_indexerror_drift():
     (None / empty / null slot) returns "" instead and is covered in
     ``test_get_summary_drift.py``.
     """
-    from notebooklm._notebooks import NotebooksAPI
+    from notebooklm._web.notebooks import WebNotebooksAPI
     from tests._fixtures.fake_core import make_fake_core
 
-    api = NotebooksAPI.__new__(NotebooksAPI)
+    api = WebNotebooksAPI.__new__(WebNotebooksAPI)
     # result[0] == [42]: the summary slot is present and non-None but holds an
     # int, so the inner result[0][0][0] descent raises TypeError — genuine
     # drift, distinct from a routinely-absent summary.
@@ -188,11 +187,11 @@ async def test_summary_raises_on_indexerror_drift():
 
 @pytest.mark.asyncio
 async def test_description_partial_summary_logs_debug(caplog):
-    """_notebooks.py:273 — partial summary (no topics) logs at DEBUG."""
-    from notebooklm._notebooks import NotebooksAPI
+    """Web notebook partial summary (no topics) logs at DEBUG."""
+    from notebooklm._web.notebooks import WebNotebooksAPI
     from tests._fixtures.fake_core import make_fake_core
 
-    api = NotebooksAPI.__new__(NotebooksAPI)
+    api = WebNotebooksAPI.__new__(WebNotebooksAPI)
     # outer[0][0] works but outer[1] raises (no topics shape)
     mock_core = make_fake_core(rpc_call=AsyncMock(return_value=[[["the summary"]]]))
     api._rpc = mock_core
@@ -278,10 +277,10 @@ def test_auth_corrupt_legacy_context_does_not_block_in_band_write(tmp_path):
 
 
 def test_stream_parser_debug_guarded_by_isenabledfor(caplog):
-    """_chat/wire.py — non-JSON chunk debug log is guarded before it fires."""
+    """chat_stream.py — non-JSON chunk debug log is guarded before it fires."""
 
     # Direct: ensure the module has a guarded debug call (structural check).
-    src = (SRC_ROOT / "_chat" / "wire.py").read_text(encoding="utf-8")
+    src = (SRC_ROOT / "_web" / "rows" / "chat_stream.py").read_text(encoding="utf-8")
     assert "logger.isEnabledFor(logging.DEBUG)" in src
     assert "Stream parser" in src
 

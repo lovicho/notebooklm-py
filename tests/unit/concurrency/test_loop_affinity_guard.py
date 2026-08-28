@@ -7,7 +7,7 @@ new shared chokepoint that every async entry point on the seam helpers
 ``_runtime.auth.AuthRefreshCoordinator.await_refresh``,
 ``_artifact.polling.ArtifactPollingService.wait_for_completion``,
 ``_chat.ChatAPI.ask``,
-``_source.upload.SourceUploadPipeline.add_file``) now consults so a cross-loop call surfaces an
+``_web.sources.upload.SourceUploadPipeline.add_file``) now consults so a cross-loop call surfaces an
 actionable ``RuntimeError`` at the call site rather than hanging on a
 lock bound to a dead loop.
 
@@ -37,9 +37,9 @@ import pytest
 
 from notebooklm._artifact.polling import ArtifactPollingService
 from notebooklm._loop_affinity import assert_bound_loop
-from notebooklm._reqid_counter import ReqidCounter
-from notebooklm._runtime.auth import AuthRefreshCoordinator
 from notebooklm._transport_drain import TransportDrainTracker
+from notebooklm._web.transport.auth import AuthRefreshCoordinator
+from notebooklm._web.transport.reqid_counter import ReqidCounter
 
 # ---------------------------------------------------------------------------
 # Free helper — the building block.
@@ -198,7 +198,7 @@ def test_chat_ask_guards_against_cross_loop_call() -> None:
     takes the :class:`LoopGuard` collaborator directly via keyword arg
     instead of reaching for it through a chat-local runtime composite.
     """
-    from notebooklm._chat import ChatAPI
+    from notebooklm._web.chat import WebChatAPI
 
     other_loop = asyncio.new_event_loop()
     try:
@@ -208,11 +208,12 @@ def test_chat_ask_guards_against_cross_loop_call() -> None:
             )
         )
 
-        chat = ChatAPI(
+        chat = WebChatAPI(
             rpc=MagicMock(),
             transport=MagicMock(),
             reqid=MagicMock(),
             loop_guard=loop_guard,
+            notebooks=MagicMock(),
         )
 
         async def inner() -> None:
@@ -241,7 +242,7 @@ def test_add_file_guards_against_cross_loop_call(monkeypatch: pytest.MonkeyPatch
     the lifecycle (``LoopGuard``) collaborator directly via its
     ``lifecycle`` constructor slot.
     """
-    from notebooklm._source.upload import SourceUploadPipeline
+    from notebooklm._web.sources.upload import SourceUploadPipeline
 
     lifecycle = MagicMock()
     lifecycle.assert_bound_loop = MagicMock(

@@ -28,6 +28,25 @@ vacuous.
 
 from __future__ import annotations
 
+import typing
+
+import notebooklm.client as client_module
+from notebooklm._artifacts import ArtifactsAPI
+from notebooklm._chat import ChatAPI
+from notebooklm._mind_maps_api import MindMapsAPI
+from notebooklm._notebooks import NotebooksAPI
+from notebooklm._notes import NotesAPI
+from notebooklm._settings import SettingsAPI
+from notebooklm._sharing import SharingAPI
+from notebooklm._sources import SourcesAPI
+from notebooklm._web.artifacts import WebArtifactsAPI
+from notebooklm._web.chat import WebChatAPI
+from notebooklm._web.mind_maps import WebMindMapsAPI
+from notebooklm._web.notebooks import WebNotebooksAPI
+from notebooklm._web.notes import WebNotesAPI
+from notebooklm._web.settings import WebSettingsAPI
+from notebooklm._web.sharing import WebSharingAPI
+from notebooklm._web.sources import WebSourcesAPI
 from notebooklm.auth import AuthTokens
 from notebooklm.client import NotebookLMClient
 from tests._helpers.client_factory import build_client_shell_for_tests
@@ -98,6 +117,18 @@ def test_factory_shell_matches_production_constructor_surface() -> None:
     )
 
 
+def test_client_namespace_annotations_keep_neutral_api_identities() -> None:
+    """Runtime annotations and compatibility imports name the neutral bases."""
+    assert client_module.NotesAPI is NotesAPI
+    assert client_module.SettingsAPI is SettingsAPI
+    assert client_module.SharingAPI is SharingAPI
+
+    annotations = typing.get_type_hints(NotebookLMClient)
+    assert annotations["notes"] is NotesAPI
+    assert annotations["settings"] is SettingsAPI
+    assert annotations["sharing"] is SharingAPI
+
+
 def test_shared_wiring_identities_hold_on_both_paths() -> None:
     """Identity pins the surface comparison cannot see.
 
@@ -124,9 +155,74 @@ def test_shared_wiring_identities_hold_on_both_paths() -> None:
             f"{label}: chat must share the client's NotebooksAPI instance "
             "(ChatAPI._notebooks), not a privately constructed one"
         )
+        assert type(client.chat) is WebChatAPI
+        assert isinstance(client.chat, ChatAPI)
+        assert getattr(client.chat, "_rpc", _missing) is client._rpc_executor
+        assert getattr(client.chat, "_transport", _missing) is client._composed.transport
+        assert getattr(client.chat, "_reqid", _missing) is client._collaborators.reqid
+        assert type(client.notebooks) is WebNotebooksAPI
+        assert isinstance(client.notebooks, NotebooksAPI)
         assert getattr(client.notebooks, "_rpc", _missing) is client._rpc_executor, (
             f"{label}: notebooks (NotebooksAPI._rpc) must dispatch through the "
             "client's shared RpcExecutor"
+        )
+        assert type(client.sources) is WebSourcesAPI
+        assert isinstance(client.sources, SourcesAPI)
+        assert getattr(client.sources, "_rpc", _missing) is client._rpc_executor, (
+            f"{label}: sources must dispatch through the client's shared RpcExecutor"
+        )
+        assert getattr(client.sources, "_uploader", _missing) is client._source_uploader, (
+            f"{label}: sources and lifecycle must share the client-owned upload pipeline"
+        )
+        assert getattr(client._source_uploader, "_lister", _missing) is getattr(
+            client.sources, "_lister", _missing
+        ), f"{label}: sources and uploader must share one SourceLister"
+        assert getattr(client._source_uploader, "_poller", _missing) is getattr(
+            client.sources, "_poller", _missing
+        ), f"{label}: sources and uploader must share one SourcePoller"
+        assert type(client.artifacts) is WebArtifactsAPI
+        assert isinstance(client.artifacts, ArtifactsAPI)
+        assert getattr(client.artifacts, "_rpc", _missing) is client._rpc_executor, (
+            f"{label}: artifacts (WebArtifactsAPI._rpc) must dispatch through the "
+            "client's shared RpcExecutor"
+        )
+        assert type(client.notes) is WebNotesAPI
+        assert isinstance(client.notes, NotesAPI)
+        assert getattr(client.notes, "_notes", _missing) is client.artifacts._note_service, (
+            f"{label}: notes and artifacts must share one NoteService"
+        )
+        assert getattr(client.notes, "_mind_maps", _missing) is client.artifacts._mind_maps, (
+            f"{label}: notes and artifacts must share one note-backed mind-map service"
+        )
+        assert type(client.mind_maps) is WebMindMapsAPI
+        assert isinstance(client.mind_maps, MindMapsAPI)
+        assert getattr(client.mind_maps, "_rpc", _missing) is client._rpc_executor, (
+            f"{label}: mind maps must dispatch through the client's shared RpcExecutor"
+        )
+        assert getattr(client.mind_maps, "_mind_maps", _missing) is client.artifacts._mind_maps, (
+            f"{label}: mind maps and artifacts must share one note-backed mind-map service"
+        )
+        assert getattr(client.mind_maps, "_artifacts", _missing) is client.artifacts, (
+            f"{label}: mind maps must compose through the client's ArtifactsAPI"
+        )
+        assert getattr(client.mind_maps, "_notes", _missing) is client.notes, (
+            f"{label}: mind maps must compose through the client's NotesAPI"
+        )
+        assert getattr(client.mind_maps, "_notebooks", _missing) is client.notebooks, (
+            f"{label}: mind maps must resolve sources through the client's NotebooksAPI"
+        )
+        assert getattr(client.artifacts._note_service, "_rpc", _missing) is client._rpc_executor, (
+            f"{label}: NoteService must dispatch through the client's shared RpcExecutor"
+        )
+        assert type(client.settings) is WebSettingsAPI
+        assert isinstance(client.settings, SettingsAPI)
+        assert getattr(client.settings, "_rpc", _missing) is client._rpc_executor, (
+            f"{label}: settings must dispatch through the client's shared RpcExecutor"
+        )
+        assert type(client.sharing) is WebSharingAPI
+        assert isinstance(client.sharing, SharingAPI)
+        assert getattr(client.sharing, "_rpc", _missing) is client._rpc_executor, (
+            f"{label}: sharing must dispatch through the client's shared RpcExecutor"
         )
         assert getattr(client._source_uploader, "_auth", _missing) is client._auth, (
             f"{label}: the upload pipeline (SourceUploadPipeline._auth) must alias "

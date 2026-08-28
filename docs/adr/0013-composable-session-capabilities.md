@@ -16,8 +16,17 @@
 > current source tree and [`docs/architecture.md`](../architecture.md) are
 > authoritative. The live shared capability Protocols today are `Kernel`,
 > `RpcCaller`, and `LoopGuard` in `_runtime/contracts.py`; `AuthMetadata` is
-> local to `_source/upload.py`, `OperationScopeProvider` is local to
+> local to `_web/sources/upload.py`, `OperationScopeProvider` is local to
 > `_artifact/polling.py`, and `AsyncWorkRuntime` was deleted.
+>
+> **Backend-subclass amendment (2026-08-27).** The accepted web/mobile backend
+> split narrows that location statement further. `LoopGuard` remains a shared,
+> transport-neutral contract in `_runtime/contracts.py`; the web-only
+> `RpcCaller` and `Kernel` contracts move under `_web` with the batchexecute
+> implementation in Phase A. Public namespace classes become transport-neutral
+> bases and therefore no longer take `RpcCaller`; their concrete `Web*API`
+> subclasses do. This amends the live-state descriptions in Decision §1–4
+> without changing the promotion rule or the historical decision.
 
 ## Status
 
@@ -107,8 +116,8 @@ and must move with this ADR:
 
 The pre-existing scaffolding from earlier remediation work makes a
 careful migration tractable: `NotebookSourceLister`
-(`_notebook_metadata.py:19`) and `NotebookSourceIdProvider`
-(`_notebook_metadata.py:26`) already let `NotebooksAPI` accept a
+(`_notebook_metadata.py:17`) and `NotebookSourceIdProvider`
+(`_notebook_metadata.py:32`) already let `NotebooksAPI` accept a
 collaborator-shaped dependency without round-tripping through `Session`.
 `_mind_map.py:55` is the existing service boundary the note/mind-map
 split rides on.
@@ -140,7 +149,7 @@ runtimes. Concretely:
    time `AuthMetadata` and `Kernel` stayed as standalone Protocols in the
    shared contracts module. Current code keeps `Kernel` in
    `_runtime/contracts.py` as the typed transport surface and moves the
-   single-consumer `AuthMetadata` Protocol local to `_source/upload.py`.
+   single-consumer `AuthMetadata` Protocol local to `_web/sources/upload.py`.
 
 3. **Define feature-local runtime Protocols in their owning module** when
    a named composite earns its keep. At decision time these were:
@@ -148,7 +157,7 @@ runtimes. Concretely:
      plus chat-only `transport_post(...)` and `next_reqid(...)`).
    - `ArtifactsRuntime` and `DrainHookRegistration` in `_artifacts.py`
      (composes `RpcCaller + AsyncWorkRuntime + DrainHookRegistration`).
-   - `UploadRuntime` in `_source/upload.py` (historically `_source_upload.py`)
+   - `UploadRuntime` in `_web/sources/upload.py` (historically `_source_upload.py`)
      (composes `RpcCaller +
      OperationScopeProvider + LoopGuard` plus `kernel` + `auth`
      constructor args).
@@ -169,8 +178,8 @@ runtimes. Concretely:
    `_note_service.py`) and a `NoteBackedMindMapService` (mind-map
    adapter that stays in `_mind_map.py`). The pre-existing scaffolding
    the refactor relies on — `NotebookSourceLister`
-   (`_notebook_metadata.py:19`), `NotebookSourceIdProvider`
-   (`_notebook_metadata.py:26`), and the `_mind_map.py:55` service
+   (`_notebook_metadata.py:17`), `NotebookSourceIdProvider`
+   (`_notebook_metadata.py:32`), and the `_mind_map.py:55` service
    boundary — is reused. Module-level `_mind_map` wrappers are
    removed only after both collaborators are wired into `ArtifactsAPI`.
 
@@ -203,7 +212,7 @@ runtimes. Concretely:
   of opting into the entire `Session` surface.
 - Feature-local capabilities evolve without widening any shared union.
   If chat later needs another streaming primitive, the change is local
-  to `_chat/` and the chat helpers, not to every feature that types
+  to `_chat.py` and the chat helpers, not to every feature that types
   against `RpcCaller`.
 - `_runtime/contracts.py` shrank after the migration arc deleted the
   broad `Session` Protocol and later demoted single-consumer shapes. It
@@ -227,7 +236,7 @@ runtimes. Concretely:
 - Two `RpcCaller` Protocols coexist briefly: the shared *object*
   protocol in `_runtime/contracts.py` (symbol `RpcCaller`, used by every
   feature API) and a pre-existing local *callable* protocol in
-  `_source/upload.py` (historically `_source_upload.py`, symbol `RpcCallback`, used as the
+  `_web/sources/upload.py` (historically `_source_upload.py`, symbol `RpcCallback`, used as the
   `register_file_source(rpc_call=...)` callback). They are structurally
   distinct (one is an object with an `rpc_call` method; the other is a
   callable). To avoid the name collision, the local callable protocol is

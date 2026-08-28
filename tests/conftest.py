@@ -194,10 +194,10 @@ def _synthetic_error_mode(request, monkeypatch):
             f"@pytest.mark.synthetic_error: invalid mode {mode!r}; valid modes are {sorted(valid)}."
         )
     # Import the env-var name from the production module so a future rename
-    # in ``_error_injection.py`` cascades automatically; the constant is also exposed
+    # in ``_web/transport/error_injection.py`` cascades automatically; the constant is also exposed
     # from ``tests/vcr_config.py`` but importing from the canonical seam
     # is the production-faithful path.
-    from notebooklm._error_injection import ERROR_INJECT_ENV_VAR
+    from notebooklm._web.transport.error_injection import ERROR_INJECT_ENV_VAR
 
     monkeypatch.setenv(ERROR_INJECT_ENV_VAR, mode)
 
@@ -641,13 +641,17 @@ def legacy_vcr_follow_up_probe(monkeypatch):
     the real request and its empty, non-empty, multi-turn, and failure branches.
     """
 
-    from notebooklm._chat import api as chat_api_module
+    from notebooklm._chat import ChatAPI
 
-    async def _count_prior_server_turns(fetch_turns, notebook_id: str, conversation_id: str) -> int:
+    async def _count_prior_server_turns(
+        self: ChatAPI,
+        notebook_id: str,
+        conversation_id: str,
+    ) -> int:
         """Replay a legacy cassette whose current conversation had one prior turn."""
         return 1
 
-    monkeypatch.setattr(chat_api_module, "count_prior_server_turns", _count_prior_server_turns)
+    monkeypatch.setattr(ChatAPI, "_count_prior_server_turns", _count_prior_server_turns)
 
 
 @pytest.fixture
@@ -674,7 +678,7 @@ def legacy_vcr_add_url_baseline(monkeypatch):
     ``tests/integration/test_sources_idempotency.py``, so nothing here is its
     only coverage. Mirrors :func:`legacy_vcr_follow_up_probe`.
     """
-    from notebooklm._source.add import SourceAddService
+    from notebooklm._web.sources.add import SourceAddService
 
     original_add_url = SourceAddService.add_url
 

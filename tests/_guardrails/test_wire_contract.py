@@ -18,7 +18,7 @@ source of truth:
   ``constant == proto_tag - 1``. Entries marked ``known_bad`` are ``xfail`` and
   carry the issue reference; the fixing PR must drop the marker.
 * **B. No constant escapes review.** Every ``_*_POS``-style constant in
-  ``src/notebooklm/_row_adapters/`` appears in ``MAPPINGS`` or ``UNMAPPED``. A new
+  ``src/notebooklm/_web/rows/`` appears in ``MAPPINGS`` or ``UNMAPPED``. A new
   positional read cannot land without someone recording what it points at.
 * **C. Enum values agree.** Client enum members match the recovered backend enum,
   and known gaps stay declared.
@@ -87,14 +87,10 @@ _SRC = Path(__file__).resolve().parents[2] / "src" / "notebooklm"
 #: Everything that decodes positional wire arrays. Widening this set is the
 #: intended way to bring more of the client under the contract — the coverage
 #: test will then demand a registry entry for each newly-visible constant.
-_SCANNED_DIRS = (_SRC / "_row_adapters",)
+_SCANNED_DIRS = (_SRC / "_web" / "rows",)
 _SCANNED_FILES = (
-    _SRC / "_settings.py",
-    _SRC / "_mind_maps_api.py",
-    # #2130 brought GET_SHARE_STATUS's positional reads under the contract. The
-    # parser used bare literals until then, so its indices made no checkable
-    # claim at all.
-    _SRC / "_types" / "sharing.py",
+    _SRC / "_web" / "settings.py",
+    _SRC / "_web" / "mind_maps.py",
 )
 
 # Matches both `X: ClassVar[int] = 3` (class scope) and `X = 3` (module scope).
@@ -385,7 +381,7 @@ def test_declared_enum_gaps_still_exist(client_enum: str) -> None:
 def test_suggested_filter_constant_tracks_the_backend_enum_name() -> None:
     """The LIST_ARTIFACTS filter string stays tied to the code it excludes.
 
-    ``_artifact/listing.py`` sends ``NOT artifact.status = "<name>"`` using the
+    ``_web/artifact/listing.py`` sends ``NOT artifact.status = "<name>"`` using the
     symbolic backend enum-value name, which cannot be derived from the integer.
     Without this, a backend rename would fail ``test_enum_values_match_backend``
     on the binding, someone would update ``ENUM_BINDINGS``, and the filter

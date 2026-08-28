@@ -1,14 +1,14 @@
 """Idempotency tests for CREATE_ARTIFACT and GENERATE_MIND_MAP (P0-3).
 
 These RPCs are mutating writes whose params carry no caller-supplied client
-token (see the ``generate_*`` methods and the ``_artifact.payloads.build_*``
+token (see the ``generate_*`` methods and the ``_web.params.artifacts.build_*``
 helpers in ``_artifacts.py`` for the CREATE_ARTIFACT / GENERATE_MIND_MAP
 param shapes). Every positional slot is structural — type code, source ids,
 language, config block — and the response is what surfaces a server-allocated
 ``artifact_id`` (``ArtifactsAPI._parse_generation_result`` in
 ``_artifacts.py`` reads ``result[0][0]``). Without a token slot,
 the only safe retry policy is
-:attr:`~notebooklm._idempotency.IdempotencyPolicy.PROBE_THEN_CREATE`, which
+:attr:`~notebooklm._web.policy.IdempotencyPolicy.PROBE_THEN_CREATE`, which
 forces the transport's inner retry loop OFF so a 5xx after server-side
 commit cannot trigger a duplicate write.
 
@@ -35,7 +35,7 @@ import httpx
 import pytest
 
 from notebooklm import NotebookLMClient, RateLimitError, ServerError
-from notebooklm._idempotency import IDEMPOTENCY_REGISTRY, IdempotencyPolicy
+from notebooklm._web.policy import IDEMPOTENCY_REGISTRY, IdempotencyPolicy
 from notebooklm.rpc import RPCMethod
 from tests._fixtures.kernel_test_helpers import install_http_client_for_test
 

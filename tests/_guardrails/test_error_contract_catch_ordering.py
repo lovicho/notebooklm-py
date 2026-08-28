@@ -13,8 +13,8 @@ handle the *narrow* transport exceptions, "never the broad ``RPCError``", when
 the broad clause would change what the caller sees.
 
 The sanctioned pattern is the one ``add_url`` / ``add_drive``
-(``src/notebooklm/_source/add.py``) and ``register_file_source``
-(``src/notebooklm/_source/upload.py``) use::
+(``src/notebooklm/_web/sources/add.py``) and ``register_file_source``
+(``src/notebooklm/_web/sources/upload.py``) use::
 
     try:
         result = await rpc.rpc_call(...)
@@ -36,12 +36,12 @@ must be **preceded** in the same ``try`` by an ``except`` clause that catches
 at least :data:`REQUIRED_NARROW_RERAISE` and whose body is a bare ``raise``.
 Everything else is deliberately ignored:
 
-* a broad clause that **bare-re-raises** (``_rpc_executor.py``'s
+* a broad clause that **bare-re-raises** (``_web/transport/executor.py``'s
   refresh-and-retry catch ends in ``raise``) or re-raises via a helper
-  (``_notebooks.py`` ``_raise_quota_error_if_detected(exc)`` + ``raise``) —
+  (``_web/notebooks.py`` ``_raise_quota_error_if_detected(exc)`` + ``raise``) —
   the caller still sees the original type;
-* a broad clause that **swallows and continues** (the ``_artifact/listing.py``
-  composite-lister partial-availability catch, the ``_research.py`` baseline
+* a broad clause that **swallows and continues** (the ``_web/artifact/listing.py``
+  composite-lister partial-availability catch, the ``_web/research.py`` baseline
   probes, the ``upload.py`` post-upload rename) — deciding those is ADR-0019
   Rule-3 / Scope territory, explicitly out of this gate's contract;
 * re-wrapping **into ``RPCError`` itself** — not a *different* class, the
@@ -282,7 +282,7 @@ def test_no_unordered_broad_rpc_error_wrap_in_feature_tree() -> None:
         "    except (AuthError, RateLimitError, ServerError, NetworkError):\n"
         "        raise\n"
         "so they propagate unwrapped — copy the add_url/add_drive pattern in "
-        "src/notebooklm/_source/add.py (see ADR-0019 'Cross-cutting' row + "
+        "src/notebooklm/_web/sources/add.py (see ADR-0019 'Cross-cutting' row + "
         "retry guidance, docs/adr/0019-error-and-return-contract.md).\n\n"
         + "\n".join(
             f"  src/notebooklm/{f}: "

@@ -8,8 +8,6 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
-from ._runtime.contracts import RpcCaller
-from ._source.listing import SourceLister as SourceListingService
 from .types import Notebook, NotebookMetadata, Source, SourceSummary
 
 # Preserve the historical warning channel from NotebooksAPI.get_metadata().
@@ -22,9 +20,9 @@ class NotebookSourceLister(Protocol):
     Consumed by :class:`NotebookMetadataService` for metadata composition
     and by :meth:`ResearchAPI.import_sources_with_verification` for
     snapshot/probe around ``IMPORT_RESEARCH`` (issue #315). Implementations
-    are constructed via :func:`create_default_source_lister` from a
-    ``RpcCaller`` object, so feature APIs don't need to depend on
-    ``SourcesAPI`` itself.
+    are supplied structurally, so feature APIs don't need to depend on
+    ``SourcesAPI`` itself. The composition root supplies its shared sources
+    API. Concrete backends own any transport-specific default lister construction.
     """
 
     async def list(self, notebook_id: str, *, strict: bool = False) -> builtins.list[Source]:
@@ -46,11 +44,6 @@ class CreatedChatSessionProvider(Protocol):
 
 
 NotebookGetter = Callable[[str], Awaitable[Notebook]]
-
-
-def create_default_source_lister(rpc: RpcCaller) -> NotebookSourceLister:
-    """Build the direct-construction source lister without constructing SourcesAPI."""
-    return SourceListingService(rpc)
 
 
 class NotebookMetadataService:
@@ -96,5 +89,4 @@ __all__ = [
     "CreatedChatSessionProvider",
     "NotebookSourceIdProvider",
     "NotebookSourceLister",
-    "create_default_source_lister",
 ]

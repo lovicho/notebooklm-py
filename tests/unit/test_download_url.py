@@ -19,15 +19,15 @@ import httpx
 import pytest
 
 import notebooklm._artifact.downloads as _downloads_mod
-from notebooklm._artifacts import ArtifactsAPI
+from notebooklm._web.artifacts import WebArtifactsAPI
 from notebooklm.types import ArtifactDownloadError
 
 
 @pytest.fixture
 def mock_artifacts_api():
     """ArtifactsAPI wired to MagicMocks -- no real I/O."""
-    from notebooklm._mind_map import NoteBackedMindMapService
-    from notebooklm._note_service import NoteService
+    from notebooklm._web.mind_maps import NoteBackedMindMapService
+    from notebooklm._web.notes import NoteService
     from tests._fixtures.fake_core import make_fake_core
 
     mock_core = make_fake_core(
@@ -37,7 +37,7 @@ def mock_artifacts_api():
     mind_maps = MagicMock(spec=NoteBackedMindMapService)
     mind_maps.list_mind_maps = AsyncMock(return_value=[])
     note_service = MagicMock(spec=NoteService)
-    api = ArtifactsAPI(
+    api = WebArtifactsAPI(
         rpc=mock_core,
         drain=mock_core,
         lifecycle=mock_core,

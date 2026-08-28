@@ -1,6 +1,6 @@
 """Tests for the streamed-chat row adapters (issue #1491).
 
-These adapters centralise the positional knowledge ``_chat/wire.py`` used to
+These adapters centralise the positional knowledge the stream parser used to
 open-code as scattered single-level subscripts (``first[4]``, ``cite[1]``,
 ``cite_inner[5]``, ``passage_data[0]`` …). The tests cover three layers per
 adapter:
@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from notebooklm import ConversationTurnKey
-from notebooklm._row_adapters.chat import (
+from notebooklm._web.rows.chat import (
     AnswerRow,
     ChatSettingsRow,
     CitationDetail,
@@ -38,9 +38,9 @@ from notebooklm._row_adapters.chat import (
     unwrap_conversation_turns,
     unwrap_last_conversation_id,
 )
+from notebooklm._web.wire.decoder import _MAX_STATUS_MESSAGE_CHARS
 from notebooklm.exceptions import UnknownRPCMethodError
 from notebooklm.rpc import RPCMethod
-from notebooklm.rpc.decoder import _MAX_STATUS_MESSAGE_CHARS
 
 #: Live ``GenerateFreeFormStreamedResponse`` capture (#2122) — the five chunks
 #: of one real answer stream, decoded from the ``wrb.fr`` frames exactly as the
@@ -237,7 +237,7 @@ class TestNextStepSuggestionRow:
 
         #1505 absence-vs-malformed policy: matches the container raise in
         ``unwrap_conversation_turns`` and the ``inner_data[0]`` non-list raise
-        in ``_chat/wire.py`` (was a silent ``[]`` degrade).
+        in ``_web/rows/chat_stream.py`` (was a silent ``[]`` degrade).
         """
         for drifted in ("reshaped", {"v2": []}, 7):
             rec = _answer_record()
@@ -583,7 +583,7 @@ class TestUnwrapLastConversationId:
 class TestSavedChatNoteRowPositionContract:
     """Canary for the ``CREATE_NOTE`` saved-from-chat envelope positions.
 
-    If these change, ``_chat/notes.py`` decoding has silently moved — update
+    If these change, saved-chat note decoding has silently moved — update
     this pin in the same commit.
     """
 

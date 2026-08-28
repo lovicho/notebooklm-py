@@ -73,9 +73,12 @@ def test_public_facade_imports_are_identity_reexports() -> None:
     """Compatibility facades must keep returning the canonical public objects."""
     import notebooklm
     import notebooklm._auth.tokens as private_tokens
+    import notebooklm._web.wire.decoder as wire_decoder
+    import notebooklm._web.wire.encoder as wire_encoder
+    import notebooklm._web.wire.overrides as wire_overrides
+    import notebooklm._web.wire.safe_index as wire_safe_index
     import notebooklm.auth as public_auth
     import notebooklm.rpc as public_rpc
-    import notebooklm.rpc.overrides as rpc_overrides
     import notebooklm.rpc.types as rpc_types
     import notebooklm.types as public_types
 
@@ -83,7 +86,11 @@ def test_public_facade_imports_are_identity_reexports() -> None:
     assert public_auth.AuthTokens is private_tokens.AuthTokens
     assert notebooklm.ConnectionLimits is public_types.ConnectionLimits
     assert public_rpc.RPCMethod is rpc_types.RPCMethod
-    assert public_rpc.resolve_rpc_id is rpc_overrides.resolve_rpc_id
+    assert public_rpc.resolve_rpc_id is wire_overrides.resolve_rpc_id
+    assert rpc_types.resolve_rpc_id is wire_overrides.resolve_rpc_id
+    assert public_rpc.decode_response is wire_decoder.decode_response
+    assert public_rpc.encode_rpc_request is wire_encoder.encode_rpc_request
+    assert public_rpc.safe_index is wire_safe_index.safe_index
 
 
 # The names de-blessed from ``notebooklm.rpc.__all__`` in #1589. They were
@@ -159,6 +166,19 @@ def test_rpc_all_is_minimized_to_documented_power_user_imports() -> None:
     assert public_rpc.__all__ == ["RPCMethod", "resolve_rpc_id"]
 
 
+def test_rpc_has_no_deep_wire_compatibility_modules() -> None:
+    """The implementation move must not leave duplicate module state behind."""
+    rpc_dir = Path(__file__).parents[2] / "src" / "notebooklm" / "rpc"
+    former_modules = ("decoder", "encoder", "overrides", "_safe_index")
+
+    assert [name for name in former_modules if (rpc_dir / f"{name}.py").exists()] == []
+    assert [
+        name
+        for name in former_modules
+        if importlib.util.find_spec(f"notebooklm.rpc.{name}") is not None
+    ] == []
+
+
 def test_rpc_legacy_reexports_stay_importable_but_unblessed() -> None:
     """The de-blessed RPC names remain importable as attributes (back-compat),
     while staying out of ``__all__``. Freezes the promise made in #1589 that this
@@ -203,13 +223,14 @@ def test_cited_source_selection_is_on_public_surface():
 
 
 # ---------------------------------------------------------------------------
-# RPC enums re-exported via notebooklm.types
+# Domain enums re-exported via notebooklm.types
 #
 # CLI modules import these enums from ``notebooklm.types`` (the public surface)
 # rather than reaching into ``notebooklm.rpc`` directly. The re-exports must be
-# the exact same objects as the canonical definitions in ``notebooklm.rpc.types``
+# the exact same objects as the compatibility exports in ``notebooklm.rpc.types``
 # (identity, not just equality), so isinstance checks and equality both work
-# regardless of which import path callers use.
+# regardless of which import path callers use. Their canonical definitions live
+# in ``notebooklm._types.enums`` and are checked separately below.
 #
 # The explicit list below covers every public RPC enum re-exported by
 # ``notebooklm.types`` (see ``notebooklm.types.__all__``). Keep this list in
@@ -246,6 +267,12 @@ _REEXPORTED_RPC_ENUMS = [
     "VideoFormat",
     "VideoStyle",
 ]
+
+# Exact A1 inventory: these enums are canonically defined in the neutral
+# ``_types.enums`` module and remain available through both compatibility
+# facades. The two internal names are module attributes on ``notebooklm.types``
+# but intentionally absent from its ``__all__``.
+_NEUTRAL_DOMAIN_ENUMS = [*_REEXPORTED_RPC_ENUMS, "ArtifactTypeCode", "GrpcStatusCode"]
 
 # NOTE: the former hand-typed ``_FROZEN_TYPES_ALL`` snapshot of
 # ``notebooklm.types.__all__`` is gone — it is now the regenerable ``types_all``
@@ -412,9 +439,9 @@ _TYPES_PRIVATE_HELPER_SEAMS = [
 # Private helpers that are no longer imported by first-party code but
 # must remain exportable through ``notebooklm.types`` for downstream
 # compatibility. ``_extract_source_created_at`` moved here when the
-# row-adapter migration (see ``_row_adapters.sources.SourceRow.created_at``)
+# row-adapter migration (see ``_web.rows.sources.SourceRow.created_at``)
 # replaced its sole first-party consumer
-# (``_source.listing._parse_source``).
+# (``_web.sources.listing._parse_source``).
 _TYPES_PRIVATE_EXTERNAL_COMPAT_SEAMS: list[str] = [
     "_extract_source_created_at",
 ]
@@ -452,6 +479,34 @@ def test_rpc_enum_reexports_are_identical(enum_name: str) -> None:
         f"notebooklm.types.{enum_name} must be the same object as "
         f"notebooklm.rpc.types.{enum_name} (identity, not equality)"
     )
+
+
+@pytest.mark.parametrize("enum_name", _NEUTRAL_DOMAIN_ENUMS)
+def test_domain_enum_compatibility_paths_are_identical(enum_name: str) -> None:
+    """All 26 domain enums resolve to their canonical neutral definitions."""
+    import notebooklm._types.enums as canonical_enums
+    import notebooklm.rpc.types as rpc_types
+    import notebooklm.types as public_types
+
+    canonical_enum = getattr(canonical_enums, enum_name)
+    assert getattr(public_types, enum_name) is canonical_enum
+    assert getattr(rpc_types, enum_name) is canonical_enum
+
+
+def test_neutral_domain_enum_manifest_is_complete() -> None:
+    """The A1 manifest covers exactly the 26 enums defined in the neutral module."""
+    import notebooklm._types.enums as canonical_enums
+
+    defined = {
+        name
+        for name, value in vars(canonical_enums).items()
+        if isinstance(value, type)
+        and value.__module__ == canonical_enums.__name__
+        and issubclass(value, enum.Enum)
+    }
+    assert len(_NEUTRAL_DOMAIN_ENUMS) == 26
+    assert len(set(_NEUTRAL_DOMAIN_ENUMS)) == 26
+    assert set(_NEUTRAL_DOMAIN_ENUMS) == defined
 
 
 def test_types_all_contract_is_frozen_in_order() -> None:

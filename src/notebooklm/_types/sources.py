@@ -9,14 +9,14 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from .._url_utils import pdf_url_display_title
-from ..rpc.types import DriveSourceStatus, SourceStatus
 from .common import (
     UnknownTypeWarning,
 )
 from .documents import StructuredDocument
+from .enums import DriveSourceStatus, SourceStatus
 
 if TYPE_CHECKING:
-    from .._row_adapters.sources import SourceRow
+    from .._web.rows.sources import SourceRow
 
 
 class SourceType(str, Enum):
@@ -107,7 +107,7 @@ _UPLOAD_FILE_EXTENSIONS: frozenset[str] = frozenset(
 #:
 #: * the path heuristic only decides whether a *non-existent* argument gets a
 #:   warning — a wrong entry costs nothing;
-#: * the Drive router (``_source.drive_import``) uses the upload set as a
+#: * the Drive router (``_web.sources.drive_import``) uses the upload set as a
 #:   **network** gate — a wrong entry turns a fast, clear client-side refusal
 #:   into a full file download followed by a murky server-side failure.
 #:
@@ -216,14 +216,14 @@ def _extract_source_url(metadata: Any, *, allow_bare_http: bool = True) -> str |
     """Extract a source URL from a ``src[2]`` metadata array.
 
     Thin compatibility shim over
-    :meth:`notebooklm._row_adapters.sources.SourceRow.url_from_metadata`,
+    :meth:`notebooklm._web.rows.sources.SourceRow.url_from_metadata`,
     which centralises the ``metadata[7]`` > ``metadata[5]`` > ``metadata[0]``
     positional precedence in the sanctioned row-adapter layer. The adapter
     method reproduces this helper's exact (soft, un-coerced) semantics, so this
     re-exported public helper is behavior-preserved while its position
     knowledge no longer lives here.
     """
-    from .._row_adapters.sources import SourceRow
+    from .._web.rows.sources import SourceRow
 
     return SourceRow.url_from_metadata(metadata, allow_bare_http=allow_bare_http)
 
@@ -232,12 +232,12 @@ def _extract_source_created_at(metadata: Any) -> datetime | None:
     """Extract a source creation timestamp from a ``src[2]`` metadata array.
 
     Thin compatibility shim over
-    :meth:`notebooklm._row_adapters.sources.SourceRow.created_at_from_metadata`,
+    :meth:`notebooklm._web.rows.sources.SourceRow.created_at_from_metadata`,
     which owns the ``metadata[2][0]`` timestamp position. Behavior-identical to
     the original inline walk (both funnel the inner value through
     :func:`_datetime_from_timestamp`).
     """
-    from .._row_adapters.sources import SourceRow
+    from .._web.rows.sources import SourceRow
 
     return SourceRow.created_at_from_metadata(metadata)
 
@@ -415,7 +415,7 @@ class Source:
         This is the **single** construction site for a :class:`Source`
         from a parsed source row. Both :meth:`from_api_response` (the
         public classmethod used by ``ADD_SOURCE`` / rename paths) and
-        :meth:`notebooklm._source.listing.SourceLister._parse_source`
+        :meth:`notebooklm._web.sources.listing.SourceLister._parse_source`
         (the ``GET_NOTEBOOK`` list/get/poll path) funnel through here so
         every code path produces identical :class:`Source` instances —
         including the decoded :attr:`status`.
@@ -471,13 +471,13 @@ class Source:
 
         Multi-shape dispatch (the three wire shapes — deeply nested,
         medium nested, flat) is centralised in
-        :meth:`notebooklm._row_adapters.sources.SourceRow.from_unknown_shape`;
+        :meth:`notebooklm._web.rows.sources.SourceRow.from_unknown_shape`;
         position knowledge for the entry layout lives on
         :class:`SourceRow` itself. This method only normalizes the wire
         shape into a :class:`SourceRow` and defers to :meth:`from_row` —
         the single construction site shared with the
         ``GET_NOTEBOOK`` list/get/poll path
-        (:meth:`notebooklm._source.listing.SourceLister._parse_source`) —
+        (:meth:`notebooklm._web.sources.listing.SourceLister._parse_source`) —
         so all paths produce identical :class:`Source` instances,
         including the decoded :attr:`status`. ``status`` earlier silently
         fell back to the ``SourceStatus.READY`` default here while the
@@ -486,7 +486,7 @@ class Source:
         Args:
             data: Raw decoded source payload (one of the three wire
                 shapes handled by
-                :meth:`~notebooklm._row_adapters.sources.SourceRow.from_unknown_shape`).
+                :meth:`~notebooklm._web.rows.sources.SourceRow.from_unknown_shape`).
             notebook_id: Accepted for call-site symmetry and forward
                 compatibility but currently unused — the parsed source
                 wire shape carries no notebook reference, so this value
@@ -496,19 +496,18 @@ class Source:
                 removing the parameter would be a backward-incompatible
                 signature change flagged by
                 ``scripts/audit_public_api_compat.py``.
-            method_id: Originating RPC method id (e.g.
-                ``RPCMethod.ADD_SOURCE.value`` /
-                ``RPCMethod.UPDATE_SOURCE.value``) used only to tag
-                ``safe_index`` drift diagnostics with the real method.
+            method_id: Originating RPC method id (for example, the add-source
+                or update-source method identifier) used only to tag checked
+                row-decode drift diagnostics with the real method.
                 Defaults to ``None``, which lets
-                :meth:`~notebooklm._row_adapters.sources.SourceRow.from_unknown_shape`
+                :meth:`~notebooklm._web.rows.sources.SourceRow.from_unknown_shape`
                 fall back to its ``GET_NOTEBOOK`` default — preserving
                 the historical behavior for callers that do not pass it.
         """
         # Keep the row-adapter dependency local so importing the source
         # dataclass package does not pull source-row parsing helpers into
         # the top-level public type facade.
-        from .._row_adapters.sources import SourceRow
+        from .._web.rows.sources import SourceRow
 
         return cls.from_row(SourceRow.from_unknown_shape(data, method_id=method_id))
 

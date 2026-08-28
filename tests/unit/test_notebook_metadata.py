@@ -9,10 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from notebooklm._notebook_metadata import (
-    NotebookMetadataService,
-    create_default_source_lister,
-)
+from notebooklm._notebook_metadata import NotebookMetadataService
+from notebooklm._web.notebooks import create_default_source_lister
+from notebooklm._web.sources import WebSourcesAPI
 from notebooklm.exceptions import RPCError
 from notebooklm.rpc import RPCMethod
 from notebooklm.types import Notebook, NotebookMetadata, Source, SourceType
@@ -191,6 +190,31 @@ async def test_default_source_lister_uses_phase8_listing_service() -> None:
             "/notebook/nb_123",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_default_source_lister_matches_sources_api_list_for_metadata_path() -> None:
+    """The direct web fallback and injected base-typed lister decode identically."""
+    rpc = RecordingRpc(
+        [
+            [
+                "Notebook",
+                [
+                    source_entry("src_web", title="Web"),
+                    source_entry(
+                        "src_pdf",
+                        title="Paper",
+                        metadata=[None, 11, None, None, 3],
+                    ),
+                ],
+            ]
+        ]
+    )
+    uploader = MagicMock()
+    sources_api = WebSourcesAPI(rpc, uploader=uploader)
+    source_lister = create_default_source_lister(rpc)
+
+    assert await source_lister.list("nb_123") == await sources_api.list("nb_123")
 
 
 @pytest.mark.asyncio

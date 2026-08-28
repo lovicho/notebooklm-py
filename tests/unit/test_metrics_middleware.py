@@ -1,7 +1,7 @@
 """Unit tests for :class:`MetricsMiddleware` (Tier-12 PR 12.4).
 
 Pins the contract documented in
-``src/notebooklm/_middleware/metrics.py`` and ADR-0009 §"Chain ordering":
+``src/notebooklm/_web/transport/middleware/metrics.py`` and ADR-0009 §"Chain ordering":
 
 - Pass-through identity (the middleware is a pure observer; it must not
   mutate ``RpcRequest`` or transform the ``RpcResponse``).
@@ -34,14 +34,14 @@ import pytest
 
 from notebooklm._client_metrics import ClientMetrics
 from notebooklm._logging import get_request_id, reset_request_id, set_request_id
-from notebooklm._middleware.core import (
+from notebooklm._types.common import RpcTelemetryEvent
+from notebooklm._web.transport.middleware.core import (
     NextCall,
     RpcRequest,
     RpcResponse,
     build_chain,
 )
-from notebooklm._middleware.metrics import MetricsMiddleware
-from notebooklm._types.common import RpcTelemetryEvent
+from notebooklm._web.transport.middleware.metrics import MetricsMiddleware
 
 # The ``tests/`` package chain is complete; ``tests._fixtures.chain`` is the
 # fully-qualified import path documented in ``tests/_fixtures/__init__.py``.
@@ -169,7 +169,7 @@ async def test_skips_emit_when_rpc_method_absent(
     Pins the regression guard for the pre-PR-12.4 invariant: requests
     flowing through the chain WITHOUT ``rpc_method`` in context must not
     appear in the RPC counters or telemetry stream. The chat streaming
-    path (``_chat.transport.chat_aware_authed_post``) is the production caller
+    path (``_web.transport.chat.chat_aware_authed_post``) is the production caller
     that exercises this branch — chat requests have never been counted
     as RPCs and continue not to be.
     """

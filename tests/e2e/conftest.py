@@ -18,7 +18,7 @@ import pytest
 from notebooklm._env import get_base_url
 
 if TYPE_CHECKING:
-    from notebooklm._row_adapters.artifacts import QuizOptionPair
+    from notebooklm._web.rows.artifacts import QuizOptionPair
     from notebooklm.client import NotebookLMClient
 
 # Load .env file if python-dotenv is available
@@ -42,7 +42,7 @@ from notebooklm.paths import get_profile_dir
 # Substrings in ChatError / skip messages that mark a server-side rate-limit
 # or quota rejection rather than a client bug. Covers both the explicit
 # UserDisplayableError message and the HTTP-status-wrapped 429 path in
-# ``notebooklm._chat.transport.chat_aware_authed_post``, the generation skip
+# ``notebooklm._web.transport.chat.chat_aware_authed_post``, the generation skip
 # phrase in assert_generation_started, and the "Rate limit:" prefix
 # _install_generation_rate_limit_skip adds to typed RateLimitError skips.
 _RATE_LIMIT_PHRASES = (
@@ -320,7 +320,7 @@ async def read_back_option_pair(
     Raises:
         AssertionError: If the row never appears or carries no option pair.
     """
-    from notebooklm._row_adapters.artifacts import ArtifactRow
+    from notebooklm._web.rows.artifacts import ArtifactRow
 
     assert family in ("quiz", "flashcards"), family
     for attempt in range(attempts):

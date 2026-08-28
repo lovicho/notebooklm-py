@@ -17,7 +17,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from notebooklm._artifacts import ArtifactsAPI
-from notebooklm._row_adapters.artifacts import ArtifactRow
+from notebooklm._web.artifacts import WebArtifactsAPI
+from notebooklm._web.rows.artifacts import ArtifactRow
 from notebooklm.rpc.types import ArtifactStatus, ArtifactTypeCode
 from notebooklm.types import ArtifactNotReadyError
 
@@ -47,12 +48,12 @@ def _artifact(
 @pytest.fixture
 def api() -> ArtifactsAPI:
     """Build an ArtifactsAPI with no-op runtime / mind-map — only the helper is exercised."""
-    from notebooklm._mind_map import NoteBackedMindMapService
-    from notebooklm._note_service import NoteService
+    from notebooklm._web.mind_maps import NoteBackedMindMapService
+    from notebooklm._web.notes import NoteService
     from tests._fixtures.fake_core import make_fake_core
 
     mock_core = make_fake_core(rpc_call=AsyncMock())
-    return ArtifactsAPI(
+    return WebArtifactsAPI(
         rpc=mock_core,
         drain=mock_core,
         lifecycle=mock_core,

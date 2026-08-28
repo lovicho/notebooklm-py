@@ -27,7 +27,7 @@ edges (attributes added *outside* this function).
 
 This module is private: it is not exported from ``notebooklm`` and the
 test-only parameters MUST NOT be promoted to ``NotebookLMClient``'s
-public constructor (see the seam policy in ``_client_seams``).
+public constructor (see the seam policy in ``_web/transport/seams.py``).
 """
 
 from __future__ import annotations
@@ -39,18 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from ._artifacts import ArtifactsAPI
-from ._chat import ChatAPI
 from ._client_composed import ClientComposed
-from ._client_seams import resolve_client_seams
-from ._collections import CollectionsAPI
-from ._labels import LabelsAPI
-from ._mind_map import NoteBackedMindMapService
-from ._mind_maps_api import MindMapsAPI
-from ._note_service import NoteService
-from ._notebooks import NotebooksAPI
-from ._notes import NotesAPI
-from ._research import ResearchAPI
 from ._runtime.config import (
     AUTO_READ_TIMEOUT,
     DEFAULT_CHAT_RESPONSE_MAX_BYTES,
@@ -64,10 +53,19 @@ from ._runtime.config import (
 )
 from ._runtime.init import compose_client_internals
 from ._runtime.lifecycle import CookieRotator, CookieSaver
-from ._settings import SettingsAPI
-from ._sharing import SharingAPI
-from ._source.upload import SourceUploadPipeline
-from ._sources import SourcesAPI
+from ._web.artifacts import WebArtifactsAPI
+from ._web.chat import WebChatAPI
+from ._web.collections import WebCollectionsAPI
+from ._web.labels import WebLabelsAPI
+from ._web.mind_maps import NoteBackedMindMapService, WebMindMapsAPI
+from ._web.notebooks import WebNotebooksAPI
+from ._web.notes import NoteService, WebNotesAPI
+from ._web.research import ResearchAPI
+from ._web.settings import WebSettingsAPI
+from ._web.sharing import WebSharingAPI
+from ._web.sources import WebSourcesAPI
+from ._web.sources.upload import SourceUploadPipeline
+from ._web.transport.seams import resolve_client_seams
 from .auth import AuthTokens
 
 if TYPE_CHECKING:
@@ -122,7 +120,7 @@ def _assemble_client(
     refresh_retry_delay: float = 0.2,
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
     keepalive_storage_path: Path | None | _UnsetType = _UNSET,
-    # --- Test-only injection seams (see ``_client_seams`` docstring) ------
+    # --- Test-only injection seams (see ``_web/transport/seams.py``) ------
     decode_response: Callable[..., Any] | None = None,
     sleep: Callable[[float], Awaitable[Any]] | None = None,
     is_auth_error: Callable[[Exception], bool] | None = None,
@@ -263,7 +261,7 @@ def _assemble_client(
     # three runtime seams here (and never supplies an
     # ``async_client_factory``), so they always resolve to the
     # canonical module bindings. The non-``None`` paths exist solely
-    # for deterministic test injection — see ``_client_seams`` module
+    # for deterministic test injection — see ``_web/transport/seams.py``
     # docstring. Do not promote any of them to a public kwarg without
     # a production caller that varies them.
     client._seams = resolve_client_seams(
@@ -344,13 +342,13 @@ def _assemble_client(
     client._source_uploader = source_uploader
     # Per ADR-0014 Rule 3: simple features take their RpcCaller dependency
     # directly from the composition root's executor.
-    client.sources = SourcesAPI(
+    client.sources = WebSourcesAPI(
         internals.executor,
         uploader=source_uploader,
         upload_timeout=upload_timeout,
         max_concurrent_uploads=max_concurrent_uploads,
     )
-    client.notebooks = NotebooksAPI(internals.executor, sources_api=client.sources)
+    client.notebooks = WebNotebooksAPI(internals.executor, sources_api=client.sources)
     # Note wiring (see docs/refactor-history.md): an explicit
     # NoteService + NoteBackedMindMapService split. NoteService owns the
     # raw row primitives; NoteBackedMindMapService is the mind-map-only
@@ -364,7 +362,7 @@ def _assemble_client(
     # RPC dispatch; ``drain`` covers ``operation_scope`` and the
     # close-time ``register_drain_hook`` used by the polling
     # service; ``lifecycle`` covers ``assert_bound_loop``.
-    client.artifacts = ArtifactsAPI(
+    client.artifacts = WebArtifactsAPI(
         rpc=internals.executor,
         drain=internals.collaborators.drain_tracker,
         lifecycle=internals.collaborators.lifecycle,
@@ -373,12 +371,12 @@ def _assemble_client(
         note_service=note_service,
         storage_path=storage_path,
     )
-    # ChatAPI (per ADR-0014) takes its
-    # four direct collaborators (RpcCaller, RuntimeTransport,
-    # ReqidCounter, LoopGuard) by keyword argument. The transport is
+    # WebChatAPI (per ADR-0014) takes its
+    # five direct collaborators (RpcCaller, RuntimeTransport, ReqidCounter,
+    # LoopGuard, NotebookSourceIdProvider) by keyword argument. The transport is
     # sourced from ``client._composed``; other runtime fields come from
     # the :class:`ClientInternals` returned by the composition root.
-    client.chat = ChatAPI(
+    client.chat = WebChatAPI(
         rpc=internals.executor,
         transport=client._composed.transport,
         reqid=internals.collaborators.reqid,
@@ -388,17 +386,18 @@ def _assemble_client(
         notebooks=client.notebooks,
         created_chat_sessions=client.notebooks,
     )
-    client.notes = NotesAPI(
+    client.notes = WebNotesAPI(
         notes=note_service,
         mind_maps=mind_maps,
     )
     # Unified mind-map surface over both backends (note-backed + interactive
     # studio artifact); dispatches each op to the correct RPC family (#1256).
-    client.mind_maps = MindMapsAPI(
+    client.mind_maps = WebMindMapsAPI(
         rpc=internals.executor,
         mind_maps=mind_maps,
         artifacts=client.artifacts,
         notebooks=client.notebooks,
+        notes=client.notes,
     )
     # Pure-RPC features (typed as ``rpc: RpcCaller``). Pass the
     # ``RpcExecutor`` collaborator directly, sourced from the composed
@@ -408,13 +407,13 @@ def _assemble_client(
         base_timeout=timeout,
         import_research_timeout=import_research_timeout,
     )
-    client.settings = SettingsAPI(internals.executor)
-    client.sharing = SharingAPI(internals.executor)
+    client.settings = WebSettingsAPI(internals.executor)
+    client.sharing = WebSharingAPI(internals.executor)
     # Source labels. Takes a narrow ``list_sources`` callable (not the whole
     # SourcesAPI) for the membership->Source join in ``labels.sources()``;
     # wired after ``client.sources`` exists. Same client/bound loop (ADR-0004).
-    client.labels = LabelsAPI(internals.executor, list_sources=client.sources.list)
+    client.labels = WebLabelsAPI(internals.executor, list_sources=client.sources.list)
     # Collections (account-level notebook groups). Takes a narrow ``list_notebooks``
     # callable for the membership->Notebook join in ``collections.notebooks()``;
     # wired after ``client.notebooks`` exists. Same client/bound loop (ADR-0004).
-    client.collections = CollectionsAPI(internals.executor, list_notebooks=client.notebooks.list)
+    client.collections = WebCollectionsAPI(internals.executor, list_notebooks=client.notebooks.list)

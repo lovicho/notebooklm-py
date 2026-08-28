@@ -7,7 +7,7 @@
     "ENUM_GAPS": 34,
     "MAPPINGS": 669,
     "PINNED": 114,
-    "UNMAPPED": 267
+    "UNMAPPED": 294
   },
   "tests/_guardrails/test_auth_cold_recovery_coordinator_boundary.py": {
     "_EXPECTED_IMPORTS": 225
@@ -64,6 +64,12 @@
     "_COOKIE_SHADOW_INVENTORY": 96,
     "_NON_AUTHTOKENS_CANDIDATES": 30
   },
+  "tests/_guardrails/test_backend_abstract_contracts.py": {
+    "BASE_ABSTRACT_CONTRACTS": 142
+  },
+  "tests/_guardrails/test_backend_boundaries.py": {
+    "LAZY_WEB_IMPORT_ALLOWLIST": 34
+  },
   "tests/_guardrails/test_classify_error_handler_consistency.py": {
     "_EXEMPLARS": 22
   },
@@ -92,7 +98,7 @@
     "_EXEMPLARS": 22
   },
   "tests/_guardrails/test_no_facade_reach_in.py": {
-    "_FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_MODULES": 25
+    "_FORBIDDEN_PRIVATE_SERVICE_RUNTIME_IMPORT_MODULES": 35
   },
   "tests/_guardrails/test_no_session_compat_bridges.py": {
     "CARVE_OUT_MODULES": 21

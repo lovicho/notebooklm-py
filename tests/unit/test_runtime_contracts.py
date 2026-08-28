@@ -1,5 +1,5 @@
 """Typing checks for the capability-Protocol contracts in
-``notebooklm._runtime.contracts``.
+``notebooklm._runtime.contracts`` and ``notebooklm._web.contracts``.
 
 Phase 7 (docs/refactor-history.md §Migration Plan step 10) replaced the broad
 ``Session`` Protocol with shared capability Protocols. The surviving
@@ -8,7 +8,7 @@ consumers), and the pure-transport ``Kernel``. The single-consumer
 ``AuthMetadata`` / ``OperationScopeProvider`` Protocols and the unused
 ``AsyncWorkRuntime`` composite were inlined into their owning feature
 modules / deleted in issue #1327 — ``AuthMetadata`` now lives in
-``_source.upload`` (used by ``SourceUploadPipeline``) and
+``_web.sources.upload`` (used by ``SourceUploadPipeline``) and
 ``OperationScopeProvider`` in ``_artifact.polling`` (used by
 ``ArtifactPollingService``); mypy enforces their structural conformance
 at the consuming call sites. The standalone
@@ -25,11 +25,8 @@ from typing import Any
 
 import httpx
 
-from notebooklm._runtime.contracts import (
-    Kernel,
-    LoopGuard,
-    RpcCaller,
-)
+from notebooklm._runtime.contracts import LoopGuard
+from notebooklm._web.contracts import Kernel, RpcCaller
 from notebooklm.rpc.types import RPCMethod
 
 

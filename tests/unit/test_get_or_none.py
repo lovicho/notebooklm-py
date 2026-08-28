@@ -19,14 +19,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from notebooklm._artifacts import ArtifactsAPI
 from notebooklm._lookup import unwrap_or_raise
-from notebooklm._mind_map import NoteBackedMindMapService
-from notebooklm._mind_maps_api import MindMapsAPI
-from notebooklm._note_service import NoteService
-from notebooklm._notebooks import NotebooksAPI
-from notebooklm._notes import NotesAPI
-from notebooklm._sources import SourcesAPI
+from notebooklm._web.artifacts import WebArtifactsAPI
+from notebooklm._web.mind_maps import NoteBackedMindMapService, WebMindMapsAPI
+from notebooklm._web.notebooks import WebNotebooksAPI
+from notebooklm._web.notes import NoteService, WebNotesAPI
+from notebooklm._web.sources import WebSourcesAPI
 from notebooklm.exceptions import ClientError, NotebookNotFoundError, RPCError
 from notebooklm.types import MindMap, MindMapKind, Source
 
@@ -59,19 +57,19 @@ class TestUnwrapOrRaise:
 # ---------------------------------------------------------------------------
 
 
-def _make_notebooks_api(rpc_call: AsyncMock) -> NotebooksAPI:
+def _make_notebooks_api(rpc_call: AsyncMock) -> WebNotebooksAPI:
     # ADR-0007: configure the rpc_call seam via constructor injection
     # (``make_fake_core(rpc_call=...)``) rather than dotted AsyncMock attribute
     # assignment, which the forbidden-monkeypatch lint rejects.
     from tests._fixtures.fake_core import make_fake_core
 
     core = make_fake_core(rpc_call=rpc_call)
-    return NotebooksAPI(core.rpc_executor, sources_api=MagicMock())
+    return WebNotebooksAPI(core.rpc_executor, sources_api=MagicMock())
 
 
 @pytest.fixture
 def sources_api():
-    return SourcesAPI(MagicMock(), uploader=MagicMock())
+    return WebSourcesAPI(MagicMock(), uploader=MagicMock())
 
 
 @pytest.fixture
@@ -83,7 +81,7 @@ def artifacts_api():
     mind_maps.list_mind_maps = AsyncMock(return_value=[])
     notebooks = MagicMock()
     notebooks.get_source_ids = AsyncMock(return_value=[])
-    return ArtifactsAPI(
+    return WebArtifactsAPI(
         rpc=core,
         drain=core,
         lifecycle=core,
@@ -100,7 +98,7 @@ def notes_api():
     core = make_fake_core(rpc_call=AsyncMock())
     note_service = NoteService(core)
     mind_maps = NoteBackedMindMapService(note_service)
-    return NotesAPI(notes=note_service, mind_maps=mind_maps)
+    return WebNotesAPI(notes=note_service, mind_maps=mind_maps)
 
 
 @pytest.fixture
@@ -112,7 +110,13 @@ def mind_maps_api():
     artifacts = MagicMock()
     artifacts.list = AsyncMock(return_value=[])
     notebooks = MagicMock()
-    return MindMapsAPI(rpc=rpc, mind_maps=mind_maps, artifacts=artifacts, notebooks=notebooks)
+    return WebMindMapsAPI(
+        rpc=rpc,
+        mind_maps=mind_maps,
+        artifacts=artifacts,
+        notebooks=notebooks,
+        notes=MagicMock(),
+    )
 
 
 # ---------------------------------------------------------------------------

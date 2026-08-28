@@ -93,7 +93,7 @@ AUDIT_REPAIR_LIST: dict[str, str] = {
     # collapsed to ``"SCRUBBED"``).
     # chat_ask.yaml + chat_ask_with_references.yaml were re-recorded against
     # the current 9-param streaming-chat builder
-    # (src/notebooklm/_chat/wire.py:90-127, reached via ChatAPI._build_chat_request)
+    # (src/notebooklm/_web/params/chat_stream.py, reached via WebChatAPI._stream_answer)
     # with the ``freq`` body matcher opted in per-cassette in
     # tests/integration/test_vcr_comprehensive.py.
     # sources_add_file.yaml was repaired — upload tokens scrubbed in
@@ -513,7 +513,7 @@ def test_audit_repair_list_entries_exist() -> None:
 # ``Content-Encoding`` from every recorded response. Pre-#751 that was fine
 # because the response went through ``client.post`` once and decoded
 # exactly once; #751 introduced the streaming rebuild path in
-# :func:`notebooklm._streaming_post.stream_post_with_size_cap`, and the
+# :func:`notebooklm._web.transport.streaming_post.stream_post_with_size_cap`, and the
 # combination of an upstream gzip header re-applied to already-decoded
 # bytes is what bit #769 in production. The existing cassette suite
 # couldn't surface that regression because no cassette carried the
@@ -571,7 +571,7 @@ def test_at_least_one_cassette_advertises_content_encoding_gzip() -> None:
     assert matches, (
         "No cassette under tests/cassettes/ advertises Content-Encoding: gzip "
         "on any response. The streaming rebuild path in "
-        "notebooklm._streaming_post.stream_post_with_size_cap is invisible to "
+        "notebooklm._web.transport.streaming_post.stream_post_with_size_cap is invisible to "
         "VCR replay without it (see #769/#771). Regenerate the gzip-coverage "
         "cassette(s) via:\n"
         "    uv run python tests/scripts/inject_gzip_into_cassette.py "

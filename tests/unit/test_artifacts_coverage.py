@@ -10,7 +10,8 @@ import httpx
 import pytest
 
 import notebooklm._artifact.downloads as _downloads
-from notebooklm._artifacts import ArtifactsAPI
+from notebooklm._web.artifacts import WebArtifactsAPI
+from notebooklm._web.wire.decoder import RPCError
 from notebooklm.exceptions import (
     ArtifactInProgressTimeoutError,
     ArtifactPendingTimeoutError,
@@ -18,7 +19,6 @@ from notebooklm.exceptions import (
     UnknownRPCMethodError,
     ValidationError,
 )
-from notebooklm.rpc.decoder import RPCError
 from notebooklm.rpc.types import VideoFormat, VideoStyle
 from notebooklm.types import ArtifactDownloadError, GenerationStatus
 
@@ -35,15 +35,15 @@ def mock_artifacts_api():
     )
     # ``ArtifactsAPI`` constructs its own ``PollRegistry`` internally; the fake
     # core does not need to provide one.
-    from notebooklm._mind_map import NoteBackedMindMapService
-    from notebooklm._note_service import NoteService
+    from notebooklm._web.mind_maps import NoteBackedMindMapService
+    from notebooklm._web.notes import NoteService
 
     mind_maps = MagicMock(spec=NoteBackedMindMapService)
     mind_maps.list_mind_maps = AsyncMock(return_value=[])
     note_service = MagicMock(spec=NoteService)
     mock_notebooks = MagicMock()
     mock_notebooks.get_source_ids = AsyncMock(return_value=[])
-    api = ArtifactsAPI(
+    api = WebArtifactsAPI(
         rpc=mock_core,
         drain=mock_core,
         lifecycle=mock_core,
@@ -1009,6 +1009,36 @@ class TestPollStatusMediaReadiness:
         status = await api.poll_status("nb_123", "task_123")
         # Should remain in_progress (original status)
         assert status.status == "in_progress"
+
+    @pytest.mark.asyncio
+    async def test_poll_status_ignores_malformed_optional_data_on_unrelated_row(
+        self, mock_artifacts_api
+    ):
+        """Polling id-matches before decoding optional fields on another artifact."""
+        api, mock_core = mock_artifacts_api
+        mock_core.rpc_executor.rpc_call.return_value = [
+            [
+                [
+                    "unrelated",
+                    "Broken quiz",
+                    4,
+                    None,
+                    3,
+                    None,
+                    None,
+                    None,
+                    None,
+                    [],  # Incomplete variant envelope would fail full decoding.
+                ],
+                ["task_123", "Report", 2, None, 3],
+            ]
+        ]
+
+        status = await api.poll_status("nb_123", "task_123")
+
+        assert status.status == "completed"
+        assert status.url is None
+        mock_core.rpc_executor.rpc_call.assert_awaited_once()
 
 
 # =============================================================================

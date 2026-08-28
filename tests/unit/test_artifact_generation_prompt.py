@@ -19,11 +19,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from notebooklm._artifact.listing import ArtifactListingService
 from notebooklm._artifacts import ArtifactsAPI
-from notebooklm._mind_map import NoteBackedMindMapService
-from notebooklm._note_service import NoteService
-from notebooklm._row_adapters.artifacts import ArtifactRow
+from notebooklm._web.artifact.listing import ArtifactListingService
+from notebooklm._web.artifacts import WebArtifactsAPI
+from notebooklm._web.mind_maps import NoteBackedMindMapService
+from notebooklm._web.notes import NoteService
+from notebooklm._web.rows.artifacts import ArtifactRow
 from notebooklm.exceptions import ArtifactNotFoundError, UnknownRPCMethodError
 from notebooklm.rpc import (
     FLASHCARDS_VARIANT,
@@ -158,7 +159,7 @@ def artifacts_api() -> ArtifactsAPI:
     mind_maps.list_mind_maps = AsyncMock(return_value=[])
     notebooks = MagicMock()
     notebooks.get_source_ids = AsyncMock(return_value=[])
-    return ArtifactsAPI(
+    return WebArtifactsAPI(
         rpc=core,
         drain=core,
         lifecycle=core,
@@ -194,7 +195,7 @@ class TestArtifactsAPIGetPrompt:
         mind_maps.list_mind_maps = AsyncMock(return_value=[mind_map_row])
         notebooks = MagicMock()
         notebooks.get_source_ids = AsyncMock(return_value=[])
-        api = ArtifactsAPI(
+        api = WebArtifactsAPI(
             rpc=core,
             drain=core,
             lifecycle=core,
@@ -216,7 +217,7 @@ class TestArtifactsAPIGetPrompt:
         mind_maps.list_mind_maps = AsyncMock(return_value=[])
         notebooks = MagicMock()
         notebooks.get_source_ids = AsyncMock(return_value=[])
-        api = ArtifactsAPI(
+        api = WebArtifactsAPI(
             rpc=core,
             drain=core,
             lifecycle=core,

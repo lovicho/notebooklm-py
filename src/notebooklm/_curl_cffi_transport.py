@@ -29,6 +29,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from ._hop_credentials import CredentialPolicy
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
     from http.cookiejar import CookieJar
@@ -72,6 +74,13 @@ def _to_curl_timeout(timeout: Any) -> float | tuple[float, float] | None:
 
 def _strip(headers: Mapping[str, str]) -> dict[str, str]:
     return {k: v for k, v in headers.items() if k.lower() not in _STRIP_HEADERS}
+
+
+def _strip_preserving_duplicates(headers: Mapping[str, str]) -> list[tuple[str, str]]:
+    """Strip rebuffer-invalid headers without collapsing repeated fields."""
+    multi_items = getattr(headers, "multi_items", None)
+    items = multi_items() if callable(multi_items) else headers.items()
+    return [(key, value) for key, value in items if key.lower() not in _STRIP_HEADERS]
 
 
 async def _materialize(content: Any) -> bytes | None:
@@ -250,6 +259,7 @@ class CurlCffiAsyncClient:
         url: str,
         *,
         is_trusted_host: Callable[[str | None], bool],
+        credential_for: CredentialPolicy | None = None,
         max_redirects: int = 20,  # match httpx.AsyncClient's default for cross-transport parity
         **kwargs: Any,
     ) -> httpx.Response:
@@ -283,6 +293,7 @@ class CurlCffiAsyncClient:
         # caller-supplied follow_redirects so it can't collide with that.
         kwargs.pop("follow_redirects", None)
         current = url
+        managed_header_names = {"authorization", "proxy-authorization"}
         for _ in range(max_redirects + 1):
             parsed = urlparse(current)
             if parsed.scheme != "https" or not is_trusted_host(parsed.hostname):
@@ -291,15 +302,63 @@ class CurlCffiAsyncClient:
                     request=httpx.Request("GET", current),
                 )
             try:
+                hop_kwargs = dict(kwargs)
+                credentials = None
+                if credential_for is not None:
+                    credentials = credential_for(current)
+                    if credentials is not None:
+                        managed_header_names.update(name.lower() for name in credentials.headers)
+
+                    # A policy-managed request uses the callback as the sole
+                    # credential source, including on hop 1. curl_cffi otherwise
+                    # merges constructor/session cookies and headers into every
+                    # request before applying the per-call values.
+                    self._curl.cookies.clear()
+                    for name in managed_header_names:
+                        self._curl.headers.pop(name, None)
+
+                    hop_kwargs["cookies"] = (
+                        credentials.cookies.jar
+                        if credentials is not None and credentials.cookies is not None
+                        else {}
+                    )
+                    hop_headers = httpx.Headers(hop_kwargs.get("headers") or {})
+                    for name in managed_header_names:
+                        hop_headers.pop(name, None)
+                    if credentials is not None:
+                        hop_headers.update(credentials.headers)
+                    if hop_headers or "headers" in hop_kwargs:
+                        hop_kwargs["headers"] = dict(hop_headers)
+                    # curl_cffi promotes per-call request cookies into its
+                    # AsyncSession cookie store unless response parsing is told
+                    # not to. A policy-managed session must remain credential-free
+                    # so a later None result cannot inherit an earlier hop's jar.
+                    hop_kwargs["discard_cookies"] = True
                 r = await self._curl.get(
                     current,
                     allow_redirects=False,
                     quote=False,
                     timeout=timeout,
-                    **kwargs,
+                    **hop_kwargs,
                 )
             except RequestsError as exc:
                 raise httpx.RequestError(str(exc), request=httpx.Request("GET", current)) from exc
+            if (
+                credential_for is not None
+                and credentials is not None
+                and credentials.cookies is not None
+            ):
+                # ``discard_cookies=True`` prevents curl_cffi from promoting
+                # request cookies into session state. Preserve normal redirect
+                # cookie rotation explicitly in the policy-selected jar, using
+                # the current request URL for correct host-only cookie scoping.
+                credentials.cookies.extract_cookies(
+                    httpx.Response(
+                        status_code=r.status_code,
+                        headers=_strip_preserving_duplicates(r.headers),
+                        request=httpx.Request("GET", current),
+                    )
+                )
             self._sync_cookies_back()
             if r.status_code in _REDIRECT_STATUSES:
                 location = r.headers.get("location")

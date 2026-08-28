@@ -18,8 +18,8 @@ from typing import Any
 
 import pytest
 
-from notebooklm._artifacts import ArtifactsAPI
 from notebooklm._polling_registry import PollRegistry
+from notebooklm._web.artifacts import WebArtifactsAPI
 from notebooklm.auth import AuthTokens
 from notebooklm.client import NotebookLMClient
 from tests._helpers.client_factory import build_client_shell_for_tests
@@ -92,14 +92,14 @@ async def test_session_close_drains_artifact_poll_hook() -> None:
     """``close()`` cancels in-flight poll tasks within 1s and tears down cleanly."""
     from unittest.mock import MagicMock
 
-    from notebooklm._mind_map import NoteBackedMindMapService
-    from notebooklm._note_service import NoteService
+    from notebooklm._web.mind_maps import NoteBackedMindMapService
+    from notebooklm._web.notes import NoteService
 
     core = build_client_shell_for_tests(_auth())
     # ``ArtifactsAPI`` consumes its three runtime collaborators
     # (``rpc`` + ``drain`` + ``lifecycle``) directly — mirrors production
     # wiring in ``NotebookLMClient.__init__``.
-    artifacts = ArtifactsAPI(
+    artifacts = WebArtifactsAPI(
         rpc=core._rpc_executor,
         drain=core._collaborators.drain_tracker,
         lifecycle=core._collaborators.lifecycle,

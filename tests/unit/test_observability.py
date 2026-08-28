@@ -13,11 +13,11 @@ from notebooklm import (
     correlation_id,
     get_request_id,
 )
-from notebooklm._artifacts import ArtifactsAPI
-from notebooklm._mind_map import NoteBackedMindMapService
-from notebooklm._note_service import NoteService
-from notebooklm._source.upload import SourceUploadPipeline
-from notebooklm._sources import SourcesAPI
+from notebooklm._web.artifacts import WebArtifactsAPI
+from notebooklm._web.mind_maps import NoteBackedMindMapService
+from notebooklm._web.notes import NoteService
+from notebooklm._web.sources import WebSourcesAPI
+from notebooklm._web.sources.upload import SourceUploadPipeline
 from notebooklm.auth import AuthTokens
 from notebooklm.rpc import RPCMethod
 from notebooklm.types import GenerationStatus
@@ -67,7 +67,7 @@ async def test_rpc_metrics_event_and_correlation_scope(auth_tokens: AuthTokens) 
     # the shared authed transport itself would bypass the chain entirely
     # and silence the counters this test exists to assert. Mocking above
     # the chain would do the same.
-    from notebooklm._middleware.core import RpcResponse
+    from notebooklm._web.transport.middleware.core import RpcResponse
 
     async def fake_terminal(request: object) -> RpcResponse:
         # Read the correlation id INSIDE the chain so the assertion
@@ -81,7 +81,7 @@ async def test_rpc_metrics_event_and_correlation_scope(auth_tokens: AuthTokens) 
     core._composed.chain_host._authed_post_chain_terminal = fake_terminal  # type: ignore[method-assign]
     # Rebuild the chain so it wraps the new terminal (the original chain
     # was built in the composition root against the original bound method).
-    from notebooklm._middleware.core import build_chain
+    from notebooklm._web.transport.middleware.core import build_chain
 
     core._composed.chain_host._authed_post_chain = build_chain(
         core._composed.middlewares, fake_terminal
@@ -130,7 +130,7 @@ async def test_rpc_decode_error_bumps_drift_counter(auth_tokens: AuthTokens) -> 
     core = build_client_shell_for_tests(auth_tokens, decode_response=drifting_decode)
     install_http_client_for_test(core._collaborators.kernel, AsyncMock(spec=httpx.AsyncClient))
 
-    from notebooklm._middleware.core import RpcResponse, build_chain
+    from notebooklm._web.transport.middleware.core import RpcResponse, build_chain
 
     async def fake_terminal(request: object) -> RpcResponse:
         return RpcResponse(
@@ -247,7 +247,7 @@ async def test_drain_waits_for_artifact_poll_task(auth_tokens: AuthTokens) -> No
     # ``ArtifactsAPI`` consumes its three runtime collaborators
     # (``rpc`` + ``drain`` + ``lifecycle``) directly — mirrors production
     # wiring in ``NotebookLMClient.__init__``.
-    api = ArtifactsAPI(
+    api = WebArtifactsAPI(
         rpc=core._rpc_executor,
         drain=core._collaborators.drain_tracker,
         lifecycle=core._collaborators.lifecycle,
@@ -349,7 +349,7 @@ async def test_upload_progress_callback_receives_byte_counts(
     core = build_client_shell_for_tests(auth_tokens)
     await core.__aenter__()
     try:
-        api = SourcesAPI(
+        api = WebSourcesAPI(
             core,
             uploader=SourceUploadPipeline(
                 rpc=core,
@@ -397,7 +397,7 @@ async def test_upload_progress_callback_receives_byte_counts(
 async def test_wait_for_completion_status_change_callback(auth_tokens: AuthTokens) -> None:
     core = build_client_shell_for_tests(auth_tokens)
     # ``ArtifactsAPI`` consumes its three runtime collaborators directly.
-    api = ArtifactsAPI(
+    api = WebArtifactsAPI(
         rpc=core._rpc_executor,
         drain=core._collaborators.drain_tracker,
         lifecycle=core._collaborators.lifecycle,

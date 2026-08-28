@@ -185,7 +185,7 @@ _NON_AUTHTOKENS_CANDIDATES: frozenset[tuple[str, str, str, str, str, int]] = fro
             1,
         ),
         (
-            "_source/upload.py",
+            "_web/sources/upload.py",
             "SourceUploadPipeline._live_cookies",
             "get_http_client()",
             "cookies",
@@ -264,10 +264,10 @@ _COOKIE_SHADOW_INVENTORY: frozenset[tuple[str, str, str, str, str, int]] = froze
             "Store",
             1,
         ),
-        ("_kernel.py", "Kernel._bootstrap_cookies", "auth", "cookie_jar", "Load", 1),
-        ("_kernel.py", "Kernel._bootstrap_cookies", "auth", "cookies", "Load", 1),
+        ("_web/transport/kernel.py", "Kernel._bootstrap_cookies", "auth", "cookie_jar", "Load", 1),
+        ("_web/transport/kernel.py", "Kernel._bootstrap_cookies", "auth", "cookies", "Load", 1),
         (
-            "_runtime/auth.py",
+            "_web/transport/auth.py",
             "AuthRefreshCoordinator.update_auth_headers",
             "auth",
             "replace_cookie_jar",

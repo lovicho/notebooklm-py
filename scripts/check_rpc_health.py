@@ -84,12 +84,7 @@ from uuid import uuid4
 
 import httpx
 
-from notebooklm._artifact.payloads import build_retry_artifact_params
 from notebooklm._auth.tokens import LoadPolicy, _load_stored_auth
-from notebooklm._chat.wire import (
-    build_streaming_chat_request,
-    parse_streaming_chat_response,
-)
 from notebooklm._env import (
     BUILD_LABEL_STALE_AFTER_DAYS,
     DEFAULT_BL,
@@ -102,7 +97,16 @@ from notebooklm._env import (
     get_default_language,
 )
 from notebooklm._logging import scrub_secrets
-from notebooklm._notebooks import build_create_notebook_params
+from notebooklm._web.params.artifacts import build_retry_artifact_params
+from notebooklm._web.params.chat_stream import build_streaming_chat_request
+from notebooklm._web.params.notebooks import build_create_notebook_params
+from notebooklm._web.rows.chat_stream import parse_streaming_chat_response
+from notebooklm._web.wire.decoder import (
+    collect_rpc_ids,
+    decode_response,
+    parse_chunked_response,
+    strip_anti_xssi,
+)
 from notebooklm.auth import AuthTokens
 from notebooklm.exceptions import ChatError, ChatResponseParseError, DecodingError
 from notebooklm.paths import get_storage_path
@@ -112,12 +116,6 @@ from notebooklm.rpc import (
     build_request_body,
     encode_rpc_request,
     get_batchexecute_url,
-)
-from notebooklm.rpc.decoder import (
-    collect_rpc_ids,
-    decode_response,
-    parse_chunked_response,
-    strip_anti_xssi,
 )
 from notebooklm.rpc.types import _QUERY_ENDPOINT_PATH
 
