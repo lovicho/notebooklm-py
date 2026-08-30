@@ -1,5 +1,6 @@
 """Web backend for notebook operations."""
 
+import builtins
 import logging
 import reprlib
 from typing import Any
@@ -259,7 +260,7 @@ class WebNotebooksAPI(NotebooksAPI):
     async def _rpc_call(
         self,
         method: RPCMethod,
-        params: list[Any],
+        params: builtins.list[Any],
         source_path: str = "/",
         allow_null: bool = False,
         _is_retry: bool = False,
@@ -278,7 +279,7 @@ class WebNotebooksAPI(NotebooksAPI):
             operation_variant=operation_variant,
         )
 
-    async def get_source_ids(self, notebook_id: str) -> list[str]:
+    async def get_source_ids(self, notebook_id: str) -> builtins.list[str]:
         """Extract all source IDs from a notebook.
 
         Fetches notebook data and extracts source IDs for use with chat and
@@ -400,10 +401,10 @@ class WebNotebooksAPI(NotebooksAPI):
         self,
         notebook_id: str,
         *,
-        source_ids: list[str] | None = None,
+        source_ids: builtins.list[str] | None = None,
         mode: int = _PROMPT_SUGGESTIONS_DEFAULT_MODE,
         query: str | None = None,
-    ) -> list[PromptSuggestion]:
+    ) -> builtins.list[PromptSuggestion]:
         """Get AI-suggested prompts for a notebook.
 
         Backed by ``GeneratePromptSuggestions`` (``otmP3b``): a *general*
@@ -476,7 +477,7 @@ class WebNotebooksAPI(NotebooksAPI):
             if row.is_well_formed
         ]
 
-    async def list(self) -> list[Notebook]:
+    async def list(self) -> builtins.list[Notebook]:
         """List notebooks (most-recently-viewed first).
 
         .. note::
