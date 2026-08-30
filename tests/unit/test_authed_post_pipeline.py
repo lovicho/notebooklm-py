@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -50,11 +50,13 @@ import pytest
 import notebooklm._backoff as _backoff
 import notebooklm._runtime.helpers as _runtime_helpers
 from notebooklm._logging import get_request_id
+from notebooklm._runtime.config import DEFAULT_TIMEOUT
 from notebooklm._web.transport.errors import (
     TransportAuthExpired,
     TransportRateLimited,
     TransportServerError,
 )
+from notebooklm._web.transport.middleware.context import RPC_CONTEXT_RESOURCE_EPOCH
 from notebooklm._web.transport.middleware.core import RpcRequest, RpcResponse
 from notebooklm._web.transport.request_types import AuthSnapshot
 from notebooklm.auth import AuthTokens
@@ -80,9 +82,10 @@ def _no_backoff_jitter(monkeypatch):
 
 def _make_core(
     *,
-    refresh_callback: Callable[[], Any] | None = None,
+    refresh_callback: Callable[[int], Awaitable[AuthTokens]] | None = None,
     rate_limit_max_retries: int = 0,
     server_error_max_retries: int = 0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> NotebookLMClient:
     auth = AuthTokens(
         csrf_token="CSRF_OLD",
@@ -95,6 +98,7 @@ def _make_core(
         refresh_retry_delay=0.0,
         rate_limit_max_retries=rate_limit_max_retries,
         server_error_max_retries=server_error_max_retries,
+        timeout=timeout,
     )
 
 
@@ -230,6 +234,114 @@ async def test_perform_authed_post_requires_open_client():
 
 
 @pytest.mark.asyncio
+async def test_direct_transport_expected_epoch_rejects_before_kernel_or_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retained transport caller cannot inspect the next resource generation."""
+    core = _make_core()
+    await core.__aenter__()
+    try:
+        transport = core._composed.transport
+        supervisor = core._collaborators.call_supervisor
+        generation = supervisor._current
+        assert generation is not None
+        touched: list[str] = []
+
+        async def unexpected_snapshot(_expected_epoch: int) -> AuthSnapshot:
+            touched.append("auth")
+            raise AssertionError("stale request reached auth snapshot")
+
+        def unexpected_kernel_epoch(_expected_epoch: int) -> None:
+            touched.append("kernel")
+            raise AssertionError("stale request reached Kernel")
+
+        def unexpected_build(_snapshot: AuthSnapshot) -> tuple[str, str, dict[str, str]]:
+            touched.append("build")
+            raise AssertionError("stale request materialized an envelope")
+
+        async def unexpected_chain(_request: RpcRequest) -> RpcResponse:
+            touched.append("chain")
+            raise AssertionError("stale request entered middleware")
+
+        monkeypatch.setattr(transport, "_snapshot_provider", unexpected_snapshot)
+        monkeypatch.setattr(transport._kernel, "assert_epoch", unexpected_kernel_epoch)
+        core._composed.chain_host._authed_post_chain = unexpected_chain
+
+        with pytest.raises(
+            RuntimeError,
+            match=rf"expected={generation.epoch + 1}, active={generation.epoch}",
+        ):
+            await transport.perform_authed_post(
+                build_request=unexpected_build,
+                log_label="retired direct request",
+                expected_epoch=generation.epoch + 1,
+            )
+
+        assert touched == []
+        assert generation.in_flight == 0
+        assert generation.drain._in_flight_posts == 0
+    finally:
+        await core.close()
+
+
+@pytest.mark.asyncio
+async def test_pre_chain_failures_are_admitted_but_not_terminal_accounted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generation admission precedes auth while terminal metrics stay untouched."""
+    core = _make_core()
+    await core.__aenter__()
+    try:
+        transport = core._composed.transport
+        original_snapshot_provider = transport._snapshot_provider
+        before = core.metrics_snapshot()
+        queue_waits: list[float] = []
+        metrics = core._collaborators.metrics
+        original_record_queue_wait = metrics.record_rpc_queue_wait
+
+        def _record_queue_wait(wait_seconds: float) -> None:
+            queue_waits.append(wait_seconds)
+            original_record_queue_wait(wait_seconds)
+
+        monkeypatch.setattr(metrics, "record_rpc_queue_wait", _record_queue_wait)
+
+        async def _snapshot_failure(expected_epoch: int) -> AuthSnapshot:
+            assert expected_epoch == 1
+            raise LookupError("snapshot failed before chain entry")
+
+        monkeypatch.setattr(transport, "_snapshot_provider", _snapshot_failure)
+        with pytest.raises(LookupError, match="snapshot failed"):
+            await transport.perform_authed_post(
+                build_request=lambda _snapshot: ("https://example.test", "body", {}),
+                log_label="snapshot",
+                rpc_method="METHOD",
+            )
+
+        monkeypatch.setattr(transport, "_snapshot_provider", original_snapshot_provider)
+
+        def _build_failure(_snapshot: AuthSnapshot) -> tuple[str, str, dict[str, str]]:
+            raise ValueError("materialization failed before chain entry")
+
+        with pytest.raises(ValueError, match="materialization failed"):
+            await transport.perform_authed_post(
+                build_request=_build_failure,
+                log_label="materialize",
+                rpc_method="METHOD",
+            )
+
+        after = core.metrics_snapshot()
+        assert after.rpc_calls_succeeded == before.rpc_calls_succeeded
+        assert after.rpc_calls_failed == before.rpc_calls_failed
+        assert after.rpc_latency_seconds_total == before.rpc_latency_seconds_total
+        assert queue_waits == []
+        assert after.rpc_queue_wait_seconds_total == before.rpc_queue_wait_seconds_total
+        assert core._collaborators.call_supervisor._current is not None
+        assert core._collaborators.call_supervisor._current.in_flight == 0
+    finally:
+        await core.close()
+
+
+@pytest.mark.asyncio
 async def test_auth_refresh_middleware_honors_injected_predicate() -> None:
     """``AuthRefreshMiddleware`` calls ``refresh_callable`` and retries
     exactly once when the injected ``is_auth_error`` predicate returns
@@ -247,7 +359,8 @@ async def test_auth_refresh_middleware_honors_injected_predicate() -> None:
 
     refresh_calls: list[bool] = []
 
-    async def refresh() -> None:
+    async def refresh(expected_epoch: int) -> None:
+        assert expected_epoch == 11
         refresh_calls.append(True)
 
     # A 418 (I'm a teapot) — NOT recognised by the production
@@ -274,7 +387,7 @@ async def test_auth_refresh_middleware_honors_injected_predicate() -> None:
         url="https://example.test/x",
         headers={},
         body=b"payload",
-        context={"log_label": "test"},
+        context={"log_label": "test", RPC_CONTEXT_RESOURCE_EPOCH: 11},
     )
     response = await middleware(request, terminal)
 
@@ -306,7 +419,8 @@ async def test_production_chain_drives_refresh_on_real_401(monkeypatch):
     """
     refresh_calls: list[bool] = []
 
-    async def refresh() -> AuthTokens:
+    async def refresh(expected_epoch: int) -> AuthTokens:
+        assert expected_epoch == 1
         refresh_calls.append(True)
         return core.auth
 
@@ -477,7 +591,7 @@ async def test_first_terminal_attempt_rebuilds_when_snapshot_changed(monkeypatch
             ]
         )
 
-        async def fake_snapshot(*, auth: AuthTokens) -> AuthSnapshot:
+        async def fake_snapshot(*, auth: AuthTokens, expected_epoch: int) -> AuthSnapshot:
             # Tightened signature pins the explicit-collaborator contract:
             # the production caller MUST pass ``auth=<live AuthTokens>``,
             # not the legacy positional host. ``auth is core.auth`` proves
@@ -485,6 +599,7 @@ async def test_first_terminal_attempt_rebuilds_when_snapshot_changed(monkeypatch
             # holds (identity-stable per the live-reference contract in
             # ``wire_middleware_chain``).
             assert auth is core.auth
+            assert expected_epoch == 1
             try:
                 return next(snapshots)
             except StopIteration:
@@ -534,7 +649,8 @@ async def test_build_request_observes_fresh_snapshot_after_401_refresh(monkeypat
     """
     refresh_calls = []
 
-    async def refresh() -> AuthTokens:
+    async def refresh(expected_epoch: int) -> AuthTokens:
+        assert expected_epoch == 1
         refresh_calls.append(True)
         # Mutate auth state so the second snapshot picks up new values.
         core.auth.csrf_token = "CSRF_NEW"
@@ -621,7 +737,8 @@ async def test_stale_envelope_rebuilt_after_refresh_then_retry(monkeypatch):
     """
     refresh_calls: list[bool] = []
 
-    async def refresh() -> AuthTokens:
+    async def refresh(expected_epoch: int) -> AuthTokens:
+        assert expected_epoch == 1
         refresh_calls.append(True)
         # Mutate auth state so a subsequent snapshot captures the new values.
         core.auth.csrf_token = "CSRF_NEW"
@@ -712,7 +829,8 @@ async def test_stale_envelope_rebuilt_after_refresh_then_retry(monkeypatch):
 async def test_transport_auth_expired_when_refresh_fails(monkeypatch):
     refresh_error = RuntimeError("re-authenticate")
 
-    async def refresh() -> AuthTokens:
+    async def refresh(expected_epoch: int) -> AuthTokens:
+        assert expected_epoch == 1
         raise refresh_error
 
     core = _make_core(refresh_callback=refresh)
@@ -807,7 +925,8 @@ async def test_request_id_constant_across_retry_chain(monkeypatch):
     retry attempt — both pre- and post-refresh.
     """
 
-    async def refresh() -> AuthTokens:
+    async def refresh(expected_epoch: int) -> AuthTokens:
+        assert expected_epoch == 1
         core.auth.csrf_token = "CSRF_NEW"
         return core.auth
 
@@ -1099,12 +1218,9 @@ async def test_server_error_budget_zero_raises_immediately(monkeypatch):
 @pytest.mark.asyncio
 async def test_exponential_backoff_caps_at_30_seconds(monkeypatch):
     """Backoff schedule: 1, 2, 4, 8, 16, 30 — caps at 30 for high attempt counts."""
-    core = _make_core(server_error_max_retries=8)
+    core = _make_core(server_error_max_retries=8, timeout=200.0)
     await core.__aenter__()
     try:
-        # This test isolates the exponential schedule itself. Keep the aggregate
-        # retry deadline high enough that it does not stop before the cap repeats.
-        core._collaborators.lifecycle._timeout = 200.0
         sleeps: list[float] = []
 
         async def fake_sleep(seconds: float) -> None:
@@ -1172,7 +1288,8 @@ async def test_5xx_path_does_not_trigger_auth_refresh(monkeypatch):
     refresh_calls: list[bool] = []
     captured_core: dict[str, NotebookLMClient] = {}
 
-    async def refresh() -> AuthTokens:
+    async def refresh(expected_epoch: int) -> AuthTokens:
+        assert expected_epoch == 1
         refresh_calls.append(True)
         return captured_core["c"].auth
 

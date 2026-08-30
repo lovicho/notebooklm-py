@@ -90,7 +90,7 @@ def _make_sources_api() -> SourcesAPI:
     # No ``make_fake_core`` here: ``_arrange_list_miss`` overrides ``api.list``
     # before any RPC path is reached, so the first positional collaborator is
     # never called (matches how ``test_get_or_none.py`` builds its sources API).
-    return WebSourcesAPI(MagicMock(), uploader=MagicMock())
+    return WebSourcesAPI(MagicMock(), supervisor=MagicMock(), uploader=MagicMock())
 
 
 def _make_artifacts_api() -> ArtifactsAPI:
@@ -103,8 +103,7 @@ def _make_artifacts_api() -> ArtifactsAPI:
     notebooks.get_source_ids = AsyncMock(return_value=[])
     return WebArtifactsAPI(
         rpc=core,
-        drain=core,
-        lifecycle=core,
+        supervisor=core,
         notebooks=notebooks,
         mind_maps=mind_maps,
         note_service=MagicMock(spec=NoteService),
@@ -119,7 +118,7 @@ def _make_notes_api() -> WebNotesAPI:
     # truthy non-list payload would now raise ``DecodingError`` as drift (#1344),
     # so it can no longer stand in for "empty".
     core = make_fake_core(rpc_call=AsyncMock(return_value=None))
-    note_service = NoteService(core)
+    note_service = NoteService(core, supervisor=core)
     mind_maps = NoteBackedMindMapService(note_service)
     return WebNotesAPI(notes=note_service, mind_maps=mind_maps)
 

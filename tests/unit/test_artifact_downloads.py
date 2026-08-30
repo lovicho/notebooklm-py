@@ -47,12 +47,11 @@ def mock_artifacts_api():
     # surface stays consistent with production behavior. Tests that
     # need to override list_mind_maps continue to patch it via
     # ``patch.object(api._mind_maps, "list_mind_maps", ...)``.
-    note_service = NoteService(mock_core)
+    note_service = NoteService(mock_core, supervisor=mock_core)
     mind_maps = NoteBackedMindMapService(note_service)
     api = WebArtifactsAPI(
         rpc=mock_core,
-        drain=mock_core,
-        lifecycle=mock_core,
+        supervisor=mock_core,
         notebooks=mock_notebooks,
         mind_maps=mind_maps,
         note_service=note_service,
@@ -912,10 +911,9 @@ async def test_neutral_base_uses_injected_asset_download_service():
     )
     asset_service = AsyncMock(spec=AssetDownloadService)
     asset_service.download_url.return_value = "/tmp/result.bin"
-    drain = MagicMock()
+    supervisor = MagicMock()
     api = concrete_type(
-        drain=drain,
-        lifecycle=MagicMock(),
+        supervisor=supervisor,
         notebooks=MagicMock(),
         asset_downloads=asset_service,
     )

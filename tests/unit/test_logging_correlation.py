@@ -237,6 +237,7 @@ async def test_retry_inherits_parent_request_id():
     """Recursive executor.rpc_call(_is_retry=True) must NOT mint a fresh id — the
     failure→refresh→retry sequence should appear under one prefix."""
     from notebooklm.auth import AuthTokens
+    from notebooklm.rpc import RPCMethod
 
     captured_ids: list[str | None] = []
 
@@ -253,6 +254,7 @@ async def test_retry_inherits_parent_request_id():
         raise_on_null_status: bool = False,
         _refresh_budget=None,
         _retry_deadline=None,
+        _resource_epoch: int | None = None,
     ):
         captured_ids.append(get_request_id())
         # First call: raise to trigger retry path; second call: succeed.
@@ -264,6 +266,7 @@ async def test_retry_inherits_parent_request_id():
                 source_path,
                 allow_null,
                 _is_retry=True,
+                _resource_epoch=_resource_epoch,
             )
         return "ok"
 
@@ -280,7 +283,7 @@ async def test_retry_inherits_parent_request_id():
         executor = core._rpc_executor
         executor._execute_once = fake_impl  # type: ignore[method-assign]
 
-        result = await core._rpc_executor.rpc_call(method=object(), params=[])  # type: ignore[arg-type]
+        result = await core._rpc_executor.rpc_call(method=RPCMethod.GET_NOTEBOOK, params=[])
         assert result == "ok"
         assert len(captured_ids) == 2
         assert captured_ids[0] == captured_ids[1]

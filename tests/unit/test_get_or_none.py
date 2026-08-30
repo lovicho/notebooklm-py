@@ -69,7 +69,7 @@ def _make_notebooks_api(rpc_call: AsyncMock) -> WebNotebooksAPI:
 
 @pytest.fixture
 def sources_api():
-    return WebSourcesAPI(MagicMock(), uploader=MagicMock())
+    return WebSourcesAPI(MagicMock(), supervisor=MagicMock(), uploader=MagicMock())
 
 
 @pytest.fixture
@@ -83,8 +83,7 @@ def artifacts_api():
     notebooks.get_source_ids = AsyncMock(return_value=[])
     return WebArtifactsAPI(
         rpc=core,
-        drain=core,
-        lifecycle=core,
+        supervisor=core,
         notebooks=notebooks,
         mind_maps=mind_maps,
         note_service=MagicMock(spec=NoteService),
@@ -96,7 +95,7 @@ def notes_api():
     from tests._fixtures.fake_core import make_fake_core
 
     core = make_fake_core(rpc_call=AsyncMock())
-    note_service = NoteService(core)
+    note_service = NoteService(core, supervisor=core)
     mind_maps = NoteBackedMindMapService(note_service)
     return WebNotesAPI(notes=note_service, mind_maps=mind_maps)
 

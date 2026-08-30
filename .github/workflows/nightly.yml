@@ -201,7 +201,7 @@ jobs:
 
   # Run E2E tests on the resolved branch
   e2e:
-    name: E2E Tests (${{ needs.resolve-branch.outputs.branch }}@${{ needs.resolve-branch.outputs.short_sha }}/${{ matrix.os }})
+    name: E2E Tests (${{ needs.resolve-branch.outputs.branch }}@${{ needs.resolve-branch.outputs.short_sha }}/${{ matrix.backend }}/${{ matrix.os }})
     needs: resolve-branch
     if: needs.resolve-branch.outputs.is_standard == 'true'
     runs-on: ${{ matrix.os }}
@@ -229,8 +229,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+        - os: ubuntu-latest
+          backend: web
+          generation_notebook: shared
+        - os: windows-latest
+          backend: web
+          generation_notebook: unused
+        - os: ubuntu-latest
+          backend: android
+          generation_notebook: scratch
     env:
+      # Each authenticated lane selects its namespace graph explicitly. Keeping
+      # Web in the matrix preserves the historical default while the separate
+      # Android lane proves the optional package/auth path against live gRPC.
+      NOTEBOOKLM_BACKEND: ${{ matrix.backend }}
       # Pin Playwright's browser install dir to a single workspace-relative
       # path on every OS — see test.yml for the rationale (sidesteps the
       # actions/cache@v6 Windows dual-path restore flake).
@@ -241,7 +254,7 @@ jobs:
       E2E_COVERAGE_FLOOR_SENTINEL: ${{ github.workspace }}/.e2e-coverage-floor-failed
 
     concurrency:
-      group: nightly-${{ needs.resolve-branch.outputs.branch }}-${{ matrix.os }}
+      group: nightly-${{ needs.resolve-branch.outputs.branch }}-${{ matrix.backend }}-${{ matrix.os }}
       cancel-in-progress: true
 
     steps:
@@ -256,6 +269,7 @@ jobs:
         EXPECTED_SHA: ${{ needs.resolve-branch.outputs.sha }}
         TARGET_BRANCH: ${{ needs.resolve-branch.outputs.branch }}
         MATRIX_OS: ${{ matrix.os }}
+        MATRIX_BACKEND: ${{ matrix.backend }}
       shell: bash
       run: |
         ACTUAL_SHA=$(git rev-parse HEAD)
@@ -268,6 +282,7 @@ jobs:
           echo "- Branch: \`$TARGET_BRANCH\`"
           echo "- Commit: \`$ACTUAL_SHA\`"
           echo "- OS: \`$MATRIX_OS\`"
+          echo "- Backend: \`$MATRIX_BACKEND\`"
         } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Set up Python
@@ -296,8 +311,11 @@ jobs:
         # RUNS instead of importorskip-ping fastapi.
         # --extra headless = gpsoauth, required for the layer-4 master-token
         # re-mint that the materialized auth profile below relies on.
+        # --extra android pins grpcio/protobuf and is mandatory even though
+        # gpsoauth overlaps with headless: the Android E2E lane must fail at
+        # installation rather than silently skip for a missing runtime.
         attempt=1; max=3
-        until uv sync --frozen --extra browser --extra dev --extra markdown --extra impersonate --extra mcp --extra server --extra headless; do
+        until uv sync --frozen --extra browser --extra dev --extra markdown --extra impersonate --extra mcp --extra server --extra headless --extra android; do
           if [ "$attempt" -ge "$max" ]; then
             echo "::error::uv sync failed after $max attempts" >&2
             exit 1
@@ -396,6 +414,144 @@ jobs:
         fi
         echo "Auth profile materialized (master token; fresh cookies minted)."
 
+    - name: Assert Android dependencies and live auth
+      if: matrix.backend == 'android'
+      env:
+        NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID: ${{ secrets.NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID }}
+      shell: bash
+      run: |
+        uv run python - <<'PY'
+        import asyncio
+        import os
+
+        import gpsoauth  # noqa: F401 -- hard dependency preflight
+        import grpc  # noqa: F401 -- hard dependency preflight
+        from google.protobuf import __version__ as protobuf_version
+
+        from notebooklm import NotebookLMClient
+
+        async def main() -> None:
+            notebook_id = os.environ["NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID"]
+            async with NotebookLMClient.from_storage(backend="android") as client:
+                if set(client.backends.values()) != {"android"}:
+                    raise RuntimeError(f"Android backend was not fully selected: {client.backends}")
+                notebook = await client.notebooks.get(notebook_id)
+                if notebook.id != notebook_id:
+                    raise RuntimeError("Android auth preflight returned the wrong notebook")
+            print(f"Android gRPC auth preflight passed (protobuf {protobuf_version}).")
+
+        asyncio.run(main())
+        PY
+
+    - name: Bind shared Web generation notebook
+      # Only the full Web/Ubuntu lane may clean the long-lived generation
+      # notebook. Android intentionally receives no generation-notebook env
+      # value, so the E2E fixture creates and deletes its own disposable copy.
+      # Windows runs the read-only marker subset and needs neither form.
+      if: matrix.generation_notebook == 'shared'
+      env:
+        NOTEBOOKLM_GENERATION_NOTEBOOK_ID: ${{ secrets.NOTEBOOKLM_GENERATION_NOTEBOOK_ID }}
+      shell: bash
+      run: |
+        if [ -z "${NOTEBOOKLM_GENERATION_NOTEBOOK_ID:-}" ]; then
+          echo "::error::NOTEBOOKLM_GENERATION_NOTEBOOK_ID resolved to empty."
+          exit 1
+        fi
+        echo "NOTEBOOKLM_GENERATION_NOTEBOOK_ID=$NOTEBOOKLM_GENERATION_NOTEBOOK_ID" >> "$GITHUB_ENV"
+
+    - name: Create isolated Android generation notebook
+      if: matrix.generation_notebook == 'scratch'
+      shell: bash
+      run: |
+        uv run python - <<'PY'
+        import asyncio
+        import os
+        import sys
+        from pathlib import Path
+        from uuid import uuid4
+
+        from notebooklm import NotebookLMClient
+
+        def persist_notebook_id(path: Path, notebook_id: str) -> None:
+            """Atomically publish the cleanup handle before any later mutation."""
+            temporary = path.with_name(f".{path.name}-{uuid4().hex}.tmp")
+            try:
+                with temporary.open("w", encoding="utf-8") as handle:
+                    handle.write(notebook_id)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+            finally:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    # Never replace the persistence/create error with best-effort
+                    # temporary-file cleanup.
+                    pass
+
+        async def main() -> None:
+            id_path = Path(os.environ["RUNNER_TEMP"]) / "android-generation-notebook-id"
+            async with NotebookLMClient.from_storage(backend="android") as client:
+                notebook = await client.notebooks.create(
+                    f"E2E-Android-Generation-{uuid4().hex[:8]}"
+                )
+                try:
+                    persist_notebook_id(id_path, notebook.id)
+                except BaseException:
+                    try:
+                        await client.notebooks.delete(notebook.id)
+                    except BaseException:
+                        print(
+                            "Could not persist or delete the Android generation scratch; "
+                            "preserving the original persistence failure.",
+                            file=sys.stderr,
+                        )
+                    raise
+                try:
+                    await client.sources.add_text(
+                        notebook.id,
+                        title="Machine Learning Fundamentals",
+                        content=(
+                            "Machine learning systems learn patterns from labeled and unlabeled "
+                            "data. Supervised learning covers regression and classification; "
+                            "unsupervised learning covers clustering and dimensionality reduction; "
+                            "reinforcement learning optimizes actions through rewards. Evaluation "
+                            "uses accuracy, precision, recall, F1, calibration, and held-out test "
+                            "sets. Practical deployments monitor drift, fairness, reliability, "
+                            "security, and human oversight across healthcare, finance, transport, "
+                            "science, education, and software engineering. "
+                        )
+                        * 6,
+                        wait=True,
+                        wait_timeout=180,
+                    )
+                except BaseException:
+                    try:
+                        await client.notebooks.delete(notebook.id)
+                    except BaseException:
+                        # Keep the durable id: the unconditional finalizer below
+                        # must retry after an ambiguous cleanup outcome.
+                        print(
+                            "Android generation scratch setup failed and inline deletion "
+                            "was unconfirmed; the finalizer will retry.",
+                            file=sys.stderr,
+                        )
+                    else:
+                        try:
+                            id_path.unlink(missing_ok=True)
+                        except OSError:
+                            # A retained id is harmless: the finalizer treats an
+                            # already-deleted notebook as successful cleanup.
+                            pass
+                    raise
+            with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+                env_file.write(f"NOTEBOOKLM_GENERATION_NOTEBOOK_ID={notebook.id}\n")
+
+        asyncio.run(main())
+        PY
+
     - name: Run E2E tests
       id: e2e
       # Hard gate: only standard branches (main/release/*, or scheduled cron
@@ -412,7 +568,6 @@ jobs:
       continue-on-error: true
       env:
         NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID: ${{ secrets.NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID }}
-        NOTEBOOKLM_GENERATION_NOTEBOOK_ID: ${{ secrets.NOTEBOOKLM_GENERATION_NOTEBOOK_ID }}
         # Enforce the live coverage floors on the nightly only (fresh quota): if a
         # monitored surface (live chat / live generation) produced zero real coverage
         # because every marked test was rate-limited, record it to the sentinel that
@@ -429,9 +584,10 @@ jobs:
         TEST_FILTER: ${{ inputs.test_filter }}
         TARGET_BRANCH: ${{ needs.resolve-branch.outputs.branch }}
         MATRIX_OS: ${{ matrix.os }}
+        MATRIX_BACKEND: ${{ matrix.backend }}
       shell: bash
       run: |
-        echo "Testing branch: $TARGET_BRANCH"
+        echo "Testing branch: $TARGET_BRANCH (backend: $MATRIX_BACKEND)"
         # Start from a clean coverage-floor sentinel so a stale file from a prior
         # run on a reused/self-hosted runner can't false-red the enforcement step.
         rm -f "$E2E_COVERAGE_FLOOR_SENTINEL"
@@ -466,7 +622,7 @@ jobs:
         && steps.e2e.outcome == 'failure'
       env:
         NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID: ${{ secrets.NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID }}
-        NOTEBOOKLM_GENERATION_NOTEBOOK_ID: ${{ secrets.NOTEBOOKLM_GENERATION_NOTEBOOK_ID }}
+        TEST_FILTER: ${{ inputs.test_filter }}
         # Enforce here too: a marked test that failed on the main run and turns into
         # a rate-limit skip after the cool-down would otherwise leave no PASS event
         # for its surface. Appends PASS/SKIP events to the same job-level sentinel
@@ -484,6 +640,12 @@ jobs:
         fi
         echo "Initial E2E run failed. Sleeping 600s before retrying failed tests."
         sleep 600
+        # A filtered dispatch cannot establish a whole-surface coverage floor.
+        # Keep the primary step's opt-out on retry so a quota skip does not
+        # turn a targeted rerun red.
+        if [ -n "$TEST_FILTER" ]; then
+          unset E2E_ENFORCE_COVERAGE_FLOOR
+        fi
         # Pin ``tests/e2e`` so pyproject's ``addopts = --ignore=tests/e2e``
         # doesn't drop every lastfailed entry; otherwise pytest's default
         # ``--last-failed-no-failures=all`` would expand to the full non-e2e
@@ -502,9 +664,9 @@ jobs:
       if: |
         needs.resolve-branch.outputs.is_standard == 'true'
         && matrix.os == 'ubuntu-latest'
+        && matrix.backend == 'web'
       env:
         NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID: ${{ secrets.NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID }}
-        NOTEBOOKLM_GENERATION_NOTEBOOK_ID: ${{ secrets.NOTEBOOKLM_GENERATION_NOTEBOOK_ID }}
         NOTEBOOKLM_TRANSPORT: curl_cffi
       shell: bash
       run: uv run pytest tests/e2e -m impersonate_smoke -s -v --tb=short --reruns 1 --reruns-delay 30
@@ -537,3 +699,33 @@ jobs:
           exit 1
         fi
         echo "Coverage floors satisfied (every skipped surface also had a passing test)."
+
+    - name: Delete isolated Android generation notebook
+      if: ${{ always() && matrix.generation_notebook == 'scratch' }}
+      shell: bash
+      run: |
+        id_file="$RUNNER_TEMP/android-generation-notebook-id"
+        if [ ! -s "$id_file" ]; then
+          echo "No Android generation scratch notebook was created."
+          exit 0
+        fi
+        uv run python - <<'PY'
+        import asyncio
+        import os
+        from pathlib import Path
+
+        from notebooklm import NotebookLMClient
+        from notebooklm.exceptions import NotebookNotFoundError
+
+        async def main() -> None:
+            id_path = Path(os.environ["RUNNER_TEMP"]) / "android-generation-notebook-id"
+            notebook_id = id_path.read_text(encoding="utf-8").strip()
+            async with NotebookLMClient.from_storage(backend="android") as client:
+                try:
+                    await client.notebooks.delete(notebook_id)
+                except NotebookNotFoundError:
+                    pass
+            id_path.unlink(missing_ok=True)
+
+        asyncio.run(main())
+        PY

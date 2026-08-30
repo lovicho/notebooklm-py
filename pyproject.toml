@@ -52,6 +52,9 @@ impersonate = ["curl_cffi>=0.11,<1"]
 # pure-Python (no native wheels), so it is safe in `all`. >=1.1.0 for
 # exchange_token; no <2 cap so the 2.0.0 ServiceDisabled fix installs.
 headless = ["gpsoauth>=1.1.0"]
+# Android bearer-gRPC runtime. The protobuf runtime is pinned to the patched
+# 6.x release compatible with the checked-in Android generated stubs.
+android = ["grpcio==1.76.0", "protobuf==6.33.5", "gpsoauth>=1.1.0"]
 # >=3.0: the remote-transport bearer auth (FastMCP(auth=...) + TokenVerifier)
 # landed in fastmcp 3.0; 2.x lacks it and would ImportError in mcp/_auth.py.
 # Pinned ==3.4.2: fastmcp 3.4.3 broke the RFC 9728 protected-resource-metadata
@@ -85,9 +88,16 @@ dev = [
     "tomli>=2.0.0,<3; python_version < '3.11'",  # for tests/unit/test_install_docs.py on Python 3.10 (tomllib is 3.11+)
     "vcrpy>=6.0.0,<9",
     "packaging>=23.0,<27",  # for tests/unit/test_version_gate.py (PEP 440 version parsing)
+    # Deterministic Android protobuf toolchain: grpcio-tools 1.76.0 embeds
+    # libprotoc 31.1; the generated code accepts the patched 6.33.5 runtime.
+    "grpcio==1.76.0",
+    "grpcio-tools==1.76.0",
+    "protobuf==6.33.5",
+    "gpsoauth>=1.1.0",
 ]
-# `all` deliberately excludes `cookies` — rookiepy has install issues on Python 3.13+
-# (see CHANGELOG [0.4.1]). Opt in explicitly via `pip install "notebooklm-py[cookies]"`.
+# `all` deliberately omits the `android`, `cookies`, and `impersonate` extra
+# names. Because `all` includes `dev`, it still resolves the pinned protobuf
+# compiler/runtime solely so CI can reproduce checked-in stubs.
 all = ["notebooklm-py[browser,dev,headless,markdown,mcp,server]"]
 
 [project.scripts]
@@ -172,6 +182,7 @@ markers = [
     "readonly: read-only tests against user's test notebook",
     "impersonate_smoke: minimal live smoke run under NOTEBOOKLM_TRANSPORT=curl_cffi in the nightly (read/ask/upload/download — one per transport-critical op)",
     "vcr: tests using VCR.py recorded cassettes (run with NOTEBOOKLM_VCR_RECORD=1 to record)",
+    "grpc_cassette: tests replaying sanitized Android protobuf cassettes through the test-only gRPC channel seam",
     "no_keepalive_disable: opt a VCR test out of the global NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1 autouse fixture in tests/integration/conftest.py",
     "allow_no_vcr: opt a tests/integration/ test out of the integration-tree enforcement hook; use for mock-only tests that legitimately live under tests/integration/",
     "characterization: behavior-pinning unit tests that lock in current observable contracts and would be too synthetic to cassette-back",
@@ -215,7 +226,9 @@ disallow_untyped_defs = false
 check_untyped_defs = true
 ignore_missing_imports = true
 files = ["src/notebooklm"]
-exclude = ["tests/"]
+# Generated protobuf modules expose message attributes dynamically. Their
+# contract is checked by descriptor/regeneration tests rather than mypy.
+exclude = ["tests/", "src/notebooklm/_android/proto/"]
 
 # Public library modules and moved implementation modules that back exported
 # public types are checked more strictly before the package advertises PEP 561
@@ -259,6 +272,9 @@ strict_optional = true
 target-version = "py310"
 line-length = 100
 src = ["src", "tests"]
+# Preserve protoc's byte-for-byte output. Generated modules are reviewed via
+# the descriptor contract and deterministic regeneration gate instead.
+extend-exclude = ["src/notebooklm/_android/proto/**"]
 
 [tool.ruff.lint]
 select = [

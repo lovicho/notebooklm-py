@@ -33,9 +33,13 @@ public constructor (see the seam policy in ``_web/transport/seams.py``).
 from __future__ import annotations
 
 import dataclasses
+import logging
+import os
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import httpx
 
@@ -52,7 +56,7 @@ from ._runtime.config import (
     validate_read_timeout_kwarg,
 )
 from ._runtime.init import compose_client_internals
-from ._runtime.lifecycle import CookieRotator, CookieSaver
+from ._runtime.lifecycle import ClientLifecycle, LoopParticipant, TransportLifecycle
 from ._web.artifacts import WebArtifactsAPI
 from ._web.chat import WebChatAPI
 from ._web.collections import WebCollectionsAPI
@@ -60,17 +64,82 @@ from ._web.labels import WebLabelsAPI
 from ._web.mind_maps import NoteBackedMindMapService, WebMindMapsAPI
 from ._web.notebooks import WebNotebooksAPI
 from ._web.notes import NoteService, WebNotesAPI
-from ._web.research import ResearchAPI
+from ._web.research import WebResearchAPI
 from ._web.settings import WebSettingsAPI
 from ._web.sharing import WebSharingAPI
 from ._web.sources import WebSourcesAPI
 from ._web.sources.upload import SourceUploadPipeline
+from ._web.transport.lifecycle import CookieRotator, CookieSaver
 from ._web.transport.seams import resolve_client_seams
 from .auth import AuthTokens
 
 if TYPE_CHECKING:
     from .client import NotebookLMClient
     from .types import ConnectionLimits, RpcTelemetryEvent
+
+
+BackendName = Literal["web", "android"]
+logger = logging.getLogger("notebooklm.backend")
+
+
+@dataclass(frozen=True)
+class BackendPreference:
+    """One construction-time backend preference and how it was selected."""
+
+    preferred: BackendName
+    reason: Literal["explicit", "env", "default"]
+
+
+def resolve_backend_preference(*, explicit: str | None, env: str | None) -> BackendPreference:
+    """Resolve and validate the backend preference without performing I/O."""
+    value: str
+    reason: Literal["explicit", "env", "default"]
+    if explicit is not None:
+        value = explicit
+        reason = "explicit"
+    elif env is not None:
+        value = env
+        reason = "env"
+    else:
+        value = "web"
+        reason = "default"
+    if value not in ("web", "android"):
+        raise ValueError(
+            f"Invalid NotebookLM backend {value!r}: expected 'web' or 'android'. "
+            "The aliases 'mobile' and 'auto' are not supported."
+        )
+    return BackendPreference(preferred=cast(BackendName, value), reason=reason)
+
+
+_NAMESPACE_NAMES = (
+    "notebooks",
+    "sources",
+    "artifacts",
+    "chat",
+    "research",
+    "notes",
+    "mind_maps",
+    "settings",
+    "sharing",
+    "labels",
+    "collections",
+)
+
+
+def _derive_installed_backends(client: NotebookLMClient) -> MappingProxyType[str, BackendName]:
+    """Report each immutable namespace selection from its installed class."""
+    installed: dict[str, BackendName] = {}
+    for name in _NAMESPACE_NAMES:
+        module = type(getattr(client, name)).__module__
+        if module.startswith("notebooklm._android."):
+            installed[name] = "android"
+        elif module.startswith("notebooklm._web."):
+            installed[name] = "web"
+        else:
+            raise RuntimeError(
+                f"Cannot determine backend for client.{name}: installed class module is {module!r}"
+            )
+    return MappingProxyType(installed)
 
 
 class _UnsetType:
@@ -110,13 +179,14 @@ def _assemble_client(
     chat_timeout: float | None = AUTO_READ_TIMEOUT,
     import_research_timeout: float | None = AUTO_READ_TIMEOUT,
     chat_response_max_bytes: int | None = DEFAULT_CHAT_RESPONSE_MAX_BYTES,
+    backend: BackendName | None = None,
     # --- Production-default overrides (test factory only) -----------------
     # ``NotebookLMClient.__init__`` never passes these; the sentinels
     # resolve to the exact behavior the constructor had when this logic
     # lived inline. The test factory forwards its caller's values
     # explicitly to preserve the historical shell semantics (e.g.
     # ``refresh_callback=None`` → no auth refresh coordination).
-    refresh_callback: Callable[[], Awaitable[AuthTokens]] | None | _UnsetType = _UNSET,
+    refresh_callback: Callable[[int], Awaitable[AuthTokens]] | None | _UnsetType = _UNSET,
     refresh_retry_delay: float = 0.2,
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
     keepalive_storage_path: Path | None | _UnsetType = _UNSET,
@@ -136,6 +206,10 @@ def _assemble_client(
     gate ``tests/_guardrails/test_client_factory_parity.py`` fails
     otherwise.
     """
+    client._backend_preference = resolve_backend_preference(
+        explicit=backend,
+        env=None if backend is not None else os.environ.get("NOTEBOOKLM_BACKEND"),
+    )
     # Normalize the effective storage path onto the auth object so every
     # downstream code path (refresh_auth, lifecycle on-close save,
     # the keepalive loop) writes to the same file. Without this, an
@@ -184,7 +258,9 @@ def _assemble_client(
     # The test factory overrides this (typically with ``None`` or a fake)
     # to keep shells network-free.
     if isinstance(refresh_callback, _UnsetType):
-        refresh_callback = client.refresh_auth
+
+        async def refresh_callback(expected_epoch: int) -> AuthTokens:
+            return await client._refresh_auth_for_epoch(expected_epoch=expected_epoch)
 
     # Canonicalize the keepalive storage path so different representations
     # of the same physical file (relative vs absolute, ``~`` shorthand,
@@ -269,7 +345,13 @@ def _assemble_client(
         sleep=sleep,
         is_auth_error=is_auth_error,
     )
-    client._composed = ClientComposed(max_concurrent_rpcs=max_concurrent_rpcs)
+    # ``ClientComposed`` owned this validation before semaphore ownership moved
+    # into ``CallSupervisor``. Keep the check at the same assembly position
+    # so combinations of invalid public kwargs preserve the deterministic
+    # first error instead of whichever collaborator happens to validate first.
+    if max_concurrent_rpcs is not None and max_concurrent_rpcs < 1:
+        raise ValueError(f"max_concurrent_rpcs must be >= 1, got {max_concurrent_rpcs!r}")
+    client._composed = ClientComposed()
 
     internals = compose_client_internals(
         auth=auth,
@@ -295,11 +377,6 @@ def _assemble_client(
         seams=client._seams,
         composed=client._composed,
     )
-    # Owned reference to the collaborator bundle so
-    # :meth:`metrics_snapshot` (and any future
-    # NotebookLMClient-side collaborator consumers) read from the
-    # same bundle feature internals use.
-    client._collaborators = internals.collaborators
     # Owned reference to the RPC executor so ``client.rpc_call``
     # dispatches through it directly rather than through a
     # compatibility wrapper. The executor satisfies the
@@ -310,17 +387,15 @@ def _assemble_client(
     # ``rpc_call`` sees the swap on every feature consumer).
     client._rpc_executor = internals.executor
 
-    # ADR-0014 Rule 2: the upload pipeline takes its three runtime
-    # collaborators (``rpc`` + ``drain`` + ``lifecycle``) directly
-    # instead of via a composite-runtime adapter. ``Kernel`` and
-    # ``AuthMetadata`` continue to flow as separate parameters per
-    # the ADR-0014 Rule 6 example. This assembly function is
+    # ADR-0014 Rule 2: the upload pipeline takes its direct runtime
+    # collaborators (``rpc`` + ``supervisor`` + ``kernel`` + ``auth``)
+    # instead of reaching through a composite-runtime adapter. This
+    # assembly function is
     # the composition root that knows these internals;
     # ``SourcesAPI`` no longer reads them back off a broad host.
     source_uploader = SourceUploadPipeline(
         rpc=internals.executor,
-        drain=internals.collaborators.drain_tracker,
-        lifecycle=internals.collaborators.lifecycle,
+        supervisor=internals.collaborators.call_supervisor,
         kernel=internals.collaborators.kernel,
         # ADR-0016's Auth Instance Invariant: the upload pipeline
         # reads the client-owned ``client._auth`` reference set above
@@ -344,6 +419,7 @@ def _assemble_client(
     # directly from the composition root's executor.
     client.sources = WebSourcesAPI(
         internals.executor,
+        supervisor=internals.collaborators.call_supervisor,
         uploader=source_uploader,
         upload_timeout=upload_timeout,
         max_concurrent_uploads=max_concurrent_uploads,
@@ -354,18 +430,17 @@ def _assemble_client(
     # raw row primitives; NoteBackedMindMapService is the mind-map-only
     # adapter the download path uses; the artifact-generation path uses
     # NoteService.create_note directly to persist a generated mind map.
-    note_service = NoteService(internals.executor)
+    note_service = NoteService(
+        internals.executor,
+        supervisor=internals.collaborators.call_supervisor,
+    )
     mind_maps = NoteBackedMindMapService(note_service)
-    # ADR-0014 Rule 2: the artifacts API takes its three runtime
-    # collaborators (``rpc`` + ``drain`` + ``lifecycle``) directly
-    # instead of via a composite-runtime adapter. ``rpc`` covers
-    # RPC dispatch; ``drain`` covers ``operation_scope`` and the
-    # close-time ``register_drain_hook`` used by the polling
-    # service; ``lifecycle`` covers ``assert_bound_loop``.
+    # The artifacts API takes RPC dispatch plus the single call supervisor.
+    # That supervisor is the one authority for polling operation scopes,
+    # same-generation leader tasks, loop affinity, and drain-hook registration.
     client.artifacts = WebArtifactsAPI(
         rpc=internals.executor,
-        drain=internals.collaborators.drain_tracker,
-        lifecycle=internals.collaborators.lifecycle,
+        supervisor=internals.collaborators.call_supervisor,
         notebooks=client.notebooks,
         mind_maps=mind_maps,
         note_service=note_service,
@@ -380,7 +455,7 @@ def _assemble_client(
         rpc=internals.executor,
         transport=client._composed.transport,
         reqid=internals.collaborators.reqid,
-        loop_guard=internals.collaborators.lifecycle,
+        loop_guard=internals.collaborators.call_supervisor,
         chat_timeout=resolve_chat_read_timeout(chat_timeout, timeout),
         chat_response_max_bytes=chat_response_max_bytes,
         notebooks=client.notebooks,
@@ -392,17 +467,18 @@ def _assemble_client(
     )
     # Unified mind-map surface over both backends (note-backed + interactive
     # studio artifact); dispatches each op to the correct RPC family (#1256).
-    client.mind_maps = WebMindMapsAPI(
+    web_mind_maps = WebMindMapsAPI(
         rpc=internals.executor,
         mind_maps=mind_maps,
         artifacts=client.artifacts,
         notebooks=client.notebooks,
         notes=client.notes,
     )
+    client.mind_maps = web_mind_maps
     # Pure-RPC features (typed as ``rpc: RpcCaller``). Pass the
     # ``RpcExecutor`` collaborator directly, sourced from the composed
     # executor.
-    client.research = ResearchAPI(
+    client.research = WebResearchAPI(
         internals.executor,
         base_timeout=timeout,
         import_research_timeout=import_research_timeout,
@@ -413,7 +489,161 @@ def _assemble_client(
     # SourcesAPI) for the membership->Source join in ``labels.sources()``;
     # wired after ``client.sources`` exists. Same client/bound loop (ADR-0004).
     client.labels = WebLabelsAPI(internals.executor, list_sources=client.sources.list)
-    # Collections (account-level notebook groups). Takes a narrow ``list_notebooks``
-    # callable for the membership->Notebook join in ``collections.notebooks()``;
-    # wired after ``client.notebooks`` exists. Same client/bound loop (ADR-0004).
-    client.collections = WebCollectionsAPI(internals.executor, list_notebooks=client.notebooks.list)
+    # Android selection replaces the complete public namespace graph while keeping
+    # narrow Web compatibility collaborators only where the recovered mobile route
+    # has no usable admitted operation. Cross-namespace joins receive the selected
+    # Android capabilities instead of manufacturing a second frontend. Android
+    # dependency/token validation remains deferred to async open, and the gRPC
+    # channel remains lazy until the first Android RPC.
+    client._android_bearer_provider = None
+    client._android_session = None
+    android_transports: tuple[TransportLifecycle, ...] = ()
+    android_loop_participants: tuple[LoopParticipant, ...] = ()
+    if client._backend_preference.preferred == "android":
+        from ._android.artifacts import AndroidArtifactsAPI
+        from ._android.assets import AndroidAssetDownloadService
+        from ._android.auth import _make_bearer_provider
+        from ._android.chat import AndroidChatAPI
+        from ._android.collections import AndroidCollectionsAPI
+        from ._android.labels import AndroidLabelsAPI
+        from ._android.mind_maps import AndroidMindMapsAPI
+        from ._android.note_backed import NoteBackedMindMapArtifactAdapter
+        from ._android.notebooks import AndroidNotebooksAPI
+        from ._android.notes import AndroidNotesAPI
+        from ._android.research import AndroidResearchAPI
+        from ._android.session import AndroidSession
+        from ._android.settings import AndroidSettingsAPI
+        from ._android.sharing import AndroidSharingAPI
+        from ._android.sources import AndroidSourcesAPI
+        from ._android.upload import AndroidUploadPipeline
+
+        android_bearer_provider = _make_bearer_provider(
+            Path(auth.storage_path) if auth.storage_path is not None else None
+        )
+        android_session = AndroidSession(
+            android_bearer_provider,
+            internals.collaborators.call_supervisor,
+            timeout=timeout,
+        )
+        client._android_bearer_provider = android_bearer_provider
+        client._android_session = android_session
+        android_asset_downloads = AndroidAssetDownloadService(
+            bearer_provider=android_bearer_provider,
+            supervisor=internals.collaborators.call_supervisor,
+        )
+        android_upload_pipeline = AndroidUploadPipeline(
+            session=android_session,
+            bearer_provider=android_bearer_provider,
+            upload_timeout=upload_timeout,
+            max_concurrent_uploads=max_concurrent_uploads,
+            record_upload_queue_wait=internals.collaborators.metrics.record_upload_queue_wait,
+        )
+        web_notebooks = client.notebooks
+        web_sources = client.sources
+        web_sharing = client.sharing
+        client.sources = AndroidSourcesAPI(
+            android_session,
+            android_upload_pipeline,
+            drive_download=android_upload_pipeline.drive_download_scope,
+            add_file_compat=web_sources.add_file,
+        )
+        client.notebooks = AndroidNotebooksAPI(
+            android_session,
+            client.sources,
+            remove_from_recent=web_notebooks.remove_from_recent,
+        )
+        client.notes = AndroidNotesAPI(android_session)
+        note_backed_artifacts = NoteBackedMindMapArtifactAdapter(
+            client.notes._list_note_backed_mind_maps,
+        )
+        client.artifacts = AndroidArtifactsAPI(
+            session=android_session,
+            supervisor=internals.collaborators.call_supervisor,
+            notebooks=client.notebooks,
+            mind_maps=note_backed_artifacts,
+            asset_downloads=android_asset_downloads,
+        )
+        client.mind_maps = AndroidMindMapsAPI(
+            supervisor=internals.collaborators.call_supervisor,
+            artifacts=client.artifacts,
+            notes=client.notes,
+        )
+        client.chat = AndroidChatAPI(
+            session=android_session,
+            loop_guard=internals.collaborators.call_supervisor,
+            chat_timeout=resolve_chat_read_timeout(chat_timeout, timeout),
+            chat_response_max_bytes=chat_response_max_bytes,
+            notebooks=client.notebooks,
+            created_chat_sessions=client.notebooks,
+        )
+        client.research = AndroidResearchAPI(
+            android_session,
+            client.sources,
+            base_timeout=timeout,
+            import_research_timeout=import_research_timeout,
+        )
+        client.settings = AndroidSettingsAPI(android_session)
+        client.sharing = AndroidSharingAPI(
+            android_session,
+            set_view_level=web_sharing.set_view_level,
+        )
+        client.labels = AndroidLabelsAPI(
+            android_session,
+            list_sources=client.sources.list,
+        )
+        client.collections = AndroidCollectionsAPI(
+            android_session,
+            list_notebooks=client.notebooks.list,
+        )
+        android_transports = (
+            android_session,
+            android_asset_downloads,
+            android_upload_pipeline,
+        )
+        android_loop_participants = (
+            android_bearer_provider,
+            android_session,
+            android_upload_pipeline,
+        )
+    else:
+        client.collections = WebCollectionsAPI(
+            internals.executor,
+            list_notebooks=client.notebooks.list,
+        )
+
+    client._backends = _derive_installed_backends(client)
+    if client._backend_preference.preferred == "android":
+        unqualified = [name for name, selected in client._backends.items() if selected == "web"]
+        if unqualified:
+            logger.info(
+                "Android backend preference selected; unqualified namespaces remain web: %s",
+                ", ".join(unqualified),
+            )
+
+    # The protocol-neutral root is constructed last, after every concrete
+    # transport and loop participant exists. Its tuples never mutate after
+    # publication, so open/close waves cannot observe a partially assembled
+    # graph or silently omit a later-added owner.
+    transports: tuple[TransportLifecycle, ...] = (
+        internals.collaborators.web_transport,
+        source_uploader,
+        *android_transports,
+    )
+    loop_participants: tuple[LoopParticipant, ...] = (
+        internals.collaborators.call_supervisor,
+        internals.collaborators.reqid,
+        internals.collaborators.auth_coord,
+        client.chat,
+        *android_loop_participants,
+    )
+
+    lifecycle = ClientLifecycle(
+        supervisor=internals.collaborators.call_supervisor,
+        transports=transports,
+        loop_participants=loop_participants,
+    )
+    client._collaborators = dataclasses.replace(
+        internals.collaborators,
+        _lifecycle=lifecycle,
+    )
+    client._composed.bind_runtime_collaborators(client._collaborators)

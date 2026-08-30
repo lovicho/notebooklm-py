@@ -10,6 +10,40 @@ chain-metadata carrier — see §"Decision: `RpcRequest.context: dict[str,
 Any]` is the long-term shape" below for the rationale and the policy
 governing additions to the vocabulary table.
 
+Amended (2026-08-28, backend migration Phase B0): the protocol-neutral
+outer policy is now owned by `_runtime.call_supervisor.CallSupervisor`.
+`RuntimeTransport.perform_authed_post` first holds an admission-only operation
+lease while it checks the resource epoch and performs the auth snapshot/request
+materialization that historically preceded terminal metrics. It then enters a
+supervisor call scope, which applies `Drain -> Metrics -> Semaphore` and invokes
+the remaining web chain. The web-only chain is therefore exactly
+`Retry -> AuthRefresh -> ErrorInjection -> Tracing -> terminal`. This preserves
+the original ordering and retry-slot cohort while allowing the Android
+transport to consume the same admission, queueing, and telemetry policy
+without importing HTTP middleware. `rpc_queue_wait_seconds` is now recorded
+directly by the supervisor and is no longer middleware context. The old drain,
+metrics, and semaphore middleware modules remain historical implementation
+artifacts during migration but are not production-wired.
+
+Supervisor settlement has a stricter cancellation contract than the original
+middlewares: semaphore release precedes the terminal event, and one strongly
+retained settlement task owns drain finish followed by queue-wait recording.
+A recorder failure cannot orphan admission, and a body exception or caller
+cancellation retains precedence. Calls and multi-call operations carry an
+immutable generation lease; close/reopen retires a generation record instead
+of clearing its counters, so late old work cannot decrement or enter a newly
+opened generation. Web semaphore wait remains unbounded; transports that pass
+an aggregate `RuntimeDeadline` get deadline-bounded queue admission.
+
+This 2026-08-28 amendment is the authoritative current-state rule wherever the
+historical Tier-12 decision body or PR 12.9 close-out notes below still name
+`DrainMiddleware`, `MetricsMiddleware`, `SemaphoreMiddleware`,
+`RPC_CONTEXT_RPC_QUEUE_WAIT_SECONDS`, or `ClientComposed.get_rpc_semaphore` as
+production owners. Those modules/constants remain compatibility and migration
+artifacts, but `MiddlewareChainBuilder.build()` no longer wires the outer three.
+`ClientComposed` is now only a write-once composition holder; it owns neither
+the semaphore nor any loop-bound primitive.
+
 This ADR shipped in PR 12.1 of the Tier-12/13 greenfield migration as
 type-only scaffolding: the Protocol, dataclasses, and `build_chain` helper
 landed without production wiring. PR 12.2 wired an empty chain into
@@ -40,6 +74,24 @@ The `Kernel.post` terminal revisit has landed. The live
 `refresh_retry_delay`, optional `snapshot_provider`) rather than the
 older closure-callback target described below; that historical target is
 kept as tier-12 context, not as the current implementation signature.
+
+### 2026-08-28 Phase B0 amendment — protocol-neutral outer call policy
+
+The outer `Drain → Metrics → Semaphore` policy is promoted to the concrete
+protocol-neutral `CallSupervisor`, leaving the web request chain as
+`Retry → AuthRefresh → ErrorInjection → Tracing → terminal`. An admission-only
+operation lease now precedes auth snapshot/materialization so a retired workflow
+cannot inspect a newly opened resource generation, while the nested unary call
+scope starts terminal metrics and semaphore timing only after materialization,
+preserving the established web accounting boundary. This is an extraction of
+the established ordering, not a change to web retry/auth behavior. A future
+Android transport can enter the same supervisor without entering the
+HTTP-shaped chain; B0 itself installs only the web runtime.
+
+The web context adds `resource_epoch: int`. It is captured once at logical-call
+entry and reused by every retry/auth-refresh leg. `RuntimeTransport` forwards
+it to `Kernel.post(expected_epoch=...)`, so work admitted before a forced
+close cannot use a handle published by a later open generation.
 
 ADR-0002 ("Capability Protocol pattern, `SessionCapabilities` fat
 union") was superseded by the `arch-d2-cutover` PR (D2 PR-2), per
@@ -216,6 +268,7 @@ Per-position rationale:
 | `auth_snapshot` | `AuthSnapshot` | `RuntimeTransport.perform_authed_post` (initial snapshot before chain entry); refreshed by `AuthRefreshMiddleware._rebuild_request_after_refresh` after a successful refresh, and replaced by `RuntimeTransport.refresh_request_for_current_auth` at the chain leaf when a freshness check detects auth moved while the request was queued | `RuntimeTransport.refresh_request_for_current_auth` (chain-terminal pre-POST freshness check); pair-mutated with the materialized envelope so middlewares never observe a torn `(snapshot, request)` pair |
 | `auth_refreshed` | `bool` | `AuthRefreshMiddleware` (sets to `True` after a successful refresh, **before** the retry leg) | `AuthRefreshMiddleware` (skip-on-replay guard so a `RetryMiddleware` retry on the post-refresh leg cannot drive a second refresh on a fresh 401) |
 | `rpc_queue_wait_seconds` | `float` | `SemaphoreMiddleware` (writes queue-wait duration on slot acquire — also exported as `RPC_CONTEXT_RPC_QUEUE_WAIT_SECONDS` from `_web/transport/middleware/context.py`; `RPC_QUEUE_WAIT_CONTEXT_KEY` remains a compatibility alias in `_web/transport/middleware/semaphore.py`) | `RuntimeTransport.perform_authed_post` (forwards to `ClientMetrics.record_rpc_queue_wait` after the chain returns) |
+| `resource_epoch` | `int` | `RuntimeTransport.perform_authed_post` captures the current root lifecycle generation once at logical-call entry | `RuntimeTransport` freshness checks and `Kernel.post(expected_epoch=...)`; `AuthRefreshMiddleware` forwards it to the refresh coordinator |
 | `read_timeout` | `float \| None` | `RuntimeTransport.perform_authed_post` (seeded only when a per-request read timeout is supplied — currently the chat path's `chat_timeout`; absent otherwise so metadata RPCs keep the base read window) | `RuntimeTransport.terminal` (forwards to `Kernel.post(read_timeout=...)`, which widens only the streamed-response `read` slot) |
 | `max_response_bytes` | `int` | `RuntimeTransport.perform_authed_post` (seeded only when a per-request response cap is supplied — currently the chat path's `chat_response_max_bytes`; absent otherwise so metadata RPCs keep the shared response-size guard) | `RuntimeTransport.terminal` (forwards to `Kernel.post(max_response_bytes=...)`, which passes a per-call cap to the streaming size guard) |
 | `disable_read_timeout_retries` | `bool` | `RuntimeTransport.perform_authed_post` (seeded `True` by the chat path) | `RetryMiddleware` (re-raises read-side post-transmission failures — `ReadTimeout` / `ReadError` / `RemoteProtocolError`, see `_NON_REPLAYABLE_POST_SEND_ERRORS` — instead of replaying the non-idempotent in-flight chat generation; connect/write/pool stay retryable and 401 auth refresh is unaffected) |

@@ -51,6 +51,7 @@ Exports
 - :data:`SCRUB_PLACEHOLDERS`  exact-match allowlist of expected sentinels
 - :data:`DISPLAY_NAME_FALSE_POSITIVES`  two-Cap-word strings to NEVER scrub
 - :data:`SENSITIVE_PATTERNS`  ordered (regex, replacement) registry
+- :data:`GBAR_ACCOUNT_ID_PATTERN`  account-shell opaque-ID scrub pattern
 - :func:`scrub_string`        single sanitization entry point
 - :func:`is_clean`            validator returning ``(ok, leaks)``
 - :func:`find_credential_leaks`   high-severity-shape-only subset (fixture-safe)
@@ -108,6 +109,10 @@ WRB-payload JSON string:
   path forms carry per-user avatar tokens. The pattern collapses the whole
   URL (host + path + token, including any trailing ``=s512``-style sizing
   suffix) to ``SCRUBBED_AVATAR_URL``.
+* **Google account-shell opaque IDs.** The gbar CONFIG row carries a durable,
+  high-entropy account-linked value immediately after the account email and an
+  empty positional field. The structural scrubber replaces it with
+  ``SCRUBBED_ACCOUNT_ID`` without relying on a changing token prefix.
 
 Google API-key coverage
 -----------------------
@@ -335,6 +340,7 @@ SCRUB_PLACEHOLDERS: frozenset[str] = frozenset(
         "SCRUBBED_PROJECT_ID",
         "SCRUBBED_EMAIL",
         "SCRUBBED_NAME",
+        "SCRUBBED_ACCOUNT_ID",
         # ``SCRUBBED_EMAIL@example.com`` is the rendered form of the email
         # replacement; ``is_clean`` checks the full token, so we list it too.
         "SCRUBBED_EMAIL@example.com",
@@ -438,6 +444,15 @@ _AUTHUSER_EMAIL_TAIL = r"[A-Za-z0-9._%+\-]+%40[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
 _AUTHUSER_EMAIL_PATTERN = r"authuser=" + _AUTHUSER_EMAIL_TAIL
 AUTHUSER_EMAIL_DOUBLE_ENCODED_PATTERN = r"authuser%3D" + _AUTHUSER_EMAIL_TAIL
 
+# Durable opaque account identifier in the Google account-shell CONFIG row.
+# Public because the surgical bulk re-scrub utility imports the exact pattern
+# to clean recordings created before this sanitizer existed.
+GBAR_ACCOUNT_ID_PATTERN = (
+    r'("SCRUBBED_EMAIL@example\.com"'
+    r',""'
+    r',")[^"]+(\")'
+)
+
 # Negative-lookahead alternation built from the false-positive allowlist.
 # Each entry is regex-escaped because some legitimate UI titles could in
 # theory contain regex metacharacters (none do today, but future additions
@@ -461,6 +476,9 @@ _DISPLAY_NAME_ALLOWLIST_ALT = "|".join(
 #
 # Anchoring strategy per shape:
 #
+#   * ``aas_et/`` — anchored on the durable master-token prefix. The prefix is
+#     distinctive enough that no length floor is needed, so even short fixture
+#     credentials are scrubbed.
 #   * ``g\.a000-`` — anchored on the literal ``g.a000-`` prefix (note the
 #     REQUIRED trailing ``-``). That prefix is itself distinctive enough that
 #     no length floor is needed: ``g.a000-<anything>`` in a cassette is a SID
@@ -474,6 +492,7 @@ _DISPLAY_NAME_ALLOWLIST_ALT = "|".join(
 # Anything matched collapses to ``SCRUBBED`` (which contains none of the
 # prefixes), so repeated passes are idempotent.
 _AUTH_TOKEN_PATTERNS: list[str] = [
+    r"aas_et/[A-Za-z0-9_\-]+",
     r"g\.a000-[A-Za-z0-9_\-]+",
     r"sidts-[A-Za-z0-9_\-]{10,}",
     r"ya29\.[A-Za-z0-9_\-]{20,}",
@@ -826,13 +845,38 @@ SENSITIVE_PATTERNS: list[tuple[str, str]] = [
     # Unquoted-context fallback (mailto: hrefs, raw HTML/JS chunks).
     (_EMAIL_PATTERN_BASE, "SCRUBBED_EMAIL@example.com"),
     # -------------------------------------------------------------------------
-    # 6. Display names — JSON-key-anchored ONLY
+    # 6. Display names — account-structure / JSON-key anchored
     # -------------------------------------------------------------------------
+    # Google account shell CONFIG row. The opaque account identifier follows
+    # the already-scrubbed email and an empty positional field. It is not an
+    # authentication credential, but it is durable account-linked PII and must
+    # not be committed to a cassette.
+    (
+        GBAR_ACCOUNT_ID_PATTERN,
+        r"\1SCRUBBED_ACCOUNT_ID\2",
+    ),
     # We deliberately do NOT use a broad ``>[A-Z][a-z]+\s[A-Z][a-z]+<`` pattern
     # here: that would clobber legitimate two-Capitalized-word fixture content
     # such as ``>Source Title<`` in source-rename cassettes. Anchoring on the
     # JSON key keeps the scrubber surgical.
     (r"Google Account: [^\"<]+", "Google Account: SCRUBBED_NAME"),
+    # Google account shell CONFIG row. The display name follows the already-
+    # scrubbed account email at a stable positional boundary; anchoring on the
+    # full boundary avoids treating arbitrary two-word strings as PII.
+    (
+        r'("SCRUBBED_EMAIL@example\.com","","(?:[^"\\]|\\.)*",0,0,null,"",1,")'
+        r'[^"]+("[ ]*,[ ]*"(?:https?://lh3\.googleusercontent\.com/[^" ]+'
+        r'|SCRUBBED_AVATAR_URL)")',
+        r"\1SCRUBBED_NAME\2",
+    ),
+    # Visible Google account-menu rows place the display name immediately
+    # before the already-scrubbed email. CSS class names are build-obfuscated,
+    # so the adjacent email is the stable semantic anchor.
+    (
+        r'(<div class="[^"]+">)[^<>]+'
+        r'(</div><div(?: class="[^"]+")?>SCRUBBED_EMAIL@example\.com</div>)',
+        r"\1SCRUBBED_NAME\2",
+    ),
     (r'"displayName"\s*:\s*"[^"]+"', '"displayName":"SCRUBBED_NAME"'),
     (r'"givenName"\s*:\s*"[^"]+"', '"givenName":"SCRUBBED_NAME"'),
     (r'"familyName"\s*:\s*"[^"]+"', '"familyName":"SCRUBBED_NAME"'),
@@ -1141,6 +1185,34 @@ _DETECT_UPLOAD_URL = re.compile(
 # directly.
 _DETECT_DISPLAY_NAME_ESCAPED = re.compile(r'\\"([A-Z][a-z]+(?: [A-Z][a-z]+)+)\\"')
 
+# Google account-shell display names that are not JSON-keyed. These mirror the
+# account-structure scrubbers above and accept both raw HTML quotes and the
+# backslash-escaped form stored inside cassette YAML response strings.
+_DETECT_GBAR_DISPLAY_NAME = re.compile(
+    r'(?:\\"|")(?P<name>[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)(?:\\"|"),'
+    r'(?:\\"|")SCRUBBED_AVATAR_URL(?:\\"|")'
+)
+_DETECT_ACCOUNT_HTML_DISPLAY_NAME = re.compile(
+    r"<div class=[^>]+>(?P<name>[^<>]+)</div>"
+    r"<div(?: class=[^>]+)?>SCRUBBED_EMAIL@example\.com</div>"
+)
+
+# Durable opaque Google account identifier in the account-shell CONFIG row.
+# Accept raw response quotes and the backslash-escaped quotes stored in YAML.
+_ACCOUNT_SHELL_QUOTE = r'(?:\\"|")'
+_DETECT_GBAR_ACCOUNT_ID = re.compile(
+    _ACCOUNT_SHELL_QUOTE
+    + r"SCRUBBED_EMAIL@example\.com"
+    + _ACCOUNT_SHELL_QUOTE
+    + r","
+    + _ACCOUNT_SHELL_QUOTE
+    + _ACCOUNT_SHELL_QUOTE
+    + r","
+    + _ACCOUNT_SHELL_QUOTE
+    + r"(?P<account_id>[A-Za-z0-9_-]+)"
+    + _ACCOUNT_SHELL_QUOTE
+)
+
 # avatar URL detector (/ogw/ group). The pattern matches
 # both ``/a/`` and ``/ogw/`` path forms. The scrubber collapses the entire
 # URL to ``SCRUBBED_AVATAR_URL``, so any match here is by definition a
@@ -1179,7 +1251,7 @@ _DETECT_AUTHUSER_EMAIL_DOUBLE_ENCODED = re.compile(
 
 
 # Detectors with ZERO legitimate-occurrence risk anywhere in the repository:
-# raw Google auth-token shapes (``g.a000-`` / ``sidts-`` / ``ya29.``), the
+# raw Google auth-token shapes (``aas_et/`` / ``g.a000-`` / ``sidts-`` / ``ya29.``), the
 # canonical Google API-key shape (``AIza`` + 35 chars), and the double-encoded
 # ``authuser%3D<email>`` redirect-param shape (issue #1368). Unlike the
 # cookie-value / display-name / email heuristics that :func:`is_clean` also runs
@@ -1234,7 +1306,7 @@ _CREDENTIAL_DETECTORS: list[tuple[str, re.Pattern[str]]] = [
 # THE KNOWN-SHAPE BOUNDARY (residual-risk decision; ADR-0006, issue #1382).
 # ---------------------------------------------------------------------------
 # Everything ABOVE this point is *name-anchored* (cookie names, WIZ field IDs)
-# or *known-shape* (``g.a000-`` / ``sidts-`` / ``ya29.`` / ``AIza`` prefixes).
+# or *known-shape* (``aas_et/`` / ``g.a000-`` / ``sidts-`` / ``ya29.`` / ``AIza`` prefixes).
 # That makes the guard NECESSARY-but-not-SUFFICIENT: a credential family the
 # registry does not yet know about — a NOVEL token prefix, or a known secret
 # riding in an un-targeted JSON field — passes the targeted detectors silently.
@@ -1498,6 +1570,23 @@ def is_clean(text: str) -> tuple[bool, list[str]]:
             continue
         leaks.append(f"Leak (escaped display name): {match.group(0)!r}")
 
+    # --- 6b. Google account-shell display names ---------------------------
+    for label, regex in (
+        ("gbar display name", _DETECT_GBAR_DISPLAY_NAME),
+        ("account-menu display name", _DETECT_ACCOUNT_HTML_DISPLAY_NAME),
+    ):
+        for match in regex.finditer(text):
+            value = " ".join(match.group("name").split())
+            if value == "SCRUBBED_NAME":
+                continue
+            leaks.append(f"Leak ({label}): {value!r}")
+
+    # --- 6c. Google account-shell opaque account identifier ---------------
+    for match in _DETECT_GBAR_ACCOUNT_ID.finditer(text):
+        value = match.group("account_id")
+        if value != "SCRUBBED_ACCOUNT_ID":
+            leaks.append(f"Leak (gbar account ID): {value!r}")
+
     # --- 7. Avatar URLs ---------------------------------------------------
     # The scrubber collapses the whole URL to ``SCRUBBED_AVATAR_URL``, so any
     # match of the raw URL form here is by definition a leak.
@@ -1515,7 +1604,7 @@ def is_clean(text: str) -> tuple[bool, list[str]]:
         leaks.append(f"Leak (signed blob-capability URL): {match.group(0)!r}")
 
     # --- 8. Catch-all Google auth-token shapes -----------------------------
-    # ``g.a000-...`` / ``sidts-...`` / ``ya29....`` tokens are scrubbed to
+    # ``aas_et/...`` / ``g.a000-...`` / ``sidts-...`` / ``ya29....`` tokens are scrubbed to
     # ``SCRUBBED`` wherever they appear (cookie values on or off the allowlist,
     # response bodies, headers). Any surviving raw token is a leak by
     # definition — this is the cookie-name-agnostic backstop that closes the

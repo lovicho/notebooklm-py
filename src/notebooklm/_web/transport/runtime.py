@@ -66,9 +66,9 @@ from .middleware.context import (
     RPC_CONTEXT_MAX_RESPONSE_BYTES,
     RPC_CONTEXT_READ_TIMEOUT,
     RPC_CONTEXT_REFRESH_BUDGET,
+    RPC_CONTEXT_RESOURCE_EPOCH,
     RPC_CONTEXT_RETRY_DEADLINE,
     RPC_CONTEXT_RPC_METHOD,
-    RPC_CONTEXT_RPC_QUEUE_WAIT_SECONDS,
 )
 from .middleware.core import (
     NextCall,
@@ -79,8 +79,8 @@ from .middleware.core import (
 from .request_types import AuthSnapshot, BuildRequest
 
 if TYPE_CHECKING:
-    from ..._client_metrics import ClientMetrics
     from ..._deadline import RuntimeDeadline
+    from ..._runtime.call_supervisor import CallLease, CallSupervisor
     from .auth_refresh_retry import RefreshBudget
     from .kernel import Kernel
 
@@ -113,9 +113,9 @@ class RuntimeTransport:
         self,
         *,
         kernel: Kernel,
-        snapshot_provider: Callable[[], Awaitable[AuthSnapshot]],
+        snapshot_provider: Callable[[int], Awaitable[AuthSnapshot]],
         chain_provider: Callable[[], NextCall | None],
-        metrics: ClientMetrics,
+        call_supervisor: CallSupervisor,
         bound_loop_check: Callable[[], None],
         logger: logging.Logger,
     ) -> None:
@@ -131,9 +131,13 @@ class RuntimeTransport:
         # reassignments take effect on the next call without any
         # further mutation here.
         self._chain_provider = chain_provider
-        self._metrics = metrics
+        self._call_supervisor = call_supervisor
         self._bound_loop_check = bound_loop_check
         self._logger = logger
+
+    async def _capture_snapshot(self, expected_epoch: int) -> AuthSnapshot:
+        """Capture auth only through a generation-bearing resource proof."""
+        return await self._snapshot_provider(expected_epoch)
 
     async def refresh_request_for_current_auth(self, request: RpcRequest) -> RpcRequest:
         """Rebuild the envelope from the current auth snapshot before every POST.
@@ -195,7 +199,11 @@ class RuntimeTransport:
         if build_request is None:
             return request
 
-        current_snapshot = await self._snapshot_provider()
+        expected_epoch = context.get(RPC_CONTEXT_RESOURCE_EPOCH)
+        if not isinstance(expected_epoch, int):
+            raise RuntimeError("Authenticated request is missing its resource generation.")
+        self._kernel.assert_epoch(expected_epoch)
+        current_snapshot = await self._capture_snapshot(expected_epoch)
         context[RPC_CONTEXT_AUTH_SNAPSHOT] = current_snapshot
         return materialize_rpc_request(
             build_request=build_request,
@@ -229,11 +237,13 @@ class RuntimeTransport:
             post_kwargs["max_response_bytes"] = context[RPC_CONTEXT_MAX_RESPONSE_BYTES]
         start = time.perf_counter()
         try:
+            expected_epoch = context.get(RPC_CONTEXT_RESOURCE_EPOCH)
             response = await self._kernel.post(
                 request.url,
                 headers=request.headers,
                 body=request.body,
                 read_timeout=read_timeout,
+                expected_epoch=expected_epoch,
                 **post_kwargs,
             )
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
@@ -257,6 +267,38 @@ class RuntimeTransport:
         read_timeout: float | None = None,
         max_response_bytes: int | None = None,
         disable_read_timeout_retries: bool = False,
+        expected_epoch: int | None = None,
+        epoch_observer: Callable[[int], None] | None = None,
+    ) -> httpx.Response:
+        """Build one web request, then supervise the old outer-chain boundary."""
+        return await self._perform_authed_post_admitted(
+            build_request=build_request,
+            log_label=log_label,
+            disable_internal_retries=disable_internal_retries,
+            rpc_method=rpc_method,
+            refresh_budget=refresh_budget,
+            retry_deadline=retry_deadline,
+            read_timeout=read_timeout,
+            max_response_bytes=max_response_bytes,
+            disable_read_timeout_retries=disable_read_timeout_retries,
+            expected_epoch=expected_epoch,
+            epoch_observer=epoch_observer,
+        )
+
+    async def _perform_authed_post_admitted(
+        self,
+        *,
+        build_request: BuildRequest,
+        log_label: str,
+        disable_internal_retries: bool = False,
+        rpc_method: str | None = None,
+        refresh_budget: RefreshBudget | None = None,
+        retry_deadline: RuntimeDeadline | None = None,
+        read_timeout: float | None = None,
+        max_response_bytes: int | None = None,
+        disable_read_timeout_retries: bool = False,
+        expected_epoch: int | None = None,
+        epoch_observer: Callable[[int], None] | None = None,
     ) -> httpx.Response:
         """Authed POST entry point — routes through the middleware chain.
 
@@ -330,53 +372,59 @@ class RuntimeTransport:
         # ``_start_retry_deadline()`` (issue #1873).
         if retry_deadline is not None:
             context[RPC_CONTEXT_RETRY_DEADLINE] = retry_deadline
-        snapshot = await self._snapshot_provider()
 
-        request = materialize_rpc_request(
-            build_request=build_request,
-            snapshot=snapshot,
-            context=context,
-        )
-        context[RPC_CONTEXT_AUTH_SNAPSHOT] = snapshot
-
-        # The ``max_concurrent_rpcs`` slot is acquired by
-        # :class:`SemaphoreMiddleware` (chain position 2, between Metrics
-        # and Retry) — that placement keeps Drain admitting queued tasks
-        # AND keeps Metrics timing the queue wait, while still bounding
-        # the retry-and-refresh cohort to one slot per logical RPC.
-        # The middleware writes the queue-wait duration to
-        # ``request.context[RPC_CONTEXT_RPC_QUEUE_WAIT_SECONDS]`` so the recorder
-        # below can forward it to ``ClientMetrics`` without giving the
-        # middleware an opinionated ``ClientMetrics`` dependency.
-        #
-        # Chain resolution is deferred to here — AFTER snapshot capture +
-        # materialization, immediately before dispatch — so a reassignment
-        # of ``chain_host._authed_post_chain`` that lands while the
-        # snapshot call awaits still steers this dispatch. Pre-extraction,
-        # the equivalent read happened at the dispatch site for the same
-        # live-binding reason; the provider closure preserves that timing.
-        chain = self._chain_provider()
-        if chain is None:  # pragma: no cover - wiring bug guard
-            raise RuntimeError(
-                "RuntimeTransport.perform_authed_post called before the "
-                "wired chain was installed on MiddlewareChainHost; the "
-                "composition root must assign chain_host._authed_post_chain "
-                "before any authed POST."
+        # Snapshot/materialization historically ran before the outer Metrics
+        # and Semaphore policies.  It must stay there for public accounting,
+        # but B0 also requires a generation proof before any Kernel/Auth read.
+        # An admission-only operation lease satisfies both constraints; the
+        # nested unary scope below begins terminal accounting only after the
+        # request is ready to enter the chain.
+        async with self._call_supervisor.operation_scope(
+            log_label,
+            expected_epoch=expected_epoch,
+        ) as operation:
+            self._kernel.assert_epoch(operation.epoch)
+            context[RPC_CONTEXT_RESOURCE_EPOCH] = operation.epoch
+            if epoch_observer is not None:
+                epoch_observer(operation.epoch)
+            snapshot = await self._capture_snapshot(operation.epoch)
+            request = materialize_rpc_request(
+                build_request=build_request,
+                snapshot=snapshot,
+                context=context,
             )
-        try:
-            result = await chain(request)
-            return result.response
-        finally:
-            # Record queue wait even if the chain raised. A failed chain
-            # (RetryMiddleware budget exhaustion, AuthRefreshMiddleware
-            # refresh failure, etc.) MUST still surface the queue-wait
-            # latency. ``SemaphoreMiddleware`` writes the duration to
-            # ``request.context[RPC_CONTEXT_RPC_QUEUE_WAIT_SECONDS]`` after the
-            # semaphore is acquired; absence of the key means the slot
-            # was never acquired and there's nothing to record.
-            queue_wait = request.context.get(RPC_CONTEXT_RPC_QUEUE_WAIT_SECONDS)
-            if queue_wait is not None:
-                self._metrics.record_rpc_queue_wait(queue_wait)
+            context[RPC_CONTEXT_AUTH_SNAPSHOT] = snapshot
+
+            # Resolve after the awaited snapshot so a concurrent runtime rewire
+            # still steers this dispatch, but before terminal metrics/semaphore
+            # entry just as it did in Phase A.
+            chain = self._chain_provider()
+            if chain is None:  # pragma: no cover - wiring bug guard
+                raise RuntimeError(
+                    "RuntimeTransport.perform_authed_post called before the "
+                    "wired chain was installed on MiddlewareChainHost; the "
+                    "composition root must assign chain_host._authed_post_chain "
+                    "before any authed POST."
+                )
+
+            async def _invoke(lease: CallLease) -> httpx.Response:
+                if lease.epoch != operation.epoch:  # pragma: no cover - supervisor invariant
+                    raise RuntimeError(
+                        "Authenticated request changed resource generation between "
+                        "preparation and dispatch."
+                    )
+                result = await chain(request)
+                return result.response
+
+            # Web deliberately keeps its unbounded queue deadline; Android
+            # supplies an aggregate deadline at its own call site.
+            return await self._call_supervisor.run(
+                log_label,
+                rpc_method,
+                None,
+                _invoke,
+                expected_epoch=operation.epoch,
+            )
 
 
 __all__ = ["RuntimeTransport"]

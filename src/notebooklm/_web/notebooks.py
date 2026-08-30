@@ -5,6 +5,7 @@ import logging
 import reprlib
 from typing import Any
 
+from .._idempotency import mark_unconfirmed
 from .._notebook_metadata import (
     NotebookMetadataService,
     NotebookSourceLister,
@@ -14,9 +15,12 @@ from .._types.enums import GrpcStatusCode, normalize_grpc_status
 from ..exceptions import (
     ClientError,
     DecodingError,
+    NetworkError,
     NotebookLimitError,
     NotebookNotFoundError,
+    RateLimitError,
     RPCError,
+    ServerError,
     ValidationError,
 )
 from ..rpc import RPCMethod, safe_index
@@ -30,6 +34,7 @@ from ..types import (
 from .contracts import RpcCaller
 from .params.notebooks import (
     _PROMPT_SUGGESTIONS_DEFAULT_MODE,
+    build_copy_notebook_params,
     build_create_notebook_params,
     build_get_notebook_params,
     build_prompt_suggestions_params,
@@ -541,6 +546,52 @@ class WebNotebooksAPI(NotebooksAPI):
         if notebook.id and notebook.chat_sessions:
             self._created_chat_session_ids[notebook.id] = notebook.chat_sessions[0].id
         logger.debug("Created notebook: %s", notebook.id)
+        return notebook
+
+    async def copy(self, notebook_id: str, title: str) -> Notebook:
+        """Copy a notebook, including its sources and Studio artifacts.
+
+        ``CopyProject`` has no caller-provided idempotency token. Internal
+        transport retries are disabled so a lost response cannot create a
+        second copy. If the call fails after the server commits, callers must
+        disambiguate the intended copy from their notebook list.
+        """
+        if not notebook_id:
+            raise ValidationError("notebook_id must not be empty")
+        if not title or not title.strip():
+            raise ValidationError("title must not be empty")
+
+        logger.debug("Copying notebook %s", notebook_id)
+        try:
+            result = await self._rpc.rpc_call(
+                RPCMethod.COPY_NOTEBOOK,
+                build_copy_notebook_params(notebook_id, title),
+                source_path=f"/notebook/{notebook_id}",
+            )
+        except (NetworkError, RateLimitError, ServerError) as exc:
+            rpc_code = exc.rpc_code if isinstance(exc, RPCError) else None
+            raise mark_unconfirmed(
+                RPCError(
+                    "UNRESOLVED — CopyProject may have committed before its response was "
+                    "lost. Do not blindly retry; list notebooks and resolve copies "
+                    "manually first.",
+                    method_id=RPCMethod.COPY_NOTEBOOK.value,
+                    rpc_code=rpc_code,
+                )
+            ) from exc
+        notebook = Notebook.from_api_response(result)
+        if not notebook.id:
+            raise DecodingError(
+                "CopyProject response did not contain a notebook id",
+                raw_response=reprlib.repr(result),
+                method_id=RPCMethod.COPY_NOTEBOOK.value,
+            )
+        if notebook.id == notebook_id:
+            raise DecodingError(
+                "CopyProject response reused the source notebook id",
+                raw_response=reprlib.repr(result),
+                method_id=RPCMethod.COPY_NOTEBOOK.value,
+            )
         return notebook
 
     async def _raise_quota_error_if_detected(self, error: RPCError) -> None:

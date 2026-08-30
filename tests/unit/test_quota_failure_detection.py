@@ -16,7 +16,7 @@ Where a failure reason does and does not come from (#2134 / #2188 / #2193)
 --------------------------------------------------------------------------
 Root cause 3 used to read "failed artifacts had no error message surfaced to
 the caller", and the tests below tried to surface one from the artifact row.
-No such field exists. ``Artifact`` in ``docs/mobile/schema.proto`` has no error
+No such field exists. ``Artifact`` in ``docs/android/schema.proto`` has no error
 or failure field at all: index 3 is ``sources`` and index 5 is
 ``isPubliclyReadable``, and #2134 deleted the reader that pretended otherwise.
 
@@ -81,8 +81,7 @@ def _make_api(rpc_call: AsyncMock | None = None):
     notebooks.get_source_ids = AsyncMock(return_value=[])
     return WebArtifactsAPI(
         rpc=core,
-        drain=core,
-        lifecycle=core,
+        supervisor=core,
         notebooks=notebooks,
         mind_maps=mind_maps,
         note_service=note_service,

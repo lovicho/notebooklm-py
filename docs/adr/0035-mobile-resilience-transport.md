@@ -9,13 +9,13 @@ Accepted.
 NotebookLM exposes both the browser-oriented batchexecute surface used by this
 project and an authenticated mobile gRPC surface. The mobile surface could be
 used only as a wire-shape oracle, developed into an alternative production
-transport, or deliberately ignored. That product decision must precede the
-Phase A public-namespace splits: without a real second backend, those splits
-would be relocation without an operational destination.
+transport, or deliberately ignored. That product decision must precede a
+public-namespace split: without a real second backend, the split would be
+relocation without an operational destination.
 
 The existing public namespace APIs and dataclasses already express the
-backend-neutral behavior callers rely on. The mobile surface does not yet cover
-every namespace or operation, and the web backend remains the mature path.
+backend-neutral behavior callers rely on. The mobile surface does not expose
+every public operation, and the web backend remains the mature path.
 Runtime failover inside an operation would also make mutation outcomes and
 client state ambiguous.
 
@@ -24,29 +24,41 @@ client state ambiguous.
 Develop the mobile backend as a **resilience transport** behind the existing
 public namespace APIs.
 
-During the Phase B pilot it is explicitly opt-in and the web backend remains
-the default. A client chooses one backend at construction and does not switch
-or silently fall back during its lifetime. Mobile implementations serve each
-supported namespace end to end; an unsupported operation raises the public
-unsupported-operation error before I/O and names the web alternative.
+It is explicitly opt-in and the web backend remains the default. A client
+chooses its namespace graph at construction and does not switch that graph
+during its lifetime. Explicit `backend="android"` installs Android adapter
+objects for all eleven public namespaces. Where the recovered mobile contract
+cannot express a public operation, the composition root injects a narrow,
+named Web compatibility callable instead of hiding a namespace-level fallback.
 
 Offline web/mobile wire tests and authenticated conformance runs are release
 gates, but oracle value is a consequence rather than the product boundary. A
 later decision may select mobile automatically for eligible master-token
-profiles only after the wave-one namespaces pass repeated conformance runs.
+profiles only after the complete graph passes repeated conformance runs.
 
 ## Consequences
 
-- Phase A's backend-neutral bases and `_web` extraction have a concrete second
+- The backend-neutral bases and `_web` extraction have a concrete second
   implementation target, so work after the first decoding package may proceed.
 - Users gain an opt-in path that avoids the browser-cookie ladder for supported
   operations while the complete web backend remains available.
-- Partial mobile coverage must be explicit. No mobile method may call web code
-  as a fallback, and no live client may mix backend state.
+- Partial operation coverage must be explicit. Compatibility is injected at
+  assembly through operation-shaped collaborators and documented per method;
+  Android adapters do not import or construct Web implementations.
 - Both backends return the same public dataclasses and exceptions; the base
   classes' exact abstract methods are pinned as the coverage manifest.
 - Automatic backend selection and default changes remain deferred until the
-  Phase B evidence threshold is met.
+  Android conformance threshold is met.
+
+### Mind-map contract
+
+The selected Android mind-map adapter composes the base-typed artifact and note
+namespace interfaces; it adds no separate mobile protobuf declarations.
+Interactive generation, tree reads, rename, and delete use the Android artifact
+contract. Note-backed list, tree, rename, and delete use the Android Notes
+contract. Note-backed generation uses the current-bundle `ActOnSources` request
+on the mobile gRPC route and persists the returned JSON through native
+`CreateNote`; no Web compatibility callable remains in the mind-map namespace.
 
 ## Alternatives considered
 

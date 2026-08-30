@@ -1,17 +1,17 @@
-"""Parsers for the mobile-derived wire reference data.
+"""Parsers for the Android-derived wire reference data.
 
 Two reference artifacts, both recovered from the official NotebookLM Android
-app and checked into ``docs/mobile/``:
+app and checked into ``docs/android/``:
 
-* ``docs/mobile/schema.proto`` — protobuf messages with real field names and
+* ``docs/android/schema.proto`` — protobuf messages with real field names and
   tag numbers, recovered from the Dart AOT ``BuilderInfo`` disassembly.
-* ``docs/mobile/enums.txt`` — every ``ProtobufEnum`` value with its exact
+* ``docs/android/enums.txt`` — every ``ProtobufEnum`` value with its exact
   integer, merged from the snapshot object pool **and** the object store.
 
 Why this matters for a positional JSON client
 ---------------------------------------------
 The web transport is ``batchexecute``: responses are positional JSON arrays with
-no field names on the wire. The mobile transport carries the *same backend
+no field names on the wire. The Android transport carries the *same backend
 messages* over gRPC, where fields are tag-addressed. The two line up exactly:
 
     JSON index i  ==  protobuf tag (i + 1)
@@ -44,8 +44,8 @@ from functools import lru_cache
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-PROTO_PATH = _REPO_ROOT / "docs" / "mobile" / "schema.proto"
-ENUMS_PATH = _REPO_ROOT / "docs" / "mobile" / "enums.txt"
+PROTO_PATH = _REPO_ROOT / "docs" / "android" / "schema.proto"
+ENUMS_PATH = _REPO_ROOT / "docs" / "android" / "enums.txt"
 
 #: Emitted by the upstream schema extractor when a field name could not be
 #: recovered. Not a real field name — see the module docstring.
@@ -55,7 +55,9 @@ _SECTION_RE = re.compile(r"^//\s*=====\s*(?P<section>.+?)\s*=====\s*$")
 _MESSAGE_RE = re.compile(r"^message\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\{")
 _FIELD_RE = re.compile(
     r"^\s+(?:(?P<label>repeated|optional)\s+)?"
-    r"(?P<type>[A-Za-z_][A-Za-z0-9_.]*)\s+"
+    # Absolute protobuf type names begin with a dot. Preserve it so exact-FQN
+    # evidence remains parseable instead of silently dropping the field.
+    r"(?P<type>\.?[A-Za-z_][A-Za-z0-9_.]*)\s+"
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<tag>\d+)\s*;"
 )
 _ENUM_HEADER_RE = re.compile(r"^===\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s+\((?P<count>\d+)\)")
@@ -109,7 +111,7 @@ class AmbiguousMessageError(LookupError):
 
 @dataclass
 class ProtoSchema:
-    """All messages parsed from ``docs/mobile/schema.proto``."""
+    """All messages parsed from ``docs/android/schema.proto``."""
 
     messages: list[ProtoMessage] = field(default_factory=list)
 

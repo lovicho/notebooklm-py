@@ -55,8 +55,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Coroutine
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -77,6 +78,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(CORE_LOGGER_NAME)
 
 
+@dataclass(frozen=True)
+class _RefreshResult:
+    """A refresh result that never raises across its shared Task boundary."""
+
+    value: AuthTokens | None = None
+    error: BaseException | None = None
+
+
+async def _run_refresh_after_gate(
+    gate: asyncio.Future[None],
+    callback: Callable[[int], Awaitable[AuthTokens]],
+    expected_epoch: int,
+) -> _RefreshResult:
+    """Defer callback invocation until task creation releases the refresh lock."""
+    try:
+        await gate
+        return _RefreshResult(value=await callback(expected_epoch))
+    except BaseException as exc:
+        return _RefreshResult(error=exc)
+
+
 class AuthRefreshCoordinator(LoopBoundPrimitive):
     """Owns refresh single-flight, snapshot serialization, and auth-header sync.
 
@@ -88,14 +110,15 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
     def __init__(
         self,
         *,
-        refresh_callback: Callable[[], Awaitable[AuthTokens]] | None = None,
+        refresh_callback: Callable[[int], Awaitable[AuthTokens]] | None = None,
         metrics: ClientMetrics | None = None,
     ) -> None:
         # Lazily-created — ``asyncio.Lock()`` needs a running loop in some
         # Python versions, and this object can be constructed outside one.
         self._refresh_lock: asyncio.Lock | None = None
-        self._refresh_task: asyncio.Task[AuthTokens] | None = None
-        self._refresh_callback: Callable[[], Awaitable[AuthTokens]] | None = refresh_callback
+        self._refresh_task: asyncio.Task[_RefreshResult] | None = None
+        self._refresh_task_epoch: int | None = None
+        self._refresh_callback: Callable[[int], Awaitable[AuthTokens]] | None = refresh_callback
         # ``await_refresh`` records lock-wait latency via this metrics dep.
         # The same ``self._metrics`` slot is read by :meth:`snapshot` and
         # :meth:`update_auth_tokens` too. ``None`` is a safe
@@ -105,6 +128,10 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
         self._metrics: ClientMetrics | None = metrics
         # Distinct from ``_refresh_lock`` — see module docstring.
         self._auth_snapshot_lock: asyncio.Lock | None = None
+        # Activated/fenced in lockstep with Kernel by WebTransportLifecycle.
+        # This scalar is intentionally synchronous so prepare_close can fence
+        # refresh publication before its first await.
+        self._active_epoch: int | None = None
         # ``_bound_loop`` (the loop-affinity guard consulted by
         # :meth:`await_refresh` before touching the lazy ``_refresh_lock``)
         # and ``set_bound_loop`` are provided by the
@@ -126,6 +153,22 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
         ``_refresh_callback`` attribute from outside the coordinator.
         """
         return self._refresh_callback is not None
+
+    def activate_epoch(self, epoch: int) -> None:
+        """Activate the web resource generation for snapshots/refreshes."""
+        self._active_epoch = epoch
+
+    def fence_epoch(self, epoch: int | None) -> None:
+        """Retire ``epoch`` synchronously before refresh-task settlement."""
+        if epoch is None or self._active_epoch == epoch:
+            self._active_epoch = None
+
+    def assert_epoch(self, expected_epoch: int) -> None:
+        if self._active_epoch != expected_epoch:
+            raise RuntimeError(
+                "NotebookLMClient auth generation is retired "
+                f"(expected={expected_epoch}, active={self._active_epoch!r})."
+            )
 
     def _on_loop_rebind(
         self,
@@ -231,7 +274,12 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
     # in sync.
     # ------------------------------------------------------------------
 
-    async def snapshot(self, *, auth: AuthTokens) -> AuthSnapshot:
+    async def snapshot(
+        self,
+        *,
+        auth: AuthTokens,
+        expected_epoch: int | None = None,
+    ) -> AuthSnapshot:
         """Capture the current auth scalars as a frozen snapshot.
 
         Acquires :attr:`_auth_snapshot_lock` for the four scalar reads so a
@@ -255,8 +303,12 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
         ``auth`` is passed explicitly per call; the lock-wait metric is
         recorded through ``self._metrics`` (supplied at construction).
         """
+        if expected_epoch is not None:
+            self.assert_epoch(expected_epoch)
         wait_start = time.perf_counter()
         async with self.get_auth_snapshot_lock():
+            if expected_epoch is not None:
+                self.assert_epoch(expected_epoch)
             if self._metrics is not None:
                 self._metrics.record_lock_wait(time.perf_counter() - wait_start)
             return AuthSnapshot(
@@ -272,6 +324,7 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
         auth: AuthTokens,
         csrf: str,
         session_id: str,
+        expected_epoch: int | None = None,
     ) -> None:
         """Atomically update ``auth.csrf_token`` + ``auth.session_id`` only.
 
@@ -283,10 +336,14 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
 
         ``auth`` is passed explicitly (no ``_AuthRefreshHost`` shape).
         """
+        if expected_epoch is not None:
+            self.assert_epoch(expected_epoch)
         lock = self.get_auth_snapshot_lock()
         wait_start = time.perf_counter()
         await lock.acquire()
         try:
+            if expected_epoch is not None:
+                self.assert_epoch(expected_epoch)
             # ``record_lock_wait`` lives INSIDE the ``try`` so a metric-side
             # exception (e.g. a misconfigured spy in tests, or a runtime bug
             # in :class:`ClientMetrics`) cannot leave the snapshot lock held
@@ -313,6 +370,7 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
         expected_generation: int,
         authuser: int,
         account_email: str | None,
+        expected_epoch: int | None = None,
     ) -> bool | None:
         """Atomically install one stored cookie and account-route generation.
 
@@ -322,10 +380,14 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
         writes are synchronous: cancellation cannot leave a mixed generation,
         and :meth:`snapshot` cannot observe a torn routing pair.
         """
+        if expected_epoch is not None:
+            self.assert_epoch(expected_epoch)
         lock = self.get_auth_snapshot_lock()
         wait_start = time.perf_counter()
         await lock.acquire()
         try:
+            if expected_epoch is not None:
+                self.assert_epoch(expected_epoch)
             if self._metrics is not None:
                 self._metrics.record_lock_wait(time.perf_counter() - wait_start)
             return auth._replace_profile_session(
@@ -341,7 +403,13 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
         finally:
             lock.release()
 
-    def update_auth_headers(self, *, auth: AuthTokens, kernel: Kernel) -> None:
+    def update_auth_headers(
+        self,
+        *,
+        auth: AuthTokens,
+        kernel: Kernel,
+        expected_epoch: int | None = None,
+    ) -> None:
         """Update public AuthTokens cookie shadows from the kernel-owned jar.
 
         Compat-only (ADR-0032 Phase A): the kernel's jar is already the sole
@@ -369,13 +437,15 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
         # public map alongside the public jar; no first-party request, routing,
         # recovery, or persistence decision reads either shadow after the
         # bootstrap hand-off to Kernel.
+        if expected_epoch is not None:
+            self.assert_epoch(expected_epoch)
         auth.replace_cookie_jar(kernel.cookies)
 
     # ------------------------------------------------------------------
     # Single-flight refresh task.
     # ------------------------------------------------------------------
 
-    async def await_refresh(self) -> None:
+    async def await_refresh(self, expected_epoch: int) -> None:
         """Run / join the shared refresh task.
 
         Concurrent callers share one refresh task so a thundering herd of
@@ -403,6 +473,7 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
         # ``get_refresh_lock`` — a cross-loop call would hang on the
         # ``await lock.acquire()`` if we let it through.
         assert_bound_loop(self._bound_loop)
+        self.assert_epoch(expected_epoch)
         if self._refresh_callback is None:
             raise RuntimeError(
                 "AuthRefreshCoordinator.await_refresh called without a "
@@ -418,8 +489,10 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
         # single-flight task creation below is preserved.
         lock = self.get_refresh_lock()
         wait_start = time.perf_counter()
+        start_gate: asyncio.Future[None] | None = None
         await lock.acquire()
         try:
+            self.assert_epoch(expected_epoch)
             # ``record_lock_wait`` lives INSIDE the ``try`` so a metric-side
             # exception (e.g. a misconfigured spy in tests, or a runtime bug
             # in :class:`ClientMetrics`) cannot leave the refresh lock held —
@@ -429,16 +502,33 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
             if self._metrics is not None:
                 self._metrics.record_lock_wait(time.perf_counter() - wait_start)
             if self._refresh_task is not None and not self._refresh_task.done():
+                if self._refresh_task_epoch != expected_epoch:
+                    raise RuntimeError(
+                        "Auth refresh belongs to a different resource generation "
+                        f"(expected={expected_epoch}, active={self._refresh_task_epoch})."
+                    )
                 refresh_task = self._refresh_task
                 logger.debug("Joining existing refresh task")
             else:
-                coro = cast(Coroutine[Any, Any, AuthTokens], self._refresh_callback())
-                self._refresh_task = asyncio.create_task(coro)
-                refresh_task = self._refresh_task
+                start_gate = asyncio.get_running_loop().create_future()
+                refresh_task = asyncio.create_task(
+                    _run_refresh_after_gate(
+                        start_gate,
+                        self._refresh_callback,
+                        expected_epoch,
+                    )
+                )
+                self._refresh_task = refresh_task
+                self._refresh_task_epoch = expected_epoch
         finally:
             lock.release()
+        if start_gate is not None and not start_gate.done():
+            start_gate.set_result(None)
 
-        await asyncio.shield(refresh_task)
+        result = await asyncio.shield(refresh_task)
+        if result.error is not None:
+            raise result.error
+        self.assert_epoch(expected_epoch)
 
     async def cancel_inflight_refresh(self) -> None:
         """Cancel any in-flight refresh task during ``ClientLifecycle.close``.
@@ -484,7 +574,12 @@ class AuthRefreshCoordinator(LoopBoundPrimitive):
         refresh_task = self._refresh_task
         if refresh_task is not None and not refresh_task.done():
             refresh_task.cancel()
-            await asyncio.gather(refresh_task, return_exceptions=True)
+        if refresh_task is not None:
+            settled = (await asyncio.gather(refresh_task, return_exceptions=True))[0]
+            if isinstance(settled, _RefreshResult) and isinstance(
+                settled.error, (KeyboardInterrupt, SystemExit)
+            ):
+                raise settled.error
 
 
 __all__ = ["AuthRefreshCoordinator"]

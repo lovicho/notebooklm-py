@@ -2,8 +2,8 @@
 
 Splits the client-runtime constructor into three concerns:
 :func:`validate_constructor_args` (kwarg validation + normalization),
-:func:`build_collaborators` (the seven collaborators in dependency order),
-and :func:`wire_middleware_chain` (the seven-middleware ADR-0009 chain).
+:func:`build_collaborators` (the runtime collaborators in dependency order),
+and :func:`wire_middleware_chain` (the four-middleware ADR-0009 web chain).
 Dependency-ordering and seam-resolution comments live inside the helpers so
 future readers see *why* the order matters.
 
@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -39,6 +38,12 @@ from .._web.transport.cookie_persistence import CookiePersistence
 from .._web.transport.error_injection import _refuse_synthetic_error_outside_test_context
 from .._web.transport.executor import RpcExecutor
 from .._web.transport.kernel import Kernel
+from .._web.transport.lifecycle import (
+    CookieRotator,
+    CookieSaver,
+    WebTransportLifecycle,
+    _default_cookie_rotator,
+)
 from .._web.transport.middleware.chain import MiddlewareChainBuilder
 from .._web.transport.middleware.chain_host import MiddlewareChainHost
 from .._web.transport.middleware.core import Middleware, NextCall, build_chain
@@ -46,6 +51,7 @@ from .._web.transport.reqid_counter import ReqidCounter
 from .._web.transport.runtime import RuntimeTransport
 from .._web.transport.seams import ClientSeams, resolve_client_seams
 from ..auth import AuthTokens
+from .call_supervisor import CallSupervisor
 from .config import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_KEEPALIVE_MIN_INTERVAL,
@@ -55,7 +61,7 @@ from .config import (
     normalize_max_concurrent_uploads,
 )
 from .helpers import _resolve_keepalive_interval
-from .lifecycle import ClientLifecycle, CookieRotator, CookieSaver
+from .lifecycle import ClientLifecycle
 
 if TYPE_CHECKING:
     # Runtime import of ``ConnectionLimits`` is deferred to
@@ -109,12 +115,20 @@ class RuntimeCollaborators:
     """
 
     metrics: ClientMetrics
-    drain_tracker: TransportDrainTracker
+    call_supervisor: CallSupervisor
     reqid: ReqidCounter
     auth_coord: AuthRefreshCoordinator
     kernel: Kernel
-    lifecycle: ClientLifecycle
     cookie_persistence: CookiePersistence
+    web_transport: WebTransportLifecycle
+    _lifecycle: ClientLifecycle | None
+
+    @property
+    def lifecycle(self) -> ClientLifecycle:
+        """Return the root after final client assembly has frozen the graph."""
+        if self._lifecycle is None:
+            raise RuntimeError("Client lifecycle has not been assembled.")
+        return self._lifecycle
 
 
 @dataclass(frozen=True)
@@ -253,12 +267,12 @@ def build_collaborators(
     config: ValidatedSessionConfig,
     *,
     auth: AuthTokens,
-    refresh_callback: Callable[[], Awaitable[AuthTokens]] | None,
+    refresh_callback: Callable[[int], Awaitable[AuthTokens]] | None,
     on_rpc_event: Callable[[RpcTelemetryEvent], object] | None,
     cookie_saver: CookieSaver | None,
     cookie_rotator: CookieRotator | None,
 ) -> RuntimeCollaborators:
-    """Construct the seven extracted collaborators in dependency order.
+    """Construct the extracted runtime collaborators in dependency order.
 
     The order is dependency-driven so the load-bearing inter-collaborator
     wiring stays obvious to future readers: metrics is built first because
@@ -269,8 +283,8 @@ def build_collaborators(
     that has not yet been set); the drain tracker /
     reqid counter / auth coordinator follow because they are leaf
     collaborators with no inter-helper dependencies; ``Kernel`` is
-    built next because ``ClientLifecycle`` holds a reference to it;
-    ``CookiePersistence`` closes out the bundle.
+    built next because ``WebTransportLifecycle`` and the request paths
+    hold it; ``CookiePersistence`` closes out the bundle.
     """
     # Observability counters + telemetry callback. ``metrics_snapshot``
     # remains the lock-safe read path; helper-level tests that need
@@ -281,6 +295,11 @@ def build_collaborators(
     # ``__init__`` is event-loop-agnostic; the ``asyncio.Condition`` is
     # created lazily on first ``get_drain_condition`` call.
     drain_tracker = TransportDrainTracker()
+    call_supervisor = CallSupervisor(
+        metrics=metrics,
+        drain_tracker=drain_tracker,
+        max_concurrent_rpcs=config.max_concurrent_rpcs,
+    )
     # Request ID counter for chat API (must be unique per request).
     # The :class:`ReqidCounter` helper owns the monotonic ``_value`` and
     # the lazily-allocated ``asyncio.Lock`` that serialises mutation.
@@ -315,43 +334,11 @@ def build_collaborators(
         refresh_callback=refresh_callback,
         metrics=metrics,
     )
-    # HTTP-client lifecycle — owns loop binding, keepalive, and close
-    # ordering while delegating the live ``httpx.AsyncClient`` to
-    # ``self._kernel``. The ``_resolve_keepalive_interval`` clamp lives
-    # in :mod:`notebooklm._runtime.helpers` and is imported above; we
-    # call it directly here. (The historical ``notebooklm._core``
-    # re-export was removed in v0.5.0.)
-    #
-    # Event-loop affinity guard rationale: the lifecycle captures
-    # ``asyncio.get_running_loop()`` in ``_bound_loop`` at ``open()`` time
-    # and ``RuntimeTransport.perform_authed_post`` does the cross-loop
-    # check with a cheap ``is`` comparison against it. Each client is per-loop — the asyncio primitives we hold
-    # (``_reqid_lock``, ``_refresh_lock``, ``_auth_snapshot_lock``,
-    # ``_rpc_semaphore``, the ``httpx.AsyncClient``
-    # pool, in-flight tasks like ``_refresh_task`` / ``_keepalive_task``)
-    # are all bound to the loop that ``open()`` ran on; reusing them
-    # under a different loop produces hangs and ``RuntimeError`` deep
-    # in httpx instead of an actionable message at the call site.
     # Seed the kernel-owned jar at composition time. This is the bootstrap
     # hand-off defined by ADR-0032: after this call, post-open and closed-state
     # first-party readers use ``kernel.cookies`` and never AuthTokens' public
     # compatibility shadows.
     kernel = Kernel(auth=auth, async_client_factory=config.async_client_factory)
-    lifecycle = ClientLifecycle(
-        timeout=config.timeout,
-        connect_timeout=config.connect_timeout,
-        limits=config.limits,
-        keepalive_interval=config.keepalive_interval,
-        keepalive_storage_path=config.keepalive_storage_path,
-        auth=auth,
-        cookie_persistence_path=config.keepalive_storage_path,
-        kernel=kernel,
-        # Injectable seams. A ``None`` saver selects the unconditional typed
-        # ProfileStore route; only an explicit saver reaches the v0.x callback
-        # adapter. The rotator alone retains its late-bound default.
-        cookie_saver=cookie_saver,
-        cookie_rotator=cookie_rotator,
-    )
     # Owns the in-process save lock and typed per-profile baselines. Preserve
     # only the load-time snapshot, not the AuthTokens capability: re-reading a
     # newer file at open would make the older live jar overwrite a sibling
@@ -360,15 +347,30 @@ def build_collaborators(
         ProfileStore(auth.storage_path) if auth.storage_path is not None else None,
         initial_snapshot=auth.cookie_snapshot,
     )
+    web_transport = WebTransportLifecycle(
+        auth=auth,
+        auth_coord=auth_coord,
+        cookie_persistence=cookie_persistence,
+        kernel=kernel,
+        timeout=config.timeout,
+        connect_timeout=config.connect_timeout,
+        limits=config.limits,
+        keepalive_interval=config.keepalive_interval,
+        keepalive_storage_path=config.keepalive_storage_path,
+        cookie_persistence_path=config.keepalive_storage_path,
+        cookie_saver=cookie_saver,
+        cookie_rotator=cookie_rotator or _default_cookie_rotator,
+    )
 
     return RuntimeCollaborators(
         metrics=metrics,
-        drain_tracker=drain_tracker,
+        call_supervisor=call_supervisor,
         reqid=reqid,
         auth_coord=auth_coord,
         kernel=kernel,
-        lifecycle=lifecycle,
         cookie_persistence=cookie_persistence,
+        web_transport=web_transport,
+        _lifecycle=None,
     )
 
 
@@ -396,10 +398,10 @@ def build_runtime_transport(
     :class:`AuthTokens` collaborator directly to
     :meth:`AuthRefreshCoordinator.snapshot`; the coordinator routes
     its lock-wait metric through ``self._metrics`` (supplied at
-    construction). The ``bound_loop_check`` lambda reads through
-    ``collaborators.lifecycle.assert_bound_loop`` at call time, preserving
-    lifecycle method patchability without retaining a broad host-level
-    ``assert_bound_loop`` forward.
+    construction). The ``bound_loop_check`` callback delegates to the
+    protocol-neutral ``CallSupervisor``, which owns the request-admission
+    loop binding without making the web transport depend on the root
+    lifecycle orchestrator.
 
     The ``chain_host`` parameter lets the chain-slot lookup go through
     the host directly, with no extra indirection on the hot
@@ -412,10 +414,13 @@ def build_runtime_transport(
     """
     return RuntimeTransport(
         kernel=collaborators.kernel,
-        snapshot_provider=lambda: collaborators.auth_coord.snapshot(auth=auth),
+        snapshot_provider=lambda expected_epoch: collaborators.auth_coord.snapshot(
+            auth=auth,
+            expected_epoch=expected_epoch,
+        ),
         chain_provider=lambda: chain_host._authed_post_chain,
-        metrics=collaborators.metrics,
-        bound_loop_check=lambda: collaborators.lifecycle.assert_bound_loop(),
+        call_supervisor=collaborators.call_supervisor,
+        bound_loop_check=collaborators.call_supervisor.assert_bound_loop,
         logger=logger,
     )
 
@@ -426,10 +431,10 @@ def wire_middleware_chain(
     chain_host: MiddlewareChainHost,
     auth: AuthTokens,
     authed_post_chain_terminal: Callable[..., Awaitable[Any]],
-    rpc_semaphore_factory: Callable[[], AbstractAsyncContextManager[Any]],
     is_auth_error: Callable[[Exception], bool],
+    timeout: float,
 ) -> WiredMiddleware:
-    """Construct the :class:`MiddlewareChainBuilder`, build the seven-middleware
+    """Construct the :class:`MiddlewareChainBuilder`, build the four-middleware
     list, and wire the final chain via :func:`build_chain`.
 
     Two narrow host parameters:
@@ -457,25 +462,24 @@ def wire_middleware_chain(
 
     Post-construction mutation on ``chain_host._<attr>`` still takes
     effect through the middleware live-binding contract documented in
-    :class:`MiddlewareChainBuilder`. The ``rpc_semaphore_factory`` is
-    passed in explicitly so the helper does not need to know which holder
-    owns the live semaphore. ``is_auth_error`` is passed as a live-binding
-    callable so rebinding ``ClientSeams.is_auth_error`` after construction
-    still steers the chain.
+    :class:`MiddlewareChainBuilder`. ``is_auth_error`` is passed as a
+    live-binding callable so rebinding ``ClientSeams.is_auth_error`` after
+    construction still steers the chain.
     """
     # ADR-0009 chain construction. PR history, leaf exception shape,
     # and ``RpcRequest.context`` contract live in
     # ``_web/transport/middleware/chain.py`` module docstring.
     chain_builder = MiddlewareChainBuilder(
-        drain_tracker=collaborators.drain_tracker,
         metrics=collaborators.metrics,
-        rpc_semaphore_factory=rpc_semaphore_factory,
         rate_limit_max_retries_provider=lambda: chain_host._rate_limit_max_retries,
         server_error_max_retries_provider=lambda: chain_host._server_error_max_retries,
-        retry_timeout_provider=lambda: collaborators.lifecycle._timeout,
+        retry_timeout_provider=lambda: timeout,
         refresh_retry_delay_provider=lambda: chain_host._refresh_retry_delay,
         refresh_callable=chain_host.await_refresh,
-        auth_snapshot_provider=lambda: collaborators.auth_coord.snapshot(auth=auth),
+        auth_snapshot_provider=lambda expected_epoch: collaborators.auth_coord.snapshot(
+            auth=auth,
+            expected_epoch=expected_epoch,
+        ),
         is_auth_error=is_auth_error,
         refresh_callback_enabled_provider=lambda: collaborators.auth_coord.has_refresh_callback,
     )
@@ -496,7 +500,7 @@ def compose_client_internals(
     auth: AuthTokens,
     timeout: float = DEFAULT_TIMEOUT,
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
-    refresh_callback: Callable[[], Awaitable[AuthTokens]] | None = None,
+    refresh_callback: Callable[[int], Awaitable[AuthTokens]] | None = None,
     refresh_retry_delay: float = 0.2,
     keepalive: float | None = None,
     keepalive_min_interval: float = DEFAULT_KEEPALIVE_MIN_INTERVAL,
@@ -527,13 +531,7 @@ def compose_client_internals(
         decode_response=decode_response,
     )
     if composed is None:
-        composed = ClientComposed(max_concurrent_rpcs=max_concurrent_rpcs)
-    elif composed.max_concurrent_rpcs != max_concurrent_rpcs:
-        raise ValueError(
-            "composed.max_concurrent_rpcs must match max_concurrent_rpcs "
-            f"(got composed.max_concurrent_rpcs={composed.max_concurrent_rpcs!r}, "
-            f"max_concurrent_rpcs={max_concurrent_rpcs!r})"
-        )
+        composed = ClientComposed()
     async_client_factory = _resolve_async_client_factory(async_client_factory)
 
     config = validate_constructor_args(
@@ -568,7 +566,6 @@ def compose_client_internals(
         _server_error_max_retries=config.server_error_max_retries,
         _refresh_retry_delay=config.refresh_retry_delay,
     )
-    composed.bind_runtime_collaborators(collaborators)
     composed.bind_chain_host(chain_host)
 
     transport = build_runtime_transport(
@@ -585,21 +582,21 @@ def compose_client_internals(
         chain_host=chain_host,
         auth=auth,
         authed_post_chain_terminal=chain_host._authed_post_chain_terminal,
-        rpc_semaphore_factory=composed.get_rpc_semaphore,
         is_auth_error=lambda *a, **kw: seams.is_auth_error(*a, **kw),
+        timeout=config.timeout,
     )
     chain_host._authed_post_chain = wired.authed_post_chain
     composed.bind_chain_metadata(wired)
 
     executor = RpcExecutor(
-        kernel=collaborators.kernel,
         transport=transport,
         auth_refresh=collaborators.auth_coord,
         metrics=collaborators.metrics,
+        call_supervisor=collaborators.call_supervisor,
         decode_response=lambda *a, **kw: seams.decode_response(*a, **kw),
         is_auth_error=lambda *a, **kw: seams.is_auth_error(*a, **kw),
         sleep=lambda *a, **kw: seams.sleep(*a, **kw),
-        timeout_provider=lambda: collaborators.lifecycle._timeout,
+        timeout_provider=lambda: config.timeout,
         refresh_callback_enabled_provider=lambda: collaborators.auth_coord.has_refresh_callback,
         refresh_retry_delay_provider=lambda: chain_host._refresh_retry_delay,
     )

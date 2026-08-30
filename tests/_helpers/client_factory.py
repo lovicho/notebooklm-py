@@ -17,7 +17,7 @@ from notebooklm._runtime.config import (
     DEFAULT_MAX_CONCURRENT_UPLOADS,
     DEFAULT_TIMEOUT,
 )
-from notebooklm._runtime.lifecycle import CookieRotator, CookieSaver
+from notebooklm._web.transport.lifecycle import CookieRotator, CookieSaver
 from notebooklm.auth import AuthTokens
 from notebooklm.client import NotebookLMClient
 from notebooklm.types import RpcTelemetryEvent
@@ -30,7 +30,7 @@ def build_client_shell_for_tests(
     auth: AuthTokens,
     timeout: float = DEFAULT_TIMEOUT,
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
-    refresh_callback: Callable[[], Awaitable[AuthTokens]] | None = None,
+    refresh_callback: Callable[[int], Awaitable[AuthTokens]] | None = None,
     refresh_retry_delay: float = 0.2,
     keepalive: float | None = None,
     keepalive_min_interval: float = DEFAULT_KEEPALIVE_MIN_INTERVAL,

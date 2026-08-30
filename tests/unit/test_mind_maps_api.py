@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from notebooklm._web.mind_maps import WebMindMapsAPI, extract_interactive_tree_leaf
+from notebooklm._web.mind_maps import (
+    NoteBackedMindMapService,
+    WebMindMapsAPI,
+    extract_interactive_tree_leaf,
+)
+from notebooklm._web.notes import NoteRowKind, NoteService
 from notebooklm.exceptions import (
     ArtifactError,
     ArtifactFeatureUnavailableError,
@@ -126,6 +131,63 @@ async def test_rename_dispatches_by_kind():
     # The interactive artifact rename is delegated with return_object=False so
     # the unified API hydrates once (not twice) when an object is requested.
     artifacts.rename.assert_awaited_once_with("nb", "int_mm", "Y", return_object=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "expected_fetches"),
+    [
+        pytest.param(MindMapKind.NOTE_BACKED, 1, id="explicit-kind"),
+        pytest.param(None, 2, id="auto-detect"),
+    ],
+)
+async def test_web_note_backed_rename_preserves_raw_content_and_call_count(
+    kind: MindMapKind | None,
+    expected_fetches: int,
+) -> None:
+    raw_content = r"""{
+  "z-last" : "雪だるま",
+  "children" : [  ],
+  "escaped" : "\u2603",
+  "a-first" : "slash\/value"
+}"""
+    target_row = ["note_mm", raw_content]
+    note_service = MagicMock(spec=NoteService)
+    note_service.fetch_note_rows = AsyncMock(return_value=[target_row])
+    note_service.classify_row = MagicMock(return_value=NoteRowKind.MIND_MAP)
+    note_service.extract_content = MagicMock(return_value=raw_content)
+    note_service.update_note = AsyncMock()
+    artifacts = MagicMock()
+    artifacts.list = AsyncMock()
+    artifacts.rename = AsyncMock()
+
+    api = WebMindMapsAPI(
+        rpc=MagicMock(),
+        mind_maps=NoteBackedMindMapService(note_service),
+        artifacts=artifacts,
+        notebooks=MagicMock(),
+        notes=MagicMock(),
+    )
+
+    assert (
+        await api.rename(
+            "nb",
+            "note_mm",
+            "Renamed",
+            kind=kind,
+            return_object=False,
+        )
+        is None
+    )
+
+    assert note_service.fetch_note_rows.await_count == expected_fetches
+    assert note_service.fetch_note_rows.await_args_list == [(("nb",), {})] * expected_fetches
+    assert note_service.extract_content.call_count == expected_fetches
+    note_service.extract_content.assert_called_with(target_row)
+    note_service.update_note.assert_awaited_once_with("nb", "note_mm", raw_content, "Renamed")
+    assert note_service.update_note.await_args.args[2].encode() == raw_content.encode()
+    artifacts.list.assert_not_awaited()
+    artifacts.rename.assert_not_awaited()
 
 
 @pytest.mark.asyncio

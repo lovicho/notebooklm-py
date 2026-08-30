@@ -36,8 +36,7 @@ from .exceptions import ArtifactNotFoundError, ValidationError
 from .types import Artifact, ArtifactType, GenerationStatus, ReportSuggestion
 
 if TYPE_CHECKING:
-    from ._runtime.lifecycle import ClientLifecycle
-    from ._transport_drain import TransportDrainTracker
+    from ._runtime.call_supervisor import CallSupervisor
 
 logger = logging.getLogger(__name__)
 
@@ -70,34 +69,29 @@ class ArtifactsAPI(ABC):
     def __init__(
         self,
         *,
-        drain: TransportDrainTracker,
-        lifecycle: ClientLifecycle,
+        supervisor: CallSupervisor,
         notebooks: NotebookSourceIdProvider,
         asset_downloads: AssetDownloadService,
     ) -> None:
         """Initialize the backend-neutral artifacts API.
 
         Args:
-            drain: Transport drain coordinator. Owns ``operation_scope`` for
-                polling and ``register_drain_hook`` for close-time cleanup.
-            lifecycle: Client lifecycle seam. Owns ``assert_bound_loop`` used
-                before polling touches loop-bound state.
+            supervisor: The single logical-call admission authority. Owns the
+                polling caller scope, leader-child task, loop-affinity guard,
+                and close-time drain-hook registration.
             notebooks: Base-typed source-id resolver used by shared generation
                 workflows.
             asset_downloads: Required backend-supplied neutral asset-transfer
                 service, configured with that backend's per-hop credential policy.
         """
-        self._drain = drain
-        self._lifecycle = lifecycle
+        self._supervisor = supervisor
         self._notebooks = notebooks
         self._asset_downloads = asset_downloads
         self._poll_registry = PollRegistry()
         self._polling = ArtifactPollingService(
-            loop_guard=self._lifecycle,
-            op_scope=self._drain,
+            supervisor=self._supervisor,
             poll_registry=self._poll_registry,
         )
-        self._drain.register_drain_hook("artifacts.polls", self._polling.drain)
 
     @abstractmethod
     async def _list_studio(

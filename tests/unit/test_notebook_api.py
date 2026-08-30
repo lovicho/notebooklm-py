@@ -9,6 +9,7 @@ import pytest
 
 from notebooklm._web.notebooks import WebNotebooksAPI
 from notebooklm._web.params.notebooks import (
+    build_copy_notebook_params,
     build_create_notebook_params,
     build_get_notebook_params,
 )
@@ -16,9 +17,11 @@ from notebooklm._web.sources.listing import SourceLister
 from notebooklm.auth import AuthTokens
 from notebooklm.client import NotebookLMClient
 from notebooklm.exceptions import (
+    DecodingError,
     NetworkError,
     NotebookLimitError,
     NotebookNotFoundError,
+    RateLimitError,
     RPCError,
     ServerError,
     ValidationError,
@@ -118,6 +121,14 @@ def test_build_create_notebook_params_matches_live_payload() -> None:
         None,
         None,
         [2, None, None, [1, None, None, None, None, None, None, None, None, None, [1]]],
+    ]
+
+
+def test_build_copy_notebook_params_matches_live_payload() -> None:
+    assert build_copy_notebook_params("nb_source", "Copied Notebook") == [
+        [2, None, None, [1, None, None, None, None, None, None, None, None, None, [1]]],
+        "nb_source",
+        "Copied Notebook",
     ]
 
 
@@ -708,6 +719,98 @@ class TestCreateNotebookQuotaDetection:
             RPCMethod.GET_USER_SETTINGS,
             [None, [1, None, None, None, None, None, None, None, None, None, [1]]],
             source_path="/",
+        )
+
+
+class TestCopyNotebook:
+    @pytest.mark.asyncio
+    async def test_copy_uses_live_wire_shape_and_decodes_project(self) -> None:
+        rpc_call = AsyncMock(return_value=["Copied Notebook", [], "nb_copy"])
+        api = _make_api(rpc_call=rpc_call)
+
+        notebook = await api.copy("nb_source", "Copied Notebook")
+
+        assert notebook.id == "nb_copy"
+        assert notebook.title == "Copied Notebook"
+        rpc_call.assert_awaited_once_with(
+            RPCMethod.COPY_NOTEBOOK,
+            build_copy_notebook_params("nb_source", "Copied Notebook"),
+            source_path="/notebook/nb_source",
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("notebook_id", "title", "message"),
+        [("", "Copy", "notebook_id"), ("nb_source", "   ", "title")],
+    )
+    async def test_copy_rejects_empty_identifiers_or_titles(
+        self, notebook_id: str, title: str, message: str
+    ) -> None:
+        api = _make_api()
+
+        with pytest.raises(ValidationError, match=message):
+            await api.copy(notebook_id, title)
+
+        api._rpc.rpc_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_copy_fails_closed_when_response_has_no_id(self) -> None:
+        api = _make_api(rpc_call=AsyncMock(return_value=["Copied Notebook", []]))
+
+        with pytest.raises(DecodingError, match="did not contain a notebook id"):
+            await api.copy("nb_source", "Copied Notebook")
+
+    @pytest.mark.asyncio
+    async def test_copy_fails_closed_when_response_reuses_source_id(self) -> None:
+        api = _make_api(rpc_call=AsyncMock(return_value=["Copied Notebook", [], "nb_source"]))
+
+        with pytest.raises(DecodingError, match="reused the source notebook id"):
+            await api.copy("nb_source", "Copied Notebook")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("failure", "expected_rpc_code"),
+        [
+            pytest.param(NetworkError("lost response"), None, id="network-error"),
+            pytest.param(
+                ServerError(
+                    "lost response",
+                    method_id=RPCMethod.COPY_NOTEBOOK.value,
+                    rpc_code=14,
+                ),
+                14,
+                id="server-error",
+            ),
+            pytest.param(
+                RateLimitError(
+                    "ambiguous throttle response",
+                    method_id=RPCMethod.COPY_NOTEBOOK.value,
+                    rpc_code=8,
+                ),
+                8,
+                id="rate-limit-error",
+            ),
+        ],
+    )
+    async def test_copy_marks_lost_response_as_unconfirmed_without_retry(
+        self,
+        failure: NetworkError | RateLimitError | ServerError,
+        expected_rpc_code: int | None,
+    ) -> None:
+        rpc_call = AsyncMock(side_effect=failure)
+        api = _make_api(rpc_call=rpc_call)
+
+        with pytest.raises(RPCError, match="list notebooks.*manually") as caught:
+            await api.copy("nb_source", "Copied Notebook")
+
+        assert getattr(caught.value, "unconfirmed", False) is True
+        assert caught.value.method_id == RPCMethod.COPY_NOTEBOOK.value
+        assert caught.value.rpc_code == expected_rpc_code
+        assert caught.value.__cause__ is failure
+        rpc_call.assert_awaited_once_with(
+            RPCMethod.COPY_NOTEBOOK,
+            build_copy_notebook_params("nb_source", "Copied Notebook"),
+            source_path="/notebook/nb_source",
         )
 
 

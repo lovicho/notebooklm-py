@@ -120,12 +120,11 @@ def mock_artifacts_api(tmp_path: Path) -> tuple[ArtifactsAPI, FakeSession]:
         rpc_call=AsyncMock(),
         get_source_ids=AsyncMock(return_value=[]),
     )
-    note_service = NoteService(mock_core)
+    note_service = NoteService(mock_core, supervisor=mock_core)
     mind_maps = NoteBackedMindMapService(note_service)
     api = WebArtifactsAPI(
         rpc=mock_core,
-        drain=mock_core,
-        lifecycle=mock_core,
+        supervisor=mock_core,
         notebooks=MagicMock(),
         mind_maps=mind_maps,
         note_service=note_service,

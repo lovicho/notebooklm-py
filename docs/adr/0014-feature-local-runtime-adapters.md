@@ -25,6 +25,13 @@
 > their direct satisfiers. Backend-neutral public namespace bases
 > do not depend on those web contracts; each `Web*API` subclass receives the
 > web collaborator it needs. Rules 2–5 otherwise remain in force.
+>
+> **Phase B lifecycle amendment (2026-08-28).** `CallSupervisor` and the root
+> `ClientLifecycle`/`TransportLifecycle` split now have multiple production
+> consumers (web and Android) and therefore pass this ADR's sharing threshold.
+> They are infrastructure services with closed lifecycle/call-policy surfaces,
+> not a resurrection of the deleted broad `Session` facade. Backend request,
+> auth, retry, codec, and exception decisions remain on their concrete stacks.
 
 ## Status
 

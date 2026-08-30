@@ -133,7 +133,7 @@ class ArtifactStatus(int, Enum):
     """Processing status of an artifact.
 
     Values correspond to artifact_data[4] in API responses and mirror the
-    backend's own ``ArtifactStatus`` enum (recovered in ``docs/mobile/enums.txt``
+    backend's own ``ArtifactStatus`` enum (recovered in ``docs/android/enums.txt``
     and pinned by ``tests/_guardrails/_wire_contract.py``):
 
     * 0 — ``ARTIFACT_STATUS_UNKNOWN`` -> :attr:`UNKNOWN` -> ``"unknown"``
@@ -333,9 +333,8 @@ class ReportFormat(str, Enum):
     BRIEFING_DOC = "briefing_doc"
     STUDY_GUIDE = "study_guide"
     BLOG_POST = "blog_post"
-    # Returned by LIST_ARTIFACTS as a report kind. Read-only for now: unlike
-    # the three static generation presets, its generation directive has not
-    # been recovered, so build_report_artifact_params rejects it explicitly.
+    # The mobile report contract uses free-form preset strings; this SDK preset
+    # is live-validated rather than tied to a hidden backend enum.
     CONCEPT_EXPLANATION = "concept_explanation"
     CUSTOM = "custom"
 
@@ -539,7 +538,7 @@ class DriveSourceStatus(int, Enum):
     ``tests/_guardrails/_wire_contract.py::ENUM_GAPS``.
 
     Values are the backend ``UserDriveSourceStatus`` enum, recovered from the
-    official Android app (``docs/mobile/enums.txt``) and pinned by
+    official Android app (``docs/android/enums.txt``) and pinned by
     ``tests/_guardrails/_wire_contract.py``.
 
     .. warning::
@@ -616,7 +615,7 @@ class DiscoveryMode(int, Enum):
     ``tests/_guardrails/_wire_contract.py::ENUM_GAPS``.
 
     Values are the backend ``DiscoveryMode`` enum recovered from the official
-    Android app (``docs/mobile/enums.txt``) and pinned by
+    Android app (``docs/android/enums.txt``) and pinned by
     ``tests/_guardrails/_wire_contract.py``.
 
     .. warning::

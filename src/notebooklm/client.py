@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Generator
+import os
+from collections.abc import Callable, Generator, Mapping
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
@@ -43,7 +44,12 @@ from ._auth.account_email import AccountEmailCacheKey, resolve_account_email
 from ._auth.extraction import extract_wiz_field as extract_wiz_field
 from ._auth.session import refresh_auth_session
 from ._chat import ChatAPI
-from ._client_assembly import _assemble_client
+from ._client_assembly import (
+    BackendName,
+    BackendPreference,
+    _assemble_client,
+    resolve_backend_preference,
+)
 from ._client_composed import ClientComposed
 from ._collections import CollectionsAPI
 from ._deprecation import warn_deprecated
@@ -52,6 +58,7 @@ from ._labels import LabelsAPI
 from ._mind_maps_api import MindMapsAPI
 from ._notebooks import NotebooksAPI
 from ._notes import NotesAPI
+from ._research import BaseResearchAPI
 from ._runtime.config import (
     AUTO_READ_TIMEOUT,
     DEFAULT_CHAT_RESPONSE_MAX_BYTES,
@@ -62,16 +69,15 @@ from ._runtime.config import (
 )
 from ._runtime.init import RuntimeCollaborators
 from ._runtime.init import compose_client_internals as compose_client_internals  # noqa: F401
-from ._runtime.lifecycle import CookieRotator, CookieSaver
 from ._settings import SettingsAPI
 from ._sharing import SharingAPI
 from ._sources import SourcesAPI
 from ._url_utils import is_google_auth_redirect as is_google_auth_redirect
 from ._web.mind_maps import NoteBackedMindMapService as NoteBackedMindMapService  # noqa: F401
 from ._web.notes import NoteService as NoteService  # noqa: F401
-from ._web.research import ResearchAPI
 from ._web.sources.upload import SourceUploadPipeline
 from ._web.transport.executor import RpcExecutor
+from ._web.transport.lifecycle import CookieRotator, CookieSaver
 from ._web.transport.seams import ClientSeams
 from ._web.transport.seams import resolve_client_seams as resolve_client_seams  # noqa: F401
 from .auth import AuthTokens
@@ -86,7 +92,7 @@ class NotebookLMClient:
     """Async client for NotebookLM API.
 
     Provides access to NotebookLM functionality through namespaced sub-clients:
-    - notebooks: Create, list, delete, rename notebooks
+    - notebooks: Create, copy, list, delete, and rename notebooks
     - sources: Add, list, delete sources (URLs, text, files, YouTube, Drive)
     - artifacts: Generate and manage AI content (audio, video, reports, etc.)
     - chat: Ask questions and manage conversations
@@ -136,13 +142,17 @@ class NotebookLMClient:
     _collaborators: RuntimeCollaborators
     _rpc_executor: RpcExecutor
     _source_uploader: SourceUploadPipeline
+    _backend_preference: BackendPreference
+    _backends: Mapping[str, BackendName]
+    _android_bearer_provider: Any
+    _android_session: Any
     sources: SourcesAPI
     notebooks: NotebooksAPI
     artifacts: ArtifactsAPI
     chat: ChatAPI
     notes: NotesAPI
     mind_maps: MindMapsAPI
-    research: ResearchAPI
+    research: BaseResearchAPI
     settings: SettingsAPI
     sharing: SharingAPI
     labels: LabelsAPI
@@ -167,6 +177,8 @@ class NotebookLMClient:
         chat_timeout: float | None = AUTO_READ_TIMEOUT,
         chat_response_max_bytes: int | None = DEFAULT_CHAT_RESPONSE_MAX_BYTES,
         import_research_timeout: float | None = AUTO_READ_TIMEOUT,
+        *,
+        backend: Literal["web", "android"] | None = None,
     ):
         """Initialize the NotebookLM client.
 
@@ -291,6 +303,12 @@ class NotebookLMClient:
                 ``notebooklm._auth.keepalive._rotate_cookies`` via a
                 late-bound wrapper. Must be async — it is awaited from
                 the keepalive loop.
+            backend: Preferred namespace backend. ``"web"`` preserves the
+                established implementation; ``"android"`` installs the Android
+                adapter for every public namespace. A few operations retain
+                documented Web compatibility collaborators where the recovered
+                mobile route has no usable admitted contract. When omitted,
+                ``NOTEBOOKLM_BACKEND`` is consulted, then the default is web.
         """
         # The full assembly lives in ``notebooklm._client_assembly`` —
         # one private seam shared with the canonical test factory
@@ -322,6 +340,7 @@ class NotebookLMClient:
             chat_timeout=chat_timeout,
             import_research_timeout=import_research_timeout,
             chat_response_max_bytes=chat_response_max_bytes,
+            backend=backend,
         )
 
     #: Per-client memo for the signed-in account email so a *successful* live probe
@@ -345,21 +364,22 @@ class NotebookLMClient:
         """
         return self._auth
 
+    @property
+    def backends(self) -> Mapping[str, Literal["web", "android"]]:
+        """Read-only mapping of namespaces to their installed adapter backend.
+
+        The value describes the namespace object, not every internal operation:
+        an Android adapter may use a documented narrow Web compatibility seam
+        when the recovered mobile route has no usable admitted contract.
+        """
+        return self._backends
+
     async def __aenter__(self) -> NotebookLMClient:
         """Open the client connection."""
         logger.debug("Opening NotebookLM client")
         # Preserve the historical fail-fast check that composition is complete.
         _ = self._composed.transport
-        await self._collaborators.lifecycle.open(
-            auth=self._auth,
-            drain_tracker=self._collaborators.drain_tracker,
-            auth_coord=self._collaborators.auth_coord,
-            reqid=self._collaborators.reqid,
-            cookie_persistence=self._collaborators.cookie_persistence,
-            composed=self._composed,
-            uploader=self._source_uploader,
-            chat=self.chat,
-        )
+        await self._collaborators.lifecycle.open()
         return self
 
     async def __aexit__(
@@ -380,6 +400,8 @@ class NotebookLMClient:
         logger.debug("Closing NotebookLM client")
         try:
             await self.close()
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except BaseException as close_exc:
             if exc_val is not None:
                 logger.warning(
@@ -392,11 +414,10 @@ class NotebookLMClient:
     async def drain(self, timeout: float | None = None) -> None:
         """Stop accepting new operations and wait for in-flight operations to finish.
 
-        Delegates directly to the :class:`TransportDrainTracker` that
-        owns the in-flight counter; the public client-side behavior
-        (drain semantics and timeout propagation) is unchanged.
+        Resource ownership and admission are separate: a successfully drained
+        client remains connected, but rejects new top-level work until closed.
         """
-        await self._collaborators.drain_tracker.drain(timeout=timeout)
+        await self._collaborators.lifecycle.drain(timeout=timeout)
 
     async def close(
         self,
@@ -404,162 +425,22 @@ class NotebookLMClient:
         drain: bool = True,
         drain_timeout: float | None = None,
     ) -> None:
-        """Close the client.
+        """Close every client transport through one root-owned lifecycle wave.
 
-        By default (``drain=True``), ``close()`` first stops accepting new
-        operations and waits for in-flight operations to finish before tearing
-        down the transport. If the drain deadline (``drain_timeout``) is
-        exceeded, the transport is still closed and the timeout is re-raised.
+        With ``drain=True`` (the default), admission stops, feature hooks run,
+        and the generation waits for supervised work up to ``drain_timeout``
+        before teardown. A timeout is retained and re-raised after every
+        transport is prepared and closed. ``drain=False`` skips the graceful
+        prephase and fences the generation immediately.
 
-        Pass ``drain=False`` to skip the drain step and tear the transport
-        down immediately (fire-and-forget semantics).
-
-        BREAKING CHANGE: prior versions defaulted to ``drain=False``. Callers
-        relying on fire-and-forget close semantics (e.g. via
-        ``__aexit__``) will now block briefly on the drain step; pass
-        ``drain=False`` explicitly to restore the old behavior.
-
-        Cancellation-safety contract (audit finding I12):
-
-        If the caller's task is cancelled while ``close(drain=True)`` is
-        still waiting on ``drain()`` (e.g. ``asyncio.wait_for`` deadline,
-        manual ``task.cancel()``), the underlying transport is STILL torn
-        down before the cancellation propagates. The drain await
-        explicitly catches ``CancelledError`` and schedules
-        lifecycle close through ``asyncio.shield`` — the shield wraps
-        the inner close in a ``Task`` that survives the outer
-        cancellation, so the ``Kernel.aclose()`` it drives runs to
-        completion in the background. On the normal-success and
-        ``TimeoutError`` paths the same shielded close call runs inline.
-        ``ValueError`` (and any other unexpected exception) from
-        ``drain()`` propagates without an implicit close, matching the
-        pre-I12 caller-error semantics asserted by
-        ``test_close_with_invalid_drain_does_not_close_transport``.
-
-        Practical guarantee:
-
-        - **Normal-success and drain-timeout paths**: on return,
-          ``is_connected is False`` and the underlying
-          ``httpx.AsyncClient`` is closed synchronously.
-        - **Cancel-during-drain path** (single cancellation): the
-          shielded lifecycle close runs to completion synchronously
-          before ``CancelledError`` is re-raised — Python does not
-          re-raise ``CancelledError`` to the same task without an
-          explicit re-cancel, so the await on the shielded Task
-          blocks normally. On return, ``is_connected is False`` and
-          the transport is closed.
-        - **Cancel-during-drain path** (re-cancellation while awaiting
-          the shielded close): the shielded lifecycle close Task is
-          isolated from the second cancel by ``asyncio.shield`` and
-          continues running in the background; the second cancel
-          surfaces in the awaiter, is suppressed, and the *original*
-          ``CancelledError`` is re-raised. ``is_connected`` settles to
-          ``False`` once the background Task lands (callers can
-          ``await asyncio.sleep(0)`` or poll to observe it).
-
-        There is no path that leaves a live transport behind.
-
-        Drain-hook ordering (issue #1161): feature-owned cancel hooks
-        (e.g. ``artifacts.polls``) run BEFORE the drain wait, not just in
-        the shielded lifecycle close below. In-flight artifact polls wrap
-        themselves in ``TransportDrainTracker.operation_scope`` (see
-        :meth:`notebooklm._artifact.polling.ArtifactPollingService._run_poll_loop_in_scope`),
-        which increments the same in-flight counter ``drain()`` waits on.
-        Without firing the cancel hooks first, ``drain()`` would block on a
-        poll that the cancel hook is supposed to short-circuit — up to the
-        poll's own 300s timeout. Running the hooks first lets ``drain()``
-        observe a cancelled-then-settled count instead of parking on it. The
-        lifecycle close below still re-runs the hooks; for the only
-        production hook (``artifacts.polls``) that re-run is a cheap no-op
-        because already-settled poll tasks are filtered out of
-        :meth:`notebooklm._polling_registry.PollRegistry.active_tasks`.
-
-        Note: the cancel-hook fire is NOT bounded by ``drain_timeout`` — that
-        deadline budgets the drain *wait*. The production poll-cancel hook
-        settles near-instantly (it cancels its tasks and awaits the
-        cancellation gather), so this is a non-issue in practice; a custom
-        feature hook that blocks indefinitely could still extend shutdown,
-        and such hooks should bound their own work.
+        Concurrent callers join the same close wave. A first caller
+        cancellation aborts a hung graceful prephase but continues shielding
+        teardown; re-cancellation may detach the caller while the strongly
+        retained wave finishes in the background.
         """
-        if drain:
-            drain_timeout_exc: TimeoutError | None = None
-            try:
-                # Fire feature-owned cancel hooks BEFORE the drain wait (see
-                # the "Drain-hook ordering" section of the docstring above for
-                # why). Awaited inside this ``try`` so a *caller* CancelledError
-                # arriving during the hook fire still routes through the I12
-                # shielded-close path below; ``run_drain_hooks`` itself never
-                # re-raises (it gathers with ``return_exceptions=True``).
-                await self._collaborators.drain_tracker.run_drain_hooks()
-                await self.drain(timeout=drain_timeout)
-            except TimeoutError as exc:
-                # Drain deadline missed. Hold onto the exception and
-                # fall through to the shielded close below so callers
-                # see both the timeout signal AND a torn-down transport.
-                drain_timeout_exc = exc
-            except asyncio.CancelledError:
-                # Cancellation-safety contract (audit finding I12): if
-                # the caller's task is cancelled while drain() is
-                # waiting (e.g. ``asyncio.wait_for`` deadline, manual
-                # ``task.cancel()``), we MUST still tear down the
-                # transport before letting the cancel propagate. On a
-                # single cancellation this shielded await runs to
-                # completion synchronously (Python does not re-raise
-                # CancelledError without an explicit re-cancel). If a
-                # SECOND cancel arrives while we're parked here,
-                # ``asyncio.shield`` isolates the inner lifecycle close
-                # Task so it continues in the background; the second
-                # cancel hits the awaiter and is swallowed below so the
-                # original CancelledError surfaces unchanged.
-                try:
-                    await asyncio.shield(
-                        self._collaborators.lifecycle.close(
-                            auth_coord=self._collaborators.auth_coord,
-                            drain_tracker=self._collaborators.drain_tracker,
-                            cookie_persistence=self._collaborators.cookie_persistence,
-                        )
-                    )
-                except (Exception, asyncio.CancelledError):
-                    # Swallow regular close failures and any re-cancel
-                    # propagated through the shield await so the
-                    # original CancelledError below is the one that
-                    # reaches the caller. The inner shielded Task
-                    # continues to run regardless.
-                    # NOTE: deliberately NOT catching ``BaseException`` —
-                    # ``KeyboardInterrupt`` and ``SystemExit`` are
-                    # process-exit signals that must propagate unchanged.
-                    pass
-                raise
-            # Any other exception from drain (e.g. ``ValueError`` for a
-            # caller-provided invalid deadline) propagates here without
-            # an implicit close — matches pre-I12 caller-error semantics
-            # asserted by
-            # ``test_close_with_invalid_drain_does_not_close_transport``.
-
-            try:
-                await asyncio.shield(
-                    self._collaborators.lifecycle.close(
-                        auth_coord=self._collaborators.auth_coord,
-                        drain_tracker=self._collaborators.drain_tracker,
-                        cookie_persistence=self._collaborators.cookie_persistence,
-                    )
-                )
-            except Exception as close_exc:
-                if drain_timeout_exc is not None:
-                    logger.warning(
-                        "Suppressing close() error after drain timeout to "
-                        "preserve timeout signal: %s",
-                        close_exc,
-                    )
-                    raise drain_timeout_exc from close_exc
-                raise
-            if drain_timeout_exc is not None:
-                raise drain_timeout_exc
-            return
         await self._collaborators.lifecycle.close(
-            auth_coord=self._collaborators.auth_coord,
-            drain_tracker=self._collaborators.drain_tracker,
-            cookie_persistence=self._collaborators.cookie_persistence,
+            drain=drain,
+            drain_timeout=drain_timeout,
         )
 
     def metrics_snapshot(self) -> ClientMetricsSnapshot:
@@ -585,7 +466,10 @@ class NotebookLMClient:
         This is the public escape hatch for advanced callers who need an
         undocumented RPC before a typed API exists. Prefer the namespaced APIs
         (``client.notebooks``, ``client.sources``, etc.) when possible. Import
-        ``RPCMethod`` from ``notebooklm.rpc``.
+        ``RPCMethod`` from ``notebooklm.rpc``. ``RPCMethod`` contains Web
+        ``batchexecute`` identifiers, so selecting ``backend="android"`` does
+        not change this root escape hatch; only the typed namespace APIs follow
+        the Android backend selection.
 
         The wrapper forwards to :meth:`RpcExecutor.rpc_call` on the
         executor that was bound during :meth:`__init__` (and that every
@@ -642,6 +526,7 @@ class NotebookLMClient:
         import_research_timeout: float | None = AUTO_READ_TIMEOUT,
         *,
         allow_headless: bool = False,
+        backend: Literal["web", "android"] | None = None,
     ) -> _FromStorageContext:
         """Create a client from Playwright storage state file.
 
@@ -712,6 +597,9 @@ class NotebookLMClient:
             allow_headless: Permit one cold-start layer-3 browser recovery when
                 stored cookies are fully expired. A sibling master token can
                 recover automatically without enabling browser recovery.
+            backend: Preferred namespace backend. An explicit value takes
+                precedence over ``NOTEBOOKLM_BACKEND``; Android installs the
+                complete Android namespace graph and the default is web.
 
         Returns:
             ``_FromStorageContext`` — an awaitable async-context-manager
@@ -735,6 +623,10 @@ class NotebookLMClient:
             # Legacy form (deprecated, removed in v1.0):
             # async with await NotebookLMClient.from_storage() as client: ...
         """
+        backend_preference = resolve_backend_preference(
+            explicit=backend,
+            env=None if backend is not None else os.environ.get("NOTEBOOKLM_BACKEND"),
+        )
         return _FromStorageContext(
             cls,
             path=path,
@@ -753,6 +645,7 @@ class NotebookLMClient:
             upload_timeout=upload_timeout,
             on_rpc_event=on_rpc_event,
             allow_headless=allow_headless,
+            backend_preference=backend_preference,
         )
 
     async def refresh_auth(self, *, allow_headless: bool = False) -> AuthTokens:
@@ -818,6 +711,20 @@ class NotebookLMClient:
                 changed), or if cookies are dead and L3 is unavailable / also
                 fails (the persisted profile's Google session is expired too).
         """
+        async with self._collaborators.call_supervisor.operation_scope("auth.refresh") as lease:
+            return await self._refresh_auth_for_epoch(
+                allow_headless=allow_headless,
+                expected_epoch=lease.epoch,
+            )
+
+    async def _refresh_auth_for_epoch(
+        self,
+        *,
+        allow_headless: bool = False,
+        expected_epoch: int,
+    ) -> AuthTokens:
+        """Run refresh against the resource generation admitted by the caller."""
+
         coord = self._collaborators.auth_coord
         if not allow_headless or not coord.has_refresh_callback:
             # Base policy — also the coordinator's single-flight callback body,
@@ -827,13 +734,14 @@ class NotebookLMClient:
                 auth=self._auth,
                 kernel=self._collaborators.kernel,
                 auth_coord=coord,
-                lifecycle=self._collaborators.lifecycle,
+                web_transport=self._collaborators.web_transport,
                 cookie_persistence=self._collaborators.cookie_persistence,
                 allow_headless=allow_headless,
+                expected_epoch=expected_epoch,
             )
         # Wider policy: join the in-flight base refresh (join-then-rerun).
         try:
-            await coord.await_refresh()
+            await coord.await_refresh(expected_epoch)
         except ValueError:
             # Narrow by design: the L3-remediable base-flight failure surfaces as
             # ValueError (dead-cookie 302 / token extraction). refresh-cmd swallows
@@ -844,9 +752,10 @@ class NotebookLMClient:
                 auth=self._auth,
                 kernel=self._collaborators.kernel,
                 auth_coord=coord,
-                lifecycle=self._collaborators.lifecycle,
+                web_transport=self._collaborators.web_transport,
                 cookie_persistence=self._collaborators.cookie_persistence,
                 allow_headless=True,
+                expected_epoch=expected_epoch,
             )
         return self._auth
 
@@ -874,15 +783,18 @@ class NotebookLMClient:
 
         ``GET_USER_SETTINGS`` carries no identity, hence this separate source.
         Never raises for network or on-disk faults — a probe transport error or a
-        self-heal write failure degrades to ``None`` / a no-op. A closed client
-        (calling outside ``async with``) is the only surfaced error, from
-        :meth:`Kernel.get_http_client`, and only on the live-fallback path.
+        self-heal write failure degrades to ``None`` / a no-op. The live-fallback
+        path requires lifecycle admission, so a closed or draining client raises
+        the same operation-admission error as other network work.
         """
+        # Resolve every network-free source first.  This preserves the public
+        # pre-open/post-close diagnostic behavior without granting a live probe
+        # a path around client-wide admission.
         email, cached_email, cached_key = await resolve_account_email(
             auth=self._auth,
             cached_email=self._account_email_cache,
             cached_key=self._account_email_cache_route,
-            live_fallback=live_fallback,
+            live_fallback=False,
             get_cookies=self._collaborators.kernel.get_cookies,
             get_http_client=self._collaborators.kernel.get_http_client,
             probe=_probe_authuser,
@@ -890,7 +802,33 @@ class NotebookLMClient:
         )
         self._account_email_cache = cached_email
         self._account_email_cache_route = cached_key
-        return email
+        if email is not None or not live_fallback:
+            return email
+
+        # The probe and its optional persistence await while client teardown
+        # may race.  Hold one generation-bearing operation lease for their
+        # complete lifetime, fence both resource reads, then verify the epoch
+        # once more before publishing/caching the result.
+        supervisor = self._collaborators.call_supervisor
+        async with supervisor.operation_scope("auth.account_email") as lease:
+            email, cached_email, cached_key = await resolve_account_email(
+                auth=self._auth,
+                cached_email=self._account_email_cache,
+                cached_key=self._account_email_cache_route,
+                live_fallback=True,
+                get_cookies=lambda: self._collaborators.kernel.get_cookies(
+                    expected_epoch=lease.epoch
+                ),
+                get_http_client=lambda: self._collaborators.kernel.get_http_client(
+                    expected_epoch=lease.epoch
+                ),
+                probe=_probe_authuser,
+                to_thread=asyncio.to_thread,
+            )
+            self._collaborators.kernel.assert_epoch(lease.epoch)
+            self._account_email_cache = cached_email
+            self._account_email_cache_route = cached_key
+            return email
 
 
 class _FromStorageContext:
@@ -971,7 +909,9 @@ class _FromStorageContext:
             import_research_timeout=kwargs["import_research_timeout"],
             upload_timeout=kwargs["upload_timeout"],
             on_rpc_event=kwargs["on_rpc_event"],
+            backend=kwargs["backend_preference"].preferred,
         )
+        client._backend_preference = kwargs["backend_preference"]
         if isinstance(loaded, _auth_tokens.FileLoadedAuth) and hasattr(client, "_collaborators"):
             client._collaborators.cookie_persistence.register_open_baseline(
                 loaded.store, loaded.persistence_baseline

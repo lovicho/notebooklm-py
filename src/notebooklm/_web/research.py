@@ -13,8 +13,10 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from .. import _research as _research_base
 from .. import research as _research_pub
 from .._notebook_metadata import NotebookSourceLister
+from .._research import BaseResearchAPI
 from .._runtime.config import (
     AUTO_READ_TIMEOUT,
     DEFAULT_TIMEOUT,
@@ -72,6 +74,7 @@ __all__ = [
     "ResearchStart",
     "ResearchStatus",
     "ResearchTask",
+    "WebResearchAPI",
 ]
 
 # Preserve the historical logger key across the whole-module move.
@@ -112,7 +115,7 @@ def _is_deep_start_null_result_error(exc: RPCError) -> bool:
     )
 
 
-class ResearchAPI:
+class WebResearchAPI(BaseResearchAPI):
     """Operations for research sessions (web/drive search).
 
     Provides methods for starting research, polling for results, and
@@ -164,9 +167,11 @@ class ResearchAPI:
                 dependency.
         """
         self._rpc = rpc
-        self._source_lister = source_lister or create_default_source_lister(self._rpc)
-        self._base_timeout = base_timeout
-        self._import_research_timeout = import_research_timeout
+        super().__init__(
+            source_lister=source_lister or create_default_source_lister(self._rpc),
+            base_timeout=base_timeout,
+            import_research_timeout=import_research_timeout,
+        )
 
     async def _rpc_call(
         self,
@@ -215,7 +220,7 @@ class ResearchAPI:
         return _research_pub.normalize_url(url)
 
     @classmethod
-    def extract_report_urls(cls, report: str) -> set[str]:
+    def _web_extract_report_urls(cls, report: str) -> set[str]:
         """Extract normalized URLs from research report markdown/text.
 
         Thin wrapper retained for backward compatibility. Delegates to
@@ -224,7 +229,7 @@ class ResearchAPI:
         return _research_pub.extract_report_urls(report)
 
     @classmethod
-    def select_cited_sources(
+    def _web_select_cited_sources(
         cls,
         sources: Sequence[ResearchSourceInput],
         report: str,
@@ -461,7 +466,7 @@ class ResearchAPI:
 
         return ResearchTask.empty()
 
-    async def wait_for_completion(
+    async def _web_wait_for_completion(
         self,
         notebook_id: str,
         task_id: str | None = None,
@@ -566,6 +571,12 @@ class ResearchAPI:
             sleep_for = min(poll_interval, timeout - elapsed)
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
+
+    def _wait_observed_status(self, result: ResearchTask) -> ResearchStatus:
+        """Preserve Web wait's pre-neutralization pinned-absence status."""
+        if result.status is ResearchStatus.NOT_FOUND:
+            return ResearchStatus.NO_RESEARCH
+        return result.status
 
     async def cancel(self, notebook_id: str, run_id: str) -> None:
         """Cancel an in-flight research (DiscoverSources) run.
@@ -724,7 +735,7 @@ class ResearchAPI:
 
         return imported
 
-    async def import_sources_with_verification(
+    async def _import_sources_with_verification(
         self,
         notebook_id: str,
         task_id: str,
@@ -1015,17 +1026,16 @@ class ResearchAPI:
                     _log_discarded_progress()
                     raise
 
-                # Report-only imports (no URLs to verify) can't use the success
-                # check above. Cap retries at one attempt to bound worst-case
-                # duplicate inflation for report entries when timeouts persist.
-                if not requested_urls_norm and attempt >= 2:
+                # Report-only imports cannot be reconciled: the retained live
+                # LoadSource round trip did not expose submitted Markdown.
+                # Never resend after a lost response.
+                if not requested_urls_norm:
                     logger.warning(
                         "IMPORT_RESEARCH %s for notebook %s with no URLs "
-                        "to verify; giving up after %d attempts to bound "
+                        "to verify; giving up after the first attempt to avoid "
                         "duplicate inflation",
                         reason,
                         notebook_id,
-                        attempt,
                     )
                     _log_discarded_progress()
                     raise
@@ -1043,3 +1053,12 @@ class ResearchAPI:
                 await asyncio.sleep(sleep_for)
                 delay = min(delay * backoff_factor, max_delay)
                 attempt += 1
+
+
+# Backward-compatible private-module spelling. Composition imports the explicit
+# backend class; existing direct imports keep resolving to the Web implementation.
+ResearchAPI = WebResearchAPI
+
+# Restore the historical ``notebooklm._research.ResearchAPI`` identity after
+# this module has completed the circular-safe definition of the Web adapter.
+_research_base.ResearchAPI = ResearchAPI  # type: ignore[assignment]

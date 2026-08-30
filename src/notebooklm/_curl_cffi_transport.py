@@ -22,8 +22,10 @@ auto-decompress — verify against real gzip'd RPC before production).
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import io
 import os
+import threading
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urljoin, urlparse
 
@@ -32,7 +34,7 @@ import httpx
 from ._hop_credentials import CredentialPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from http.cookiejar import CookieJar
     from typing import IO
 
@@ -115,8 +117,10 @@ async def _materialize(content: Any) -> bytes | None:
 class _StreamedResponse:
     """Wraps a live curl_cffi streamed response in the shape ``stream_post_with_size_cap`` needs."""
 
-    def __init__(self, curl_resp: Any, url: str) -> None:
+    def __init__(self, curl_resp: Any, url: str, abort_callback: Callable[[], None]) -> None:
         self._r = curl_resp
+        self._abort_callback = abort_callback
+        self._aborted = False
         self.status_code: int = curl_resp.status_code
         self.headers = curl_resp.headers
         # Downstream rebuilds httpx.Response(request=...); give it a real one.
@@ -139,6 +143,25 @@ class _StreamedResponse:
         async for chunk in self._r.aiter_content():
             yield chunk
 
+    def abort(self) -> None:
+        """Interrupt the live curl handle before response-context teardown."""
+
+        if self._aborted:
+            return
+        self._aborted = True
+        self._abort_callback()
+
+    async def aclose(self) -> None:
+        """Abort a partial body, then settle curl_cffi's stream task."""
+
+        self.abort()
+        stream_task = self._r.astream_task
+        try:
+            await self._r.aclose()
+        except asyncio.CancelledError:
+            if stream_task is None or not stream_task.cancelled():
+                raise
+
 
 class _StreamCtx:
     """Async context manager mirroring ``httpx.AsyncClient.stream(...)``."""
@@ -149,6 +172,28 @@ class _StreamCtx:
         self._url = url
         self._kwargs = kwargs
         self._cm: Any = None
+        self._response: Any = None
+        self._aborted = False
+
+    def _abort_response(self) -> None:
+        """Remove an active response from curl's multi handle without waiting for I/O."""
+
+        response = self._response
+        if response is None:
+            return
+        self._aborted = True
+        quit_now = response.quit_now
+        if quit_now is not None:
+            quit_now.set()
+        stream_task = response.astream_task
+        if stream_task is None or stream_task.done():
+            return
+        curl = response.curl
+        if curl is not None:
+            # ``remove_handle`` synchronously detaches the socket and cancels
+            # the future awaited by ``astream_task``.  Merely setting
+            # ``quit_now`` is insufficient while a peer sends no more bytes.
+            self._client._curl.acurl.remove_handle(curl)
 
     async def __aenter__(self) -> _StreamedResponse:
         from curl_cffi.requests import RequestsError
@@ -166,12 +211,18 @@ class _StreamCtx:
             raise httpx.RequestError(
                 str(exc), request=httpx.Request(self._method, self._url)
             ) from exc
-        return _StreamedResponse(curl_resp, self._url)
+        self._response = curl_resp
+        return _StreamedResponse(curl_resp, self._url, self._abort_response)
 
     async def __aexit__(self, *exc: object) -> None:
         try:
             if self._cm is not None:
-                await self._cm.__aexit__(*exc)
+                try:
+                    await self._cm.__aexit__(*exc)
+                except asyncio.CancelledError:
+                    stream_task = getattr(self._response, "astream_task", None)
+                    if not (self._aborted and stream_task is not None and stream_task.cancelled()):
+                        raise
         finally:
             self._client._sync_cookies_back()
 
@@ -465,6 +516,9 @@ class CurlCffiAsyncClient:
         total_bytes: int,
         headers: Mapping[str, str],
         method: str = "POST",
+        on_chunk: Callable[[int], Awaitable[None]] | None = None,
+        overall_timeout: float | None = None,
+        stop_on_cancel: bool = False,
     ) -> httpx.Response:
         """Stream a request body from disk via libcurl — no full-body buffering.
 
@@ -482,7 +536,10 @@ class CurlCffiAsyncClient:
         owns_handle = isinstance(source, (str, os.PathLike))  # a path we open
         connect_timeout, stall_timeout = self._connect_and_stall_timeouts()
 
-        def _run() -> tuple[int, bytes]:
+        event_loop = asyncio.get_running_loop()
+        cancel_requested = threading.Event()
+
+        def _run() -> tuple[int, bytes, bytes]:
             # ``fh`` is Any: a path we open, or the caller's already-open binary file.
             # Independent cleanup: the file (if we opened it) must close even if
             # Curl() construction or curl.close() raises — hence nested try/finally,
@@ -493,6 +550,7 @@ class CurlCffiAsyncClient:
                 fh = source
             try:
                 body = io.BytesIO()
+                response_headers = io.BytesIO()
                 curl = Curl()
                 try:
                     curl.impersonate(self._impersonate)
@@ -500,19 +558,41 @@ class CurlCffiAsyncClient:
                     curl.setopt(CurlOpt.UPLOAD, 1)
                     curl.setopt(CurlOpt.CUSTOMREQUEST, method.encode())  # UPLOAD defaults to PUT
                     curl.setopt(CurlOpt.INFILESIZE_LARGE, total_bytes)
-                    curl.setopt(CurlOpt.READFUNCTION, fh.read)  # libcurl pulls chunks from disk
+
+                    def _read(size: int) -> bytes:
+                        if cancel_requested.is_set():
+                            return b""
+                        chunk = fh.read(size)
+                        if chunk and on_chunk is not None:
+
+                            async def _invoke_callback() -> None:
+                                await on_chunk(len(chunk))
+
+                            callback: concurrent.futures.Future[None] = (
+                                asyncio.run_coroutine_threadsafe(_invoke_callback(), event_loop)
+                            )
+                            callback.result()
+                        return chunk
+
+                    curl.setopt(CurlOpt.READFUNCTION, _read)  # libcurl pulls chunks from disk
                     curl.setopt(CurlOpt.HTTPHEADER, header_list)
                     if cookie_header:
                         curl.setopt(CurlOpt.COOKIE, cookie_header.encode())
                     curl.setopt(CurlOpt.WRITEDATA, body)
+                    curl.setopt(CurlOpt.HEADERFUNCTION, response_headers.write)
                     curl.setopt(CurlOpt.CONNECTTIMEOUT, connect_timeout)
                     # No overall cap (large uploads keep progressing), but bound a hung
                     # connection: abort if throughput stays < 1 byte/s for the stall window.
                     curl.setopt(CurlOpt.LOW_SPEED_LIMIT, 1)
                     curl.setopt(CurlOpt.LOW_SPEED_TIME, stall_timeout)
+                    if overall_timeout is not None:
+                        curl.setopt(
+                            CurlOpt.TIMEOUT_MS,
+                            max(1, int(float(overall_timeout) * 1000)),
+                        )
                     curl.perform()
                     status_raw: Any = curl.getinfo(CurlInfo.RESPONSE_CODE)
-                    return int(status_raw), body.getvalue()
+                    return int(status_raw), body.getvalue(), response_headers.getvalue()
                 finally:
                     curl.close()
             finally:
@@ -524,8 +604,10 @@ class CurlCffiAsyncClient:
         # rather than orphan a live authenticated upload, then propagate the cancel.
         task = asyncio.ensure_future(asyncio.to_thread(_run))
         try:
-            status, content = await asyncio.shield(task)
+            status, content, raw_headers = await asyncio.shield(task)
         except asyncio.CancelledError:
+            if stop_on_cancel:
+                cancel_requested.set()
             while not task.done():
                 try:
                     await asyncio.shield(task)
@@ -538,8 +620,20 @@ class CurlCffiAsyncClient:
             raise httpx.RequestError(str(exc), request=httpx.Request(method, url)) from exc
         # No cookie sync-back: the resumable upload leg doesn't rotate auth cookies,
         # and this used a standalone Curl (not the session jar).
+        blocks = [block for block in raw_headers.split(b"\r\n\r\n") if block.strip()]
+        header_items: list[tuple[str, str]] = []
+        if blocks:
+            final_header_block = next(reversed(blocks))
+            for line in final_header_block.split(b"\r\n")[1:]:
+                if b":" not in line:
+                    continue
+                name, value = line.split(b":", 1)
+                header_items.append((name.decode("latin-1"), value.strip().decode("latin-1")))
         return httpx.Response(
-            status_code=status, content=content, request=httpx.Request(method, url)
+            status_code=status,
+            headers=header_items,
+            content=content,
+            request=httpx.Request(method, url),
         )
 
     async def aclose(self) -> None:

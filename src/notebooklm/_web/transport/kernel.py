@@ -36,6 +36,28 @@ class Kernel:
         self._cookies = self._bootstrap_cookies(auth) if auth is not None else None
         self._timeout: float | None = None
         self._connect_timeout: float | None = None
+        # Resource-generation fence. ClientLifecycle activates this before
+        # publishing a handle and clears it synchronously before teardown.
+        self._active_epoch: int | None = None
+
+    def activate_epoch(self, epoch: int) -> None:
+        """Activate ``epoch`` before a live client can be published."""
+        if self._http_client is not None and self._active_epoch != epoch:
+            raise RuntimeError("Cannot replace a live web transport generation.")
+        self._active_epoch = epoch
+
+    def fence_epoch(self, epoch: int | None) -> None:
+        """Retire ``epoch`` synchronously before close performs its first await."""
+        if epoch is None or self._active_epoch == epoch:
+            self._active_epoch = None
+
+    def assert_epoch(self, expected_epoch: int) -> None:
+        """Reject an admitted workflow whose resource generation was retired."""
+        if self._active_epoch != expected_epoch:
+            raise RuntimeError(
+                "NotebookLMClient resource generation is retired "
+                f"(expected={expected_epoch}, active={self._active_epoch!r})."
+            )
 
     @staticmethod
     def _bootstrap_cookies(auth: AuthTokens) -> httpx.Cookies:
@@ -79,16 +101,26 @@ class Kernel:
         """
         return self.get_cookies()
 
-    def get_cookies(self) -> httpx.Cookies:
-        """Return the current transport jar or its retained closed-state owner."""
+    def get_cookies(self, *, expected_epoch: int | None = None) -> httpx.Cookies:
+        """Return the current transport jar or its retained closed-state owner.
+
+        Network-free identity reads deliberately omit ``expected_epoch`` so
+        they remain available before open and after close.  A live workflow
+        supplies its admitted epoch and is fenced before it can observe a
+        reopened generation's cookie jar.
+        """
+        if expected_epoch is not None:
+            self.assert_epoch(expected_epoch)
         if self._http_client is not None:
             return self._http_client.cookies
         if self._cookies is None:
             raise RuntimeError("Cookie jar not initialized. Open the client first.")
         return self._cookies
 
-    def get_http_client(self) -> httpx.AsyncClient:
+    def get_http_client(self, *, expected_epoch: int | None = None) -> httpx.AsyncClient:
         """Return the live HTTP client or raise the legacy not-open error."""
+        if expected_epoch is not None:
+            self.assert_epoch(expected_epoch)
         if self._http_client is None:
             raise RuntimeError("Client not initialized. Use 'async with' context.")
         return self._http_client
@@ -101,8 +133,11 @@ class Kernel:
         connect_timeout: float,
         limits: ConnectionLimits,
         capture_cookie_snapshot: Callable[[httpx.Cookies], object],
+        expected_epoch: int | None = None,
     ) -> None:
         """Build the HTTP client and capture its normalized cookie baseline."""
+        if expected_epoch is not None:
+            self.assert_epoch(expected_epoch)
         # ClientLifecycle owns the primary idempotency guard. Keep this
         # secondary guard so direct Kernel callers also preserve the live client.
         if self._http_client is not None:
@@ -141,8 +176,20 @@ class Kernel:
         # partial open cannot orphan a live client.
         try:
             capture_cookie_snapshot(self._http_client.cookies)
-        except BaseException:
-            await self.aclose()
+        except BaseException as open_error:
+            cleanup_error: BaseException | None = None
+            try:
+                await self.aclose()
+            except BaseException as exc:
+                cleanup_error = exc
+
+            # The original open failure beats ordinary cleanup failure.  A
+            # process-exit signal from either phase still wins, with the
+            # earlier open-phase signal taking precedence when both exist.
+            if isinstance(open_error, (KeyboardInterrupt, SystemExit)):
+                raise
+            if isinstance(cleanup_error, (KeyboardInterrupt, SystemExit)):
+                raise cleanup_error from open_error
             raise
 
     async def post(
@@ -153,6 +200,7 @@ class Kernel:
         *,
         read_timeout: float | None = None,
         max_response_bytes: int | None = None,
+        expected_epoch: int | None = None,
     ) -> httpx.Response:
         """Issue a raw buffered POST through the live HTTP client."""
         timeout_override: httpx.Timeout | None = None
@@ -173,7 +221,7 @@ class Kernel:
         if max_response_bytes is not None:
             stream_kwargs["max_bytes"] = max_response_bytes
         return await stream_post_with_size_cap(
-            self.get_http_client(),
+            self.get_http_client(expected_epoch=expected_epoch),
             url,
             body=body,
             headers=headers_arg,
@@ -196,6 +244,7 @@ class Kernel:
             self._http_client = None
             self._timeout = None
             self._connect_timeout = None
+            self._active_epoch = None
 
 
 __all__ = ["Kernel"]
