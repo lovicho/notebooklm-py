@@ -39,7 +39,7 @@ from ..exceptions import (
 from ..types import Source, SourceFulltext, SourceStatus, SourceType
 from .codecs.documents import decode_document, tailwind_doc_markdown, tailwind_doc_plain_text
 from .codecs.notebooks import decode_project, map_get_project_error, validate_project_identity
-from .codecs.sources import decode_source, decode_sources
+from .codecs.sources import decode_source, decode_sources, select_document_guide
 from .session import AndroidSession
 from .upload import (
     AndroidUploadPipeline,
@@ -1270,13 +1270,17 @@ class AndroidSourcesAPI(SourcesAPI):
                 )
 
     async def check_freshness(self, notebook_id: str, source_id: str) -> bool:
+        """Report whether a source is fresh, without policing its existence.
+
+        The other ADR-0019 derived read on this adapter (see ``get_guide``).
+        No pre-flight is needed to stay web-compatible: a live probe of a
+        nonexistent id returned an *empty* ``CheckSourceFreshness`` response
+        rather than an error, which ``_check_freshness`` already reads as
+        fresh -- the same ``True`` the web backend returns for that input
+        (issue #2278). ``refresh`` keeps its ownership check, because mutating
+        a missing source must still raise.
+        """
         async with self._transport.operation_scope("sources.check_freshness") as lease:
-            await self._require_owned_source(
-                notebook_id,
-                source_id,
-                expected_epoch=lease.epoch,
-                method_id=CHECK_SOURCE_FRESHNESS_METHOD,
-            )
             return await self._check_freshness(source_id, expected_epoch=lease.epoch)
 
     async def _check_freshness(
@@ -1313,16 +1317,23 @@ class AndroidSourcesAPI(SourcesAPI):
         return bool(freshness.is_fresh)
 
     async def get_guide(self, notebook_id: str, source_id: str) -> SourceGuide:
+        """Return the AI summary and keywords for a source, or an empty guide.
+
+        A derived read under ADR-0019: it does not police parent existence.
+        A source that is absent, or present but not yet summarised, yields
+        ``SourceGuide("", ())`` rather than an error -- identical to the web
+        backend, which was live-verified returning exactly that for a
+        nonexistent source id (issue #2278). Existence is ``get()``'s job, and
+        every surface that needs a 404 already asks for one: the MCP tool and
+        the REST route both run ``execute_source_get`` first, and the CLI
+        resolves the id against ``sources.list()``.
+
+        Shape drift still raises ``DecodingError`` via ``select_document_guide``.
+        """
         request = _write_proto().GenerateDocumentGuidesRequest(
             sources=[_write_proto().InputSource(source_id=_read_proto().SourceId(id=source_id))]
         )
         async with self._transport.operation_scope("sources.get_guide") as lease:
-            await self._require_owned_source(
-                notebook_id,
-                source_id,
-                expected_epoch=lease.epoch,
-                method_id=GENERATE_DOCUMENT_GUIDES_METHOD,
-            )
             try:
                 response = await self._transport.unary(
                     GENERATE_DOCUMENT_GUIDES_METHOD,
@@ -1336,30 +1347,19 @@ class AndroidSourcesAPI(SourcesAPI):
             except RPCError as exc:
                 if exc.rpc_code != 5:
                     raise
-                raise SourceNotFoundError(
-                    source_id, method_id=GENERATE_DOCUMENT_GUIDES_METHOD
-                ) from None
+                # NOT_FOUND is how the backend reports "no guide for this id",
+                # whether the source is gone or was never summarised; a live
+                # probe confirmed a nonexistent id lands here. Web returns an
+                # empty guide for the same input.
+                return SourceGuide(summary="", keywords=())
 
-        matches = [
-            guide
-            for guide in response.guides
-            if guide.HasField("source")
-            and guide.source.HasField("source_id")
-            and guide.source.source_id.id == source_id
-        ]
-        if not matches:
-            if not response.guides:
-                raise SourceNotFoundError(source_id, method_id=GENERATE_DOCUMENT_GUIDES_METHOD)
-            raise DecodingError(
-                "Android source guide response did not match the requested source id",
-                method_id=GENERATE_DOCUMENT_GUIDES_METHOD,
-            )
-        if len(matches) != 1:
-            raise DecodingError(
-                "Android source guide response contained duplicate source ids",
-                method_id=GENERATE_DOCUMENT_GUIDES_METHOD,
-            )
-        guide = next(iter(matches))
+        if not response.guides:
+            return SourceGuide(summary="", keywords=())
+        guide = select_document_guide(
+            response,
+            source_id=source_id,
+            method_id=GENERATE_DOCUMENT_GUIDES_METHOD,
+        )
         summary = guide.snippet.text_snippet if guide.HasField("snippet") else ""
         keywords = tuple(guide.main_ideas.text_ideas) if guide.HasField("main_ideas") else ()
         return SourceGuide(summary=summary, keywords=keywords)
@@ -1408,12 +1408,18 @@ class AndroidSourcesAPI(SourcesAPI):
         if not response.HasField("source"):
             raise SourceNotFoundError(source_id, method_id=LOAD_SOURCE_METHOD)
         raw_id = response.source.source_id.id if response.source.HasField("source_id") else ""
-        if not raw_id:
-            raise SourceNotFoundError(source_id, method_id=LOAD_SOURCE_METHOD)
-        if raw_id != source_id:
+        # An absent echo is not an absent source: ``LoadSource`` was observed
+        # echoing every probed source type (issue #2276), but turning a
+        # hypothetically unlabelled response into ``SourceNotFoundError`` would
+        # misreport a source the server did return. Only a populated and
+        # different id is a decoding failure, as in ``get_guide`` and
+        # ``refresh``.
+        if raw_id and raw_id != source_id:
             raise DecodingError(
-                "Android full-text response did not match the requested source id",
+                "Android full-text response did not match the requested source id "
+                f"(requested={source_id}, observed={raw_id})",
                 method_id=LOAD_SOURCE_METHOD,
+                found_ids=[raw_id],
             )
         source = decode_source(response.source, method_id=LOAD_SOURCE_METHOD)
         document = (

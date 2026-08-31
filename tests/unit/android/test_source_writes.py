@@ -13,6 +13,7 @@ import pytest
 from tests._helpers.android_supervisor import SupervisedAndroidTransport
 
 from notebooklm._android.codecs.documents import decode_document, tailwind_doc_plain_text
+from notebooklm._android.codecs.sources import select_document_guide
 from notebooklm._android.proto.google.internal.labs.tailwind.orchestration.v1 import (
     chat_pb2,
     read_pb2,
@@ -37,6 +38,7 @@ from notebooklm._android.sources import (
     AndroidSourcesAPI,
 )
 from notebooklm._android.upload import AndroidUploadPipeline
+from notebooklm._types.research import SourceGuide
 from notebooklm.exceptions import (
     AuthError,
     DecodingError,
@@ -950,8 +952,6 @@ async def test_delete_and_rename_use_non_replayed_exact_wire_shapes() -> None:
     [
         ("rename", MUTATE_SOURCE_METHOD),
         ("refresh", REFRESH_SOURCE_METHOD),
-        ("check_freshness", CHECK_SOURCE_FRESHNESS_METHOD),
-        ("get_guide", GENERATE_DOCUMENT_GUIDES_METHOD),
         ("get_fulltext", LOAD_SOURCE_METHOD),
     ],
 )
@@ -968,10 +968,6 @@ async def test_global_source_operations_reject_cross_notebook_ids_before_io(
             await api.rename(NOTEBOOK_ID, SOURCE_A, "Renamed")
         elif operation == "refresh":
             await api.refresh(NOTEBOOK_ID, SOURCE_A)
-        elif operation == "check_freshness":
-            await api.check_freshness(NOTEBOOK_ID, SOURCE_A)
-        elif operation == "get_guide":
-            await api.get_guide(NOTEBOOK_ID, SOURCE_A)
         else:
             await api.get_fulltext(NOTEBOOK_ID, SOURCE_A)
 
@@ -1118,6 +1114,269 @@ async def test_guide_and_fulltext_decode_only_captured_flat_fields() -> None:
         fulltext_call[2]["response_type"].DESCRIPTOR.full_name
         == "notebooklm.internal.android.wire.v1.WireLoadSourceResponse"
     )
+
+
+def _guide(
+    *,
+    source_id: str | None,
+    summary: str = "Summary",
+    ideas: tuple[str, ...] = ("one", "two"),
+) -> sources_pb2.DocumentGuide:
+    """Build a ``DocumentGuide``; ``source_id=None`` omits the optional echo."""
+
+    guide = sources_pb2.DocumentGuide(
+        snippet=sources_pb2.Snippet(text_snippet=summary),
+        main_ideas=sources_pb2.MainIdeas(text_ideas=list(ideas)),
+    )
+    if source_id is not None:
+        guide.source.CopyFrom(sources_pb2.InputSource(source_id=read_pb2.SourceId(id=source_id)))
+    return guide
+
+
+def _guides_transport(*guides: sources_pb2.DocumentGuide) -> FakeTransport:
+    transport = FakeTransport()
+    transport.handlers[GENERATE_DOCUMENT_GUIDES_METHOD] = (
+        sources_pb2.GenerateDocumentGuidesResponse(guides=list(guides))
+    )
+    return transport
+
+
+@pytest.mark.asyncio
+async def test_guide_accepts_the_sole_unlabelled_guide() -> None:
+    """Repeat guide reads omit ``DocumentGuide`` #1 entirely (issue #2276)."""
+    transport = _guides_transport(_guide(source_id=None, summary="URL summary"))
+
+    guide = await _api(transport).get_guide(NOTEBOOK_ID, SOURCE_A)
+
+    assert guide.summary == "URL summary"
+    assert guide.keywords == ("one", "two")
+
+
+@pytest.mark.asyncio
+async def test_guide_accepts_an_unlabelled_guide_whose_echo_is_an_empty_source() -> None:
+    """``source`` present but ``source_id`` absent is still *unlabelled*."""
+    unlabelled = _guide(source_id=None, summary="Empty echo")
+    unlabelled.source.CopyFrom(sources_pb2.InputSource())
+    transport = _guides_transport(unlabelled)
+
+    guide = await _api(transport).get_guide(NOTEBOOK_ID, SOURCE_A)
+
+    assert guide.summary == "Empty echo"
+
+
+@pytest.mark.asyncio
+async def test_guide_rejects_a_populated_mismatched_echo_with_diagnostics() -> None:
+    transport = _guides_transport(_guide(source_id=SOURCE_B))
+
+    with pytest.raises(DecodingError) as raised:
+        await _api(transport).get_guide(NOTEBOOK_ID, SOURCE_A)
+
+    assert raised.value.method_id == GENERATE_DOCUMENT_GUIDES_METHOD
+    assert raised.value.found_ids == [SOURCE_B]
+    # The counts and ids live in the message, which a CI traceback prints in
+    # full; ``raw_response`` is truncated to 80 characters unless NOTEBOOKLM_DEBUG=1.
+    assert f"requested={SOURCE_A}" in str(raised.value)
+    assert "guides=1" in str(raised.value)
+    assert f"observed=[{SOURCE_B}]" in str(raised.value)
+    # Field tags, never wire bytes: guide #1 present, #2 snippet present.
+    assert raised.value.raw_response == "[1,2,3]"
+
+
+@pytest.mark.asyncio
+async def test_guide_rejects_multiple_guides_without_an_exact_match() -> None:
+    """Past one guide the response is ambiguous, so an unlabelled row is fatal."""
+    transport = _guides_transport(_guide(source_id=None), _guide(source_id=SOURCE_B))
+
+    with pytest.raises(DecodingError) as raised:
+        await _api(transport).get_guide(NOTEBOOK_ID, SOURCE_A)
+
+    assert raised.value.found_ids == ["<unlabelled>", SOURCE_B]
+    assert "guides=2" in str(raised.value)
+    assert f"observed=[<unlabelled>, {SOURCE_B}]" in str(raised.value)
+    # The unlabelled guide is reported as missing tag 1, not as bytes.
+    assert raised.value.raw_response == "[2,3 | 1,2,3]"
+
+
+@pytest.mark.asyncio
+async def test_guide_prefers_the_exact_match_beside_an_unlabelled_sibling() -> None:
+    """Where the relaxed rule and the multi-guide rule meet, the label wins."""
+    transport = _guides_transport(
+        _guide(source_id=None, summary="unlabelled"),
+        _guide(source_id=SOURCE_A, summary="labelled"),
+    )
+
+    guide = await _api(transport).get_guide(NOTEBOOK_ID, SOURCE_A)
+
+    assert guide.summary == "labelled"
+
+
+@pytest.mark.asyncio
+async def test_guide_accepts_an_echo_populated_with_an_empty_id() -> None:
+    """``SourceId(id="")`` is the third unlabelled shape and reads the same."""
+    empty_id = _guide(source_id="", summary="Empty id")
+    transport = _guides_transport(empty_id)
+
+    guide = await _api(transport).get_guide(NOTEBOOK_ID, SOURCE_A)
+
+    assert guide.summary == "Empty id"
+
+
+def test_select_document_guide_rejects_an_empty_response() -> None:
+    """The zero-guide case is the caller's to map; the codec refuses it."""
+    with pytest.raises(ValueError, match="non-empty guides list"):
+        select_document_guide(
+            sources_pb2.GenerateDocumentGuidesResponse(),
+            source_id=SOURCE_A,
+            method_id=GENERATE_DOCUMENT_GUIDES_METHOD,
+        )
+
+
+@pytest.mark.asyncio
+async def test_guide_rejects_duplicate_matching_echoes() -> None:
+    transport = _guides_transport(_guide(source_id=SOURCE_A), _guide(source_id=SOURCE_A))
+
+    with pytest.raises(DecodingError) as raised:
+        await _api(transport).get_guide(NOTEBOOK_ID, SOURCE_A)
+
+    assert "duplicate source ids" in str(raised.value)
+    assert raised.value.found_ids == [SOURCE_A, SOURCE_A]
+
+
+@pytest.mark.asyncio
+async def test_guide_failure_diagnostics_never_carry_guide_content() -> None:
+    """A rejected guide must not splice source-derived text into the error.
+
+    ``raw_response`` is spliced into ``str()``/``repr()`` of RPC errors and
+    ``NOTEBOOKLM_DEBUG=1`` opts out of its truncation, so a wire-byte preview
+    of any length could disclose a model-written summary of the user's source
+    -- an unlabelled guide's payload starts with ``#2 snippet``. Only field
+    tags are reported.
+    """
+    secret_summary = "PRIVATE SUMMARY OF THE USER SOURCE " * 5
+    transport = _guides_transport(
+        _guide(source_id=None, summary=secret_summary, ideas=("private idea",)),
+        _guide(source_id=SOURCE_B, summary="other"),
+    )
+
+    with pytest.raises(DecodingError) as raised:
+        await _api(transport).get_guide(NOTEBOOK_ID, SOURCE_A)
+
+    rendered = f"{raised.value!s} {raised.value!r} {raised.value.raw_response}"
+    assert "PRIVATE" not in rendered
+    assert "private idea" not in rendered
+    assert raised.value.raw_response == "[2,3 | 1,2,3]"
+
+
+@pytest.mark.asyncio
+async def test_guide_field_tags_report_fields_the_schema_does_not_model() -> None:
+    """An unmodelled tag is how a *moved* label would look, so it must show."""
+    guide = _guide(source_id=None)
+    # Tag 7 is absent from ``DocumentGuide``; protobuf keeps it as unknown.
+    guide.MergeFromString(guide.SerializeToString() + b"\x3a\x00")
+    transport = _guides_transport(guide, _guide(source_id=SOURCE_B))
+
+    with pytest.raises(DecodingError) as raised:
+        await _api(transport).get_guide(NOTEBOOK_ID, SOURCE_A)
+
+    assert raised.value.raw_response == "[2,3,7 | 1,2,3]"
+
+
+@pytest.mark.asyncio
+async def test_guide_maps_an_empty_response_to_an_empty_guide() -> None:
+    """ADR-0019 derived read: absence is data, not an error (issue #2278).
+
+    Live-verified parity: the web backend returns ``SourceGuide("", ())`` for a
+    nonexistent source id, and Android now does the same instead of raising
+    ``SourceNotFoundError``.
+    """
+    transport = _guides_transport()
+
+    guide = await _api(transport).get_guide(NOTEBOOK_ID, SOURCE_A)
+
+    assert guide == SourceGuide(summary="", keywords=())
+
+
+@pytest.mark.asyncio
+async def test_guide_maps_backend_not_found_to_an_empty_guide() -> None:
+    """rpc code 5 is "no guide for this id", not "the source is gone".
+
+    A live probe of a nonexistent id returns NOT_FOUND from
+    ``GenerateDocumentGuides`` while web returns an empty guide for the same
+    input, so this is the branch that carries the parity.
+    """
+    transport = FakeTransport()
+    transport.handlers[GENERATE_DOCUMENT_GUIDES_METHOD] = RPCError("gone", rpc_code=5)
+
+    guide = await _api(transport).get_guide(NOTEBOOK_ID, SOURCE_A)
+
+    assert guide == SourceGuide(summary="", keywords=())
+
+
+@pytest.mark.asyncio
+async def test_derived_source_reads_do_not_pre_flight_ownership() -> None:
+    """The two ADR-0019 derived reads issue exactly one RPC and no GetProject.
+
+    Dropping the pre-flight is what makes absence return data rather than
+    raise; it also removes a ``GetProject`` round-trip from every call. Both
+    Android RPCs are notebook-agnostic, and so is web -- a live probe of both
+    backends returned a source's guide when asked under an unrelated notebook
+    id -- so the guard was a client-side-only divergence, not a boundary the
+    protocol enforces.
+    """
+    guide_transport = _guides_transport(_guide(source_id=SOURCE_A))
+    guide_transport.handlers[GET_PROJECT_METHOD] = _project(_source(SOURCE_B))
+    await _api(guide_transport).get_guide(NOTEBOOK_ID, SOURCE_A)
+    assert [method for method, _r, _k in guide_transport.calls] == [GENERATE_DOCUMENT_GUIDES_METHOD]
+
+    fresh_transport = FakeTransport()
+    fresh_transport.handlers[GET_PROJECT_METHOD] = _project(_source(SOURCE_B))
+    fresh_transport.handlers[CHECK_SOURCE_FRESHNESS_METHOD] = (
+        sources_pb2.CheckSourceFreshnessResponse()
+    )
+    assert await _api(fresh_transport).check_freshness(NOTEBOOK_ID, SOURCE_A) is True
+    assert [method for method, _r, _k in fresh_transport.calls] == [CHECK_SOURCE_FRESHNESS_METHOD]
+
+
+@pytest.mark.asyncio
+async def test_fulltext_reports_an_unlabelled_source_as_drift_not_absence() -> None:
+    """An absent ``LoadSource`` echo must not masquerade as a missing source.
+
+    The server did return a source; what it withheld is the label. Deferring to
+    ``decode_source`` names that precisely instead of claiming the source does
+    not exist (issue #2276, "latent twin").
+    """
+    unlabelled = FakeTransport()
+    source = _source(SOURCE_A, title="Document")
+    source.ClearField("source_id")
+    unlabelled.handlers[LOAD_SOURCE_METHOD] = source_content_pb2.WireLoadSourceResponse(
+        source=source,
+        plain_text=sources_pb2.PlainTextSourceContent(body="plain body"),
+    )
+
+    # Catch broadly and pin the exact type: ``SourceNotFoundError`` is not a
+    # ``DecodingError`` subclass, so ``pytest.raises(DecodingError)`` alone
+    # would let the pre-fix behaviour escape the test rather than fail it.
+    with pytest.raises(Exception) as unlabelled_raised:  # noqa: B017, PT011
+        await _api(unlabelled).get_fulltext(NOTEBOOK_ID, SOURCE_A)
+
+    assert type(unlabelled_raised.value) is DecodingError
+    assert "did not contain a source id" in str(unlabelled_raised.value)
+
+
+@pytest.mark.asyncio
+async def test_fulltext_rejects_a_populated_mismatched_echo_with_diagnostics() -> None:
+    mismatched = FakeTransport()
+    mismatched.handlers[LOAD_SOURCE_METHOD] = source_content_pb2.WireLoadSourceResponse(
+        source=_source(SOURCE_B, title="Other"),
+        plain_text=sources_pb2.PlainTextSourceContent(body="plain body"),
+    )
+
+    with pytest.raises(DecodingError) as raised:
+        await _api(mismatched).get_fulltext(NOTEBOOK_ID, SOURCE_A)
+
+    assert raised.value.method_id == LOAD_SOURCE_METHOD
+    assert raised.value.found_ids == [SOURCE_B]
+    assert f"requested={SOURCE_A}, observed={SOURCE_B}" in str(raised.value)
 
 
 @pytest.mark.asyncio

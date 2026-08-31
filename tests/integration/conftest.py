@@ -2,7 +2,7 @@
 
 import importlib.util
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -34,15 +34,99 @@ def _is_android_grpc_record_mode() -> bool:
     return os.environ.get(_ANDROID_GRPC_RECORD_ENV, "").casefold() in ("1", "true", "yes")
 
 
+@pytest.fixture(scope="session")
+def android_record_scratch() -> Iterator[Any]:
+    """Disposable live notebook for Android cassette *recording*; ``None`` on replay.
+
+    Created and deleted through a plain (unrecorded) client in their own event
+    loops, so scratch setup traffic never lands in a cassette. Session-scoped so
+    every recorded family sees the same notebook, source, and note.
+    """
+    if not _is_android_grpc_record_mode():
+        yield None
+        return
+    import asyncio
+
+    from tests._helpers.android_grpc_harness import (
+        create_scratch_notebook,
+        delete_scratch_notebook,
+    )
+
+    scratch = asyncio.run(create_scratch_notebook())
+    try:
+        yield scratch
+    finally:
+        asyncio.run(delete_scratch_notebook(scratch))
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Any:
+    """Expose the call-phase outcome to fixtures (``item.rep_call``)."""
+    outcome = yield
+    report = outcome.get_result()
+    if report.when == "call":
+        item.rep_call = report  # type: ignore[attr-defined]
+
+
+@pytest.fixture
+def android_grpc_cassette(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    android_record_scratch: Any,
+) -> Iterator[Callable[[str], Any]]:
+    """Bind a ``@pytest.mark.grpc_cassette`` test to ``tests/cassettes/android/<name>_recorded.grpc.json``.
+
+    Returns an async context manager yielding ``(client, values)``; see
+    ``tests/_helpers/android_grpc_harness.py`` for the record/replay contract.
+    While recording, a finished staging file replaces the committed cassette
+    only if the test itself passed, so a failing post-hoc assertion never
+    commits an invalid re-recording.
+    """
+    from tests._helpers.android_grpc_harness import (
+        android_cassette_client,
+        discard_recording,
+        promote_recording,
+    )
+
+    recorded: list[tuple[Path, Path]] = []
+
+    def bind(name: str) -> Any:
+        path = ANDROID_CASSETTES_DIR / f"{name}_recorded.grpc.json"
+        return android_cassette_client(
+            path,
+            monkeypatch=monkeypatch,
+            scratch=android_record_scratch,
+            on_recorded=lambda staging, target: recorded.append((staging, target)),
+        )
+
+    yield bind
+
+    report = getattr(request.node, "rep_call", None)
+    passed = report is not None and report.passed
+    for staging, target in recorded:
+        if passed:
+            promote_recording(staging, target)
+        else:
+            discard_recording(staging)
+            print(f"Discarded recording for {target.name}: the test did not pass.")
+
+
 # =============================================================================
 # VCR Cassette Availability Check
 # =============================================================================
 
-CASSETTES_DIR = Path(__file__).parent.parent / "cassettes"
+# Cassettes are split by client tier (see ``tests/cassettes/README.md``).
+# Both tier constants are spelled out rather than derived at each use site: an
+# untiered ``CASSETTES_DIR`` that silently meant "web" is exactly what let the
+# Android fixture below resolve under ``web/`` when the tiers were introduced.
+CASSETTES_ROOT = Path(__file__).parent.parent / "cassettes"
+WEB_CASSETTES_DIR = CASSETTES_ROOT / "web"
+ANDROID_CASSETTES_DIR = CASSETTES_ROOT / "android"
 
-# Real cassettes live at the top level of ``tests/cassettes/``; illustrative
-# fixtures (``example_*.yaml``) live in ``tests/cassettes/examples/`` per the
-# naming convention documented in ``tests/cassettes/README.md``.
+# Real Web cassettes live at the top level of ``tests/cassettes/web/``;
+# illustrative fixtures (``example_*.yaml``) live in
+# ``tests/cassettes/web/examples/`` per the naming convention documented in
+# ``tests/cassettes/README.md``.
 #
 # This filter decides whether the VCR integration tier has anything to replay:
 # - Globbing ``*.yaml`` (non-recursive) naturally skips the ``examples/``
@@ -52,8 +136,8 @@ CASSETTES_DIR = Path(__file__).parent.parent / "cassettes"
 #   filter — if a future contributor lands an ``example_*.yaml`` file at the
 #   top level by mistake, it still won't count as a real recording.
 _real_cassettes = (
-    [f for f in CASSETTES_DIR.glob("*.yaml") if not f.name.startswith("example_")]
-    if CASSETTES_DIR.exists()
+    [f for f in WEB_CASSETTES_DIR.glob("*.yaml") if not f.name.startswith("example_")]
+    if WEB_CASSETTES_DIR.exists()
     else []
 )
 
@@ -320,9 +404,13 @@ def _block_unbound_network_in_replay(request, monkeypatch):
     2. The test is NOT marked ``allow_no_vcr``, and
     3. The test IS marked ``vcr`` OR carries a
        ``@notebooklm_vcr.use_cassette`` decorator OR uses the ``vcr``
-       pytest fixture (any of the three known cassette-binding paths).
+       pytest fixture (any of the three known cassette-binding paths)
+       OR is marked ``grpc_cassette``, and
+    4. For ``grpc_cassette`` tests, Android record mode
+       (``NOTEBOOKLM_ANDROID_GRPC_RECORD=1``) is OFF — recording loads and
+       refreshes real auth over HTTP, which is never part of a cassette.
 
-    When all three conditions hold, we wrap ``httpx.AsyncClient.send`` so
+    When these conditions hold, we wrap ``httpx.AsyncClient.send`` so
     that any request reaching it without an active vcrpy cassette context
     raises ``RuntimeError`` with a clear message instead of leaking
     traffic to the real backend.
@@ -349,6 +437,11 @@ def _block_unbound_network_in_replay(request, monkeypatch):
 
     if _vcr_record_mode:
         return  # Web recording: real HTTP calls are intentional.
+
+    if is_grpc_cassette and _is_android_grpc_record_mode():
+        # Android recording: the live client loads and refreshes real auth over
+        # HTTP before any gRPC call, and that traffic is never part of a cassette.
+        return
 
     has_decorator = _has_use_cassette_decorator(request.node)
     # ``vcr`` pytest fixture (pytest-vcr) binds a cassette via fixture
