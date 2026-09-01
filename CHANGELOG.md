@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `SourceType.GEMINI_CHAT`, `EXCEL`, `GMAIL`, `AI_MODE_CHAT` and
+  `EXPERT_INTELLIGENCE` for backend type codes `18`, `12`, `15`, `19` and `20`.
+  The decode map now covers `0`-`20` contiguously and matches every value of
+  the `OriginalSourceContentType` enum recovered from the Android binary.
+  Code `18` is live-observed: an Android `AddSources` carrying
+  `CONTENT_TYPE_GEMINI_CHAT` returns a source with it, and it previously
+  decoded as `UNKNOWN` with an `UnknownTypeWarning`. The other four are mapped
+  from the enum only — no reachable route produces one (`.xlsx` is refused at
+  the Web upload `start` with HTTP 400, a Drive spreadsheet comes back as `14`,
+  and Gmail, AI Mode chat and Expert Intelligence imports are not exposed) — so
+  they are there to keep a server that does emit one from reading as `UNKNOWN`.
+- The Android backend needs **no Web collaborator**. `sharing.set_view_level`
+  and `notebooks.remove_from_recent` are now native (the earlier probes had used
+  the wrong RPC and an owned rather than shared notebook), and `add_file` covers
+  every supported extension. `.csv`, `.docx` and `.pptx` reach the backend
+  through a Drive round-trip, since the mobile upload frontend has no parser for
+  them; the staged copy is deleted afterwards. See
+  `docs/android/web-compat-seam-closure.md`.
+- `SourceType.GOOGLE_DRIVE` for backend type code `14`.
+
 ### Fixed
+
+- **Behaviour change:** type code `14` now decodes as
+  `SourceType.GOOGLE_DRIVE`, not `GOOGLE_SPREADSHEET`, and code `7` decodes as
+  `GOOGLE_SPREADSHEET`. `14` is the backend's catch-all for a Drive-hosted file
+  it gives no format-specific code: importing one Drive file of each class shows
+  a Google Doc returning `1` and a Drive PDF returning `3`, while a Google
+  Sheet, a `.txt`, a `.csv`, a `.docx` and a `.pptx` all return `14`. The
+  recovered mobile `SourceContentType` enum names it `DRIVE`, and agrees with
+  this client on every other code it defines. A native Sheet still reports
+  `GOOGLE_SPREADSHEET`: its MIME is disambiguated to `7`, the code that enum
+  reserves for it. Affects both backends — anything reaching `add_drive_file`
+  previously reported `google_spreadsheet` whatever it was.
 
 - **Behaviour change (Android backend):** `sources.get_guide()` and
   `sources.check_freshness()` no longer raise `SourceNotFoundError` for a

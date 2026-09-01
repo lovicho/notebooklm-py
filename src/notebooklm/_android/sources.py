@@ -40,6 +40,7 @@ from ..types import Source, SourceFulltext, SourceStatus, SourceType
 from .codecs.documents import decode_document, tailwind_doc_markdown, tailwind_doc_plain_text
 from .codecs.notebooks import decode_project, map_get_project_error, validate_project_identity
 from .codecs.sources import decode_source, decode_sources, select_document_guide
+from .drive_staging import _DRIVE_STAGED_UPLOAD_EXTENSIONS
 from .session import AndroidSession
 from .upload import (
     AndroidUploadPipeline,
@@ -119,9 +120,6 @@ class AddFileCompat(Protocol):
         title: str | None = None,
         on_progress: Callable[[int, int], object] | None = None,
     ) -> Source: ...
-
-
-_WEB_FILE_UPLOAD_COMPAT_EXTENSIONS = frozenset({".csv", ".docx"})
 
 
 def _snapshot_enum_filter(
@@ -356,15 +354,13 @@ class AndroidSourcesAPI(SourcesAPI):
         drive_download: DriveDownload | None = None,
         add_file_compat: AddFileCompat | None = None,
     ) -> None:
-        """Bind native sources plus the two qualified Web file-upload seams.
+        """Bind the fully native source surface.
 
-        Live native PDF and Markdown controls reach ``SOURCE_STATUS_COMPLETE``,
-        while CSV and DOCX finish in ``SOURCE_STATUS_ERROR`` even with the exact
-        APK Scotty transaction. Public client assembly therefore supplies the
-        already-authenticated Web uploader for only those two extensions. Direct
-        adapter callers may omit the collaborator to exercise the native
-        transaction for evidence work. Other extensions remain native unless
-        separately qualified by evidence.
+        ``add_file_compat`` is an optional override for the Drive-staged upload
+        path (see ``_DRIVE_STAGED_UPLOAD_EXTENSIONS``). Public client assembly
+        supplies nothing: the adapter holds no Web collaborator. Direct adapter
+        callers may inject one to exercise a different uploader, or omit it and
+        get the native staging round-trip.
         """
         self._transport = session
         self._upload_pipeline = upload_pipeline
@@ -998,25 +994,30 @@ class AndroidSourcesAPI(SourcesAPI):
         title: str | None = None,
         on_progress: Callable[[int, int], object] | None = None,
     ) -> Source:
-        # Choose the qualified compatibility path from the same canonical
-        # target whose filename drives MIME inference in either uploader. This
-        # prevents a misleading symlink suffix from routing CSV/DOCX through
-        # the native transaction that live evidence has shown will fail. Both
-        # uploaders still resolve/check the supplied canonical path inside
+        # Choose the upload path from the same canonical target whose filename
+        # drives MIME inference in either uploader, so a misleading symlink
+        # suffix cannot route a file into the transaction that will reject it.
+        # Both uploaders still resolve/check the supplied canonical path inside
         # their own admitted operation before opening it.
         canonical_path = await asyncio.to_thread(Path(file_path).resolve)
-        if (
-            canonical_path.suffix.lower() in _WEB_FILE_UPLOAD_COMPAT_EXTENSIONS
-            and self._add_file_compat is not None
-        ):
-            return await self._add_file_compat(
+        if canonical_path.suffix.lower() in _DRIVE_STAGED_UPLOAD_EXTENSIONS:
+            if self._add_file_compat is not None:
+                return await self._add_file_compat(
+                    notebook_id,
+                    canonical_path,
+                    mime_type,
+                    wait=wait,
+                    wait_timeout=wait_timeout,
+                    title=title,
+                    on_progress=on_progress,
+                )
+            return await self._upload_pipeline.add_file_via_drive_staging(
                 notebook_id,
                 canonical_path,
                 mime_type,
-                wait=wait,
                 wait_timeout=wait_timeout,
                 title=title,
-                on_progress=on_progress,
+                import_drive_file=self.add_drive,
             )
 
         adapter = self

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import mimetypes
 import os
@@ -38,6 +39,7 @@ from ..exceptions import (
 )
 from ..types import Source, SourceStatus
 from .auth import BearerProvider
+from .drive_staging import DriveStagingTransfer, ImportDriveFile
 from .errors import sanitize_escaping_exception
 from .evidence import ANDROID_EVIDENCE_PROFILE
 from .session import AndroidSession
@@ -57,14 +59,31 @@ def _provenance_proto() -> Any:
     return cast(Any, provenance_pb2)
 
 
+logger = logging.getLogger(__name__)
+
 UPLOAD_ORIGIN = "https://notebooklm-pa.googleapis.com"
 UPLOAD_PATH_PREFIX = "/upload/upload/"
 _SAFE_BEARER_HOSTS = frozenset({"notebooklm-pa.googleapis.com", "lh3.googleusercontent.com"})
 _CHUNK_SIZE = 64 * 1024
 _HTML_UPLOAD_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+#: Extension -> content type for every extension in the public upload set.
+#:
+#: ``mimetypes.guess_type`` is consulted first but is **platform-dependent**: on
+#: Windows it reads the registry and returns nothing for ``.docx``/``.pptx``, so
+#: the resolver fell through to ``application/octet-stream`` there. That matters
+#: beyond cosmetics on the Drive-staged path, where the resolved type becomes
+#: the staged Drive file's declared ``mimeType`` and therefore decides how the
+#: backend parses it. Pinning the whole supported set makes the upload wire
+#: identical on every platform.
 _EXTENSION_CONTENT_TYPES = {
-    ".md": "text/markdown",
+    ".csv": "text/csv",
+    ".docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    ".epub": "application/epub+zip",
     ".markdown": "text/markdown",
+    ".md": "text/markdown",
+    ".pdf": "application/pdf",
+    ".pptx": ("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+    ".txt": "text/plain",
 }
 _DRIVE_API_ORIGIN = "https://www.googleapis.com"
 _DRIVE_NATIVE_MIME_PREFIX = "application/vnd.google-apps."
@@ -88,20 +107,25 @@ def _set_private_temp_permissions(path: Path, mode: int) -> None:
 
 
 def _resolve_upload_content_type(file_path: Path, mime_type: str | None) -> str:
-    """Mirror the backend-neutral public upload MIME policy."""
+    """Mirror the backend-neutral public upload MIME policy.
+
+    The pinned table wins over :func:`mimetypes.guess_type` for the supported
+    extensions so the resolved type does not vary by platform; see
+    ``_EXTENSION_CONTENT_TYPES``.
+    """
 
     if mime_type is not None:
         content_type = mime_type.strip()
         if not content_type:
             raise ValidationError("mime_type cannot be empty or whitespace-only")
         return content_type
+    pinned = _EXTENSION_CONTENT_TYPES.get(file_path.suffix.lower())
+    if pinned is not None:
+        return pinned
     guessed, _encoding = mimetypes.guess_type(file_path.name)
     if guessed:
         return guessed
-    return _EXTENSION_CONTENT_TYPES.get(
-        file_path.suffix.lower(),
-        "application/octet-stream",
-    )
+    return "application/octet-stream"
 
 
 def _validate_upload_file_supported(file_path: Path, content_type: str) -> None:
@@ -777,6 +801,69 @@ class AndroidUploadPipeline(LoopBoundPrimitive):
         finally:
             if client is not None:
                 self._transport_clients.discard(client)
+
+    def _drive_staging(self) -> DriveStagingTransfer:
+        """Build the Drive staging collaborator over this pipeline's transport."""
+
+        return DriveStagingTransfer(
+            transport=self._transport,
+            bearer_provider=self._bearer_provider,
+            client_factory=self._client_factory,
+            upload_slot=self._upload_slot,
+            assert_epoch=self._assert_epoch,
+            track_client=self._transport_clients.add,
+            untrack_client=self._transport_clients.discard,
+            upload_timeout=self._upload_timeout,
+            http_timeout=self._http_timeout,
+            monotonic=self._monotonic,
+            bounded=_bounded,
+        )
+
+    async def add_file_via_drive_staging(
+        self,
+        notebook_id: str,
+        canonical_path: Path,
+        mime_type: str | None,
+        *,
+        wait_timeout: float,
+        title: str | None,
+        import_drive_file: ImportDriveFile,
+    ) -> Source:
+        """Add a file the mobile upload frontend cannot parse, by way of Drive.
+
+        Three consequences the caller should know:
+
+        * this path always waits for the source to be ready, whatever ``wait``
+          asked for -- the staged copy cannot be removed until the import has
+          materialized the content;
+        * the resulting source is Drive-backed, so ``drive_status`` describes
+          the staged copy that no longer exists rather than a live document;
+        * ``on_progress`` is not reported -- staging is a single multipart
+          request, not a chunked transfer.
+        """
+        # Trim exactly as the native path does, and pass the trimmed value on:
+        # validating ``title.strip()`` but importing the raw string would give
+        # " report " a different source title on this route than on that one.
+        requested_title = None
+        if title is not None:
+            requested_title = title.strip()
+            if not requested_title:
+                raise ValidationError("Title cannot be empty or whitespace-only")
+        content_type = _resolve_upload_content_type(canonical_path, mime_type)
+        _validate_upload_file_supported(canonical_path, content_type)
+        async with self._drive_staging().scope(
+            canonical_path,
+            canonical_path.name,
+            content_type,
+        ) as staged_file_id:
+            return await import_drive_file(
+                notebook_id,
+                staged_file_id,
+                requested_title or canonical_path.name,
+                mime_type=content_type,
+                wait=True,
+                wait_timeout=wait_timeout,
+            )
 
     @asynccontextmanager
     async def drive_download_scope(

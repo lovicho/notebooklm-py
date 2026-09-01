@@ -30,6 +30,7 @@ class SourceType(str, Enum):
     GOOGLE_DOCS = "google_docs"
     GOOGLE_SLIDES = "google_slides"
     GOOGLE_SPREADSHEET = "google_spreadsheet"
+    GOOGLE_DRIVE = "google_drive"
     PDF = "pdf"
     PASTED_TEXT = "pasted_text"
     WEB_PAGE = "web_page"
@@ -41,6 +42,11 @@ class SourceType(str, Enum):
     POWERPOINT = "powerpoint"
     CSV = "csv"
     EPUB = "epub"
+    EXCEL = "excel"
+    GEMINI_CHAT = "gemini_chat"
+    GMAIL = "gmail"
+    AI_MODE_CHAT = "ai_mode_chat"
+    EXPERT_INTELLIGENCE = "expert_intelligence"
     IMAGE = "image"
     MEDIA = "media"
     UNKNOWN = "unknown"
@@ -49,6 +55,28 @@ class SourceType(str, Enum):
 _warned_source_types: set[int] = set()
 
 
+#: Backend type code -> public :class:`SourceType`.
+#:
+#: Aligned against the ``OriginalSourceContentType`` enum recovered from the
+#: Android binary (``docs/android/enums.txt``, and the checked-in
+#: ``read.proto``), which agrees with this map on every code. Two evidence
+#: levels, marked inline on the entries themselves:
+#:
+#: * **live-observed** — a source of that type was created and read back. This
+#:   is every code except the four below, and includes ``18``: an Android
+#:   ``AddSources`` carrying ``CONTENT_TYPE_GEMINI_CHAT`` reproducibly returns a
+#:   source with it.
+#: * **schema-only** — ``12``, ``15``, ``19`` and ``20``. Each is defined by the
+#:   recovered enum, and no route this client can reach produces one: ``.xlsx``
+#:   is refused at the Web upload ``start`` with HTTP 400, a spreadsheet
+#:   imported from Drive comes back as ``14``, and Gmail, AI Mode chat and
+#:   Expert Intelligence imports are not exposed on either front door.
+#:
+#: The schema-only four are mapped anyway so a server that does emit one reads
+#: as itself instead of ``UNKNOWN``: a label on a code nothing sends costs
+#: nothing, while leaving one unmapped raises ``UnknownTypeWarning`` and sends
+#: the next reader hunting — which is exactly how ``18`` was found. Promote an
+#: entry's marker once one is observed.
 _SOURCE_TYPE_CODE_MAP: dict[int, SourceType] = {
     0: SourceType.UNKNOWN,
     1: SourceType.GOOGLE_DOCS,
@@ -57,14 +85,20 @@ _SOURCE_TYPE_CODE_MAP: dict[int, SourceType] = {
     4: SourceType.PASTED_TEXT,
     5: SourceType.WEB_PAGE,
     6: SourceType.POWERPOINT,
+    7: SourceType.GOOGLE_SPREADSHEET,
     8: SourceType.MARKDOWN,
     9: SourceType.YOUTUBE,
     10: SourceType.MEDIA,
     11: SourceType.DOCX,
+    12: SourceType.EXCEL,  # schema-only; no reachable producer
     13: SourceType.IMAGE,
-    14: SourceType.GOOGLE_SPREADSHEET,
+    14: SourceType.GOOGLE_DRIVE,
+    15: SourceType.GMAIL,  # schema-only; no reachable producer
     16: SourceType.CSV,
     17: SourceType.EPUB,
+    18: SourceType.GEMINI_CHAT,  # live: Android AddSources CONTENT_TYPE_GEMINI_CHAT
+    19: SourceType.AI_MODE_CHAT,  # schema-only; no reachable producer
+    20: SourceType.EXPERT_INTELLIGENCE,  # schema-only; no reachable producer
 }
 
 
@@ -80,21 +114,22 @@ _SOURCE_TYPE_CODE_MAP: dict[int, SourceType] = {
 #:
 #: A *mapping* to :class:`SourceType` is deliberately NOT asserted here: only some
 #: of these extensions have a live-captured decode code (pdf→3, md→8, docx→11,
-#: pptx→6, csv→16, epub→17), and inventing codes for the rest (txt/rtf/odt/tsv)
-#: would put unverified wire facts in a constant.
+#: pptx→6, csv→16, epub→17), and inventing one for ``.txt`` would put an
+#: unverified wire fact in a constant.
+#:
+#: Every member has been live-probed to READY on the Web upload endpoint. An
+#: extension only earns a place here with such a probe: see
+#: :data:`_FILE_SHAPED_ONLY_EXTENSIONS` for the four that were removed on
+#: 2026-08-31 after the endpoint was found to reject them outright.
 _UPLOAD_FILE_EXTENSIONS: frozenset[str] = frozenset(
     {
         ".csv",
-        ".doc",
         ".docx",
         ".epub",
         ".md",
         ".markdown",
-        ".odt",
         ".pdf",
         ".pptx",
-        ".rtf",
-        ".tsv",
         ".txt",
     }
 )
@@ -118,7 +153,17 @@ _UPLOAD_FILE_EXTENSIONS: frozenset[str] = frozenset(
 #: nothing. Move it up once a real legacy ``.ppt`` is probed; until then a
 #: mistyped ``deck.ppt`` still earns its warning and the Drive router still
 #: refuses it up front, which is the behavior with evidence behind it.
-_FILE_SHAPED_ONLY_EXTENSIONS: frozenset[str] = frozenset({".ppt"})
+#:
+#: ``.doc``, ``.odt``, ``.rtf`` and ``.tsv`` were moved down out of the upload
+#: set on 2026-08-31. Each had been asserted as uploadable without ever being
+#: put on the wire; a real file of each type is refused at the Web resumable
+#: ``start`` with **HTTP 400**, and identically so when the content type is
+#: forced to ``text/plain`` — so the endpoint refuses them by extension, not by
+#: MIME. (Android's upload frontend errors on all four as well.) Leaving them in
+#: the upload set was the exact failure its own docstring warns about: the Drive
+#: router treated them as a green light and downloaded whole files before the
+#: server rejected them. Move one back up only with a live READY probe.
+_FILE_SHAPED_ONLY_EXTENSIONS: frozenset[str] = frozenset({".doc", ".odt", ".ppt", ".rtf", ".tsv"})
 
 #: HTML-family extensions NotebookLM's upload endpoint **rejects**. Tracked next to
 #: the accepted set (rather than folded into it) because the two callers want them
@@ -149,6 +194,7 @@ _SOURCE_TYPE_COMPAT_MAP: dict[SourceType, str] = {
     SourceType.GOOGLE_DOCS: "text",
     SourceType.GOOGLE_SLIDES: "text",
     SourceType.GOOGLE_SPREADSHEET: "text",
+    SourceType.GOOGLE_DRIVE: "text",
     SourceType.PDF: "text_file",
     SourceType.PASTED_TEXT: "text",
     SourceType.WEB_PAGE: "url",
@@ -158,35 +204,58 @@ _SOURCE_TYPE_COMPAT_MAP: dict[SourceType, str] = {
     SourceType.POWERPOINT: "text_file",
     SourceType.CSV: "text",
     SourceType.EPUB: "text_file",
+    SourceType.EXCEL: "text_file",
+    SourceType.GEMINI_CHAT: "text",
+    SourceType.GMAIL: "text",
+    SourceType.AI_MODE_CHAT: "text",
+    SourceType.EXPERT_INTELLIGENCE: "text",
     SourceType.IMAGE: "text",
     SourceType.MEDIA: "text",
     SourceType.UNKNOWN: "text",
 }
 
 
-# The type_code==14 overload (#1828/#1832): the backend returns 14 for BOTH a
-# native Google Sheet AND a Drive-hosted binary file (e.g. a PDF). Live capture
-# showed Drive sources carry no URL (metadata[5]/[7] are null and metadata[0]
-# holds the Drive metadata block — see ``SourceRow.drive_document_id`` — rather
-# than a URL), so disambiguation uses the original-content MIME at Source tag 8
-# first (#2112), then the Drive-only MIME at metadata[19] / metadata[9][2]. A
-# native Sheet carries "application/vnd.google-apps.spreadsheet" (→ stay 14); a Drive
-# PDF carries "application/pdf" (→ 3). Only MIMEs proven by live capture are
-# mapped; anything else under 14 is left as GOOGLE_SPREADSHEET (conservative —
-# never relabel a real Sheet, never introduce UNKNOWN). Extend as more
-# Drive-hosted-binary-under-14 collisions are captured.
+# Code 14 is the backend's catch-all for a Drive-hosted file it does not give a
+# format-specific code (#1828/#1832). Measured on the Web backend by importing
+# one Drive file of each class and reading back ``Source._type_code``:
+#
+#     Google Doc                       -> 1   (GOOGLE_DOCS)
+#     Drive-hosted PDF                 -> 3   (PDF)
+#     Google Sheet                     -> 14
+#     Drive-hosted .txt / .csv         -> 14
+#     Drive-hosted .docx / .pptx       -> 14
+#
+# Only Docs and PDFs get their own code; everything else collapses to 14, which
+# is why the recovered mobile enum names it ``SOURCE_CONTENT_TYPE_DRIVE`` and not
+# a spreadsheet. That enum agrees with this map on every other code it defines
+# (0-6, 8-11, 13, 16, 17), so the two are the same numbering and 14 was simply
+# mislabelled here.
+#
+# Live capture showed Drive sources carry no URL (metadata[5]/[7] are null and
+# metadata[0] holds the Drive metadata block — see ``SourceRow.drive_document_id``
+# — rather than a URL), so disambiguation uses the original-content MIME at
+# Source tag 8 first (#2112), then the Drive-only MIME at metadata[19] /
+# metadata[9][2].
+#
+# A native Sheet carries "application/vnd.google-apps.spreadsheet" and is
+# remapped to 7, the code the recovered enum reserves for GOOGLE_SHEET, which
+# preserves the one labelling that was already correct under the old map. A
+# Drive PDF carries "application/pdf" (→ 3). Only MIMEs proven by live capture
+# are mapped; anything else under 14 stays GOOGLE_DRIVE — honest for a file the
+# backend itself declined to classify. Extend as more collisions are captured.
 _TYPE_CODE_14_MIME_OVERRIDE: dict[str, int] = {
     "application/pdf": 3,  # Drive-hosted PDF → PDF
+    "application/vnd.google-apps.spreadsheet": 7,  # native Sheet → GOOGLE_SPREADSHEET
 }
 
 
 def _disambiguate_type_code(type_code: int | None, mime: str | None) -> int | None:
     """Correct the ambiguous ``type_code == 14`` using the row MIME (#1832).
 
-    Returns the effective type code: a Drive-hosted binary whose MIME maps in
-    :data:`_TYPE_CODE_14_MIME_OVERRIDE` is remapped (PDF → 3); every other case
-    (native Sheet MIME, no MIME, or an unrecognized MIME) is returned unchanged
-    so real Google Sheets keep decoding as ``GOOGLE_SPREADSHEET``.
+    Returns the effective type code: a Drive file whose MIME maps in
+    :data:`_TYPE_CODE_14_MIME_OVERRIDE` is remapped (PDF → 3, native Sheet → 7);
+    with no MIME or an unrecognized one the code is returned unchanged and
+    decodes as ``GOOGLE_DRIVE``, which is what the backend actually said.
     """
     if type_code == 14 and mime is not None:
         return _TYPE_CODE_14_MIME_OVERRIDE.get(mime, type_code)
