@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `research.discover(notebook_id, query, *, mode="default")` on **both** the
+  Web and Android backends (`DiscoverSources`, web id `Es3dTe`): the
+  synchronous "Discover sources" call the web dialog makes — one blocking
+  round trip that returns a completed `ResearchTask` (ranked `sources`,
+  `summary` = overview) instead of the start → poll cycle. Modes `default`,
+  `raw`, `curious` and `curious_raw` (the curious modes pick a topic and send
+  an empty query). The backend also records the call as a completed run, so the
+  returned `task_id` works with `import_sources()` / `cancel()`. CLI:
+  `notebooklm research discover [QUERY] [--mode …] [--json]`. Live-verified on
+  150 result rows across both transports (#2283).
+- Six previously unmapped RPCs from the #2283 registry inventory, on **both**
+  the Web and Android backends: `sources.add_urls_async()` (`AddSourcesAsync` —
+  one non-blocking batch add that returns the queued stub rows),
+  `sources.append_text()` (`AppendSource` — append a text block to a source in
+  place), `sources.copy()` (`CopySourcesAsync`), `artifacts.copy()`
+  (`CopyArtifactsAsync` — both copies return an original → new-row mapping),
+  `notebooks.suggest_next_steps()` (`NextStepSuggestions` — the grounded
+  follow-up questions a chat answer carries, without a conversation) and
+  `artifacts.get_customization_choices()` (`GetArtifactCustomizationChoices` —
+  the Studio "Customize" option tables; account-level). New public types
+  `CopiedSource`, `CopiedArtifact`, `ArtifactCustomizationChoices`,
+  `CustomizationChoice`, `ReportPreset`. CLI: `source add-async` / `append` /
+  `copy`, `artifact copy` / `choices`, `suggest-next-steps`. The request shapes
+  were recovered with the mobile tag oracle and every route was live-validated
+  over native Android gRPC (`docs/android/copy-append-suggestion-evidence.md`);
+  this also corrects the earlier note that `AddSourcesAsync` is blocked for the
+  mobile bearer — the impersonation refusal was the Web upload-finalize path.
 - `SourceType.GEMINI_CHAT`, `EXCEL`, `GMAIL`, `AI_MODE_CHAT` and
   `EXPERT_INTELLIGENCE` for backend type codes `18`, `12`, `15`, `19` and `20`.
   The decode map now covers `0`-`20` contiguously and matches every value of
@@ -31,6 +58,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`sources.refresh()` no longer reports success while the server rejects the
+  call** (#2290). `REFRESH_SOURCE` answers a rejection as a null payload tagged
+  with a gRPC status (live: `[3]` INVALID_ARGUMENT); the call site's
+  `allow_null=True` decoded that to `None`, which is also the documented success
+  value, so Python callers, `notebooklm source refresh` and the e2e test could
+  not tell the two apart. The call now passes `raise_on_null_status=True`, so a
+  rejection raises `RPCError` while a genuinely empty success reply still
+  returns `None`. The same swallow was closed on every other write RPC whose
+  result the client reports as "done" without a verifying re-read:
+  `sources.rename()` and the post-upload retitle (`UPDATE_SOURCE`),
+  `notebooks.update()` / `chat.configure()` / `sharing.set_view_level()`
+  (`RENAME_NOTEBOOK`), `notes.update()` (`UPDATE_NOTE`), every label and
+  collection `UPDATE_LABEL` / `CREATE_LABEL` mutation, `artifacts.rename()`
+  (`RENAME_ARTIFACT`), the three `artifacts.export*()` methods
+  (`EXPORT_ARTIFACT`) and `artifacts.generate_mind_map()`
+  (`GENERATE_MIND_MAP`). Deletes (idempotent by contract), `SHARE_NOTEBOOK` /
+  `SHARE_ARTIFACT` / `REMOVE_RECENTLY_VIEWED` (recorded returning a tagged null
+  on successful flows) and the derived reads are unchanged. No recorded
+  success frame for any changed RPC carries a status, so replayed traffic is
+  unaffected; a guardrail test now keeps `allow_null=True` on these write RPCs
+  from landing without the strictness flag.
 - **Behaviour change:** type code `14` now decodes as
   `SourceType.GOOGLE_DRIVE`, not `GOOGLE_SPREADSHEET`, and code `7` decodes as
   `GOOGLE_SPREADSHEET`. `14` is the backend's catch-all for a Drive-hosted file

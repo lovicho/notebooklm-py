@@ -135,6 +135,7 @@ See [Configuration](configuration.md) for full env-var precedence and CI/CD setu
 | `suggest-prompts --query TEXT` | Free-text steer for the kind of prompts to suggest | `notebooklm suggest-prompts --query "key risks"` |
 | `suggest-prompts -s <id>` | Limit to specific source IDs (repeatable; defaults to all sources) | `notebooklm suggest-prompts -s src1 -s src2` |
 | `suggest-prompts --json` | Machine-readable output (`{notebook_id, suggestions, count}`) | `notebooklm suggest-prompts --json` |
+| `suggest-next-steps` | Grounded follow-up **questions** for the notebook (the chips shown under a chat answer, without needing a conversation). `-s <id>` scopes to sources; `--json` → `{notebook_id, suggestions: [{question, type_code}], count}` | `notebooklm suggest-next-steps --json` |
 | `configure --mode` | Set predefined chat mode (`default`, `learning-guide`, `concise`, `detailed`) | `notebooklm configure --mode learning-guide` |
 | `configure --persona` | Set custom persona prompt (up to 10,000 chars) | `notebooklm configure --persona "Act as a tutor"` |
 | `configure --response-length` | Response verbosity (`default`, `longer`, `shorter`) | `notebooklm configure --response-length longer` |
@@ -168,9 +169,12 @@ Supported source types: URLs, YouTube videos, files (PDF, text, Markdown, Word, 
 | `wait <id>` | Source ID | `--timeout`, `--interval`, `--json` | `source wait src123 --timeout 300 --interval 5` |
 | `clean` | - | `--dry-run`, `-y/--yes`, `--json` | `source clean --dry-run` |
 | `rename <id> <title>` | Source ID, new title | `--json` | `source rename src123 "New Name"` |
-| `refresh <id>` | Source ID | `--json` | `source refresh src123` |
+| `refresh <id>` | Source ID | `--json` | `source refresh src123` (exit `1` with the server's reason when the refresh is rejected — v0.9.0, #2290) |
 | `delete <id>` | Source ID | `-y/--yes`, `--json` | `source delete src123 -y` |
 | `delete-by-title <title>` | Exact source title | `-y/--yes`, `--json` | `source delete-by-title "My Source"` |
+| `add-async <url>...` | One or more URLs | `--allow-internal`, `--json` | `source add-async https://a.example https://b.example` — one non-blocking `AddSourcesAsync` call; URLs pass the same scheme/SSRF gate as `source add`; prints the queued ids immediately (`--json` → `{notebook_id, sources, count, requested}`; use `source wait` / `source list` for readiness) |
+| `append <id> <text>` | Source ID (or prefix), text (`-` for stdin) | `--header`, `--json` | `source append src123 "Addendum…"` — appends the text at the end of the source in place |
+| `copy <id>... --to <notebook>` | Source IDs (or prefixes), target notebook id/prefix | `--to` (required), `--json` | `source copy src1 src2 --to 1a2b3c` — copies into another notebook; prints original → copy pairs. A partial copy lists the ids left behind (`not_copied` under `--json`) and exits 1 |
 
 All `source` subcommands also accept `-n/--notebook ID` (resolves via flag > `NOTEBOOKLM_NOTEBOOK` env > active context).
 
@@ -274,6 +278,7 @@ Collections are account-level, so — unlike `label` — the `collection` comman
 
 | Command | Arguments | Options | Example |
 |---------|-----------|---------|---------|
+| `discover` | `[QUERY]` | `-n/--notebook`, `--mode {default,raw,curious,curious_raw}`, `--json` | `research discover "history of the transistor"` |
 | `status` | - | `-n/--notebook`, `--run-id/--task-id`, `--json` | `research status --run-id <run_id>` |
 | `wait` | - | `-n/--notebook`, `--run-id/--task-id`, `--timeout`, `--interval`, `--import-all`, `--cited-only`, `--json` | `research wait --run-id <run_id> --import-all` |
 | `import` | - | `-n/--notebook`, `--run-id`, `--cited-only`, `--timeout`, `--max-sources`, `--allow-duplicate`, `--json` | `research import` |
@@ -326,6 +331,8 @@ Language-aware generate commands (`audio`, `video`, `cinematic-video`, `report`,
 | `wait <id>` | Artifact ID (from `artifact list`) | `--timeout` (default: 300), `--interval` (default: 2), `--json` | `artifact wait art123 --timeout 600` |
 | `retry <id>` | Artifact ID (from `artifact list`) | `--wait`, `--timeout` (default: 300), `--interval` (default: 2), `--json` | `artifact retry art123 --wait` |
 | `suggestions` | - | `--json` | `artifact suggestions` |
+| `copy <id>... --to <notebook>` | Artifact IDs (or prefixes), target notebook id/prefix | `--to` (required), `--json` | `artifact copy art1 --to 1a2b3c` — copies Studio artifacts into another notebook; prints original → copy pairs. A partial copy lists the ids left behind (`not_copied` under `--json`) and exits 1 |
+| `choices` | - | `--json` | `artifact choices` — the Studio "Customize" option tables (audio/video/slide-deck format codes + report presets with their full directives under `--json`); account-level; `-n` is optional and only fills the request's project_id slot |
 
 All `artifact` subcommands also accept `-n/--notebook ID`.
 
