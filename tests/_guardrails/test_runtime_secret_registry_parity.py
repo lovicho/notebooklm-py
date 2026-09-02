@@ -103,7 +103,7 @@ def test_runtime_credential_shapes_equal_cassette_shapes() -> None:
 
     The cassette registry's ``_AUTH_TOKEN_PATTERNS`` + ``_GOOGLE_API_KEY_PATTERN``
     are the canonical Google credential shapes (``aas_et/`` / ``g.a000-`` /
-    ``sidts-`` / ``ya29.`` tokens + the ``AIza…`` API key).
+    ``sidts-`` / ``ya29.`` tokens + ``AIza…`` / ``AQ.…`` API keys).
     ``AUTH_TOKEN_SHAPE_PATTERNS`` must list the SAME regex strings so the runtime redaction
     (refresh-cmd DEBUG sink,
     ``data_at_failure`` / ``payload_preview`` exception surfaces) cannot drift
@@ -142,4 +142,7 @@ def test_runtime_registry_regression_anchors_present() -> None:
     # The Google API-key shape is the codex-review finding-1 leak carrier; pin it.
     assert r"AIza[0-9A-Za-z_\-]{35,}" in runtime_shapes, (
         "Google API-key shape dropped from AUTH_TOKEN_SHAPE_PATTERNS (codex #1517 finding)"
+    )
+    assert r"AQ\.[A-Za-z0-9_\-]{20,}" in runtime_shapes, (
+        "Google authorization-key shape dropped from AUTH_TOKEN_SHAPE_PATTERNS (#2253)"
     )

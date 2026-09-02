@@ -48,6 +48,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 FAKE_GOOGLE_API_KEY = "AIza" + "FAKE0" * 7
 assert len(FAKE_GOOGLE_API_KEY) == 39  # AIza + 35
 
+# Synthetic current-format Google authorization key. Runtime concatenation
+# keeps a contiguous credential-shaped literal out of the source file.
+FAKE_GOOGLE_AUTH_KEY = "AQ." + "FAKE0" * 10
+assert len(FAKE_GOOGLE_AUTH_KEY) == 53  # AQ. + 50
+
 # ---------------------------------------------------------------------------
 # Exports
 # ---------------------------------------------------------------------------
@@ -398,6 +403,20 @@ def test_longer_than_canonical_api_key_is_fully_scrubbed_no_partial_leak() -> No
     assert is_clean(scrubbed)[0]
     # The raw long key is itself flagged before scrubbing.
     assert find_credential_leaks(text)
+
+
+def test_google_authorization_key_is_scrubbed_and_detected_in_unknown_field() -> None:
+    """An ``AQ.`` key is scrubbed and rejected without a known carrier name."""
+    text = f'{{"SomeUnknownField":"{FAKE_GOOGLE_AUTH_KEY}"}}'
+
+    scrubbed = scrub_string(text)
+
+    assert FAKE_GOOGLE_AUTH_KEY not in scrubbed
+    assert "AQ." not in scrubbed
+    assert "SCRUBBED" in scrubbed
+    assert is_clean(scrubbed)[0]
+    assert not is_clean(text)[0]
+    assert any("auth token" in leak for leak in find_credential_leaks(text))
 
 
 # ---------------------------------------------------------------------------

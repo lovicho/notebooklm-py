@@ -35,10 +35,19 @@ CHANGELOG_MD = REPO_ROOT / "CHANGELOG.md"
 CANONICAL_CONTRIBUTOR_INSTALL = "uv sync --frozen --extra browser --extra dev --extra markdown"
 SKILL_BROWSER_LINE_RE = re.compile(r'pip install "notebooklm-py\[browser\]"(?![\w,])')
 INSTALLATION_LINK_RE = re.compile(r"\bdocs/installation\.md\b")
+SKILL_MAX_BYTES = 16_384
 
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _section(text: str, start: str, end: str) -> str:
+    """Extract a required Markdown section with actionable failures."""
+    assert start in text, f"SKILL.md is missing required heading: {start}"
+    remainder = text.split(start, 1)[1]
+    assert end in remainder, f"SKILL.md is missing required heading after {start}: {end}"
+    return remainder.split(end, 1)[0]
 
 
 def _tracked_repository_files() -> list[Path]:
@@ -166,8 +175,8 @@ def test_skill_md_contains_agent_install_pattern() -> None:
     docs/installation.md.
 
     The strict `[browser]"` regex (no extras inside the brackets) forbids a
-    regression to the single-step `[browser,cookies]` form which would break
-    on Python 3.13+.
+    regression to the single-step `[browser,cookies]` form, which makes the
+    optional browser-cookie dependency mandatory for every agent.
     """
     text = _read(SKILL_MD)
     assert SKILL_BROWSER_LINE_RE.search(text), (
@@ -176,7 +185,7 @@ def test_skill_md_contains_agent_install_pattern() -> None:
     )
     assert 'pip install "notebooklm-py[cookies]"' in text, (
         'SKILL.md must contain a separate `pip install "notebooklm-py[cookies]"` line '
-        "(optional install, may fail on Python 3.13+)."
+        "(optional browser-cookie extractor install)."
     )
     assert INSTALLATION_LINK_RE.search(text), "SKILL.md must link to docs/installation.md."
 
@@ -192,8 +201,141 @@ def test_skill_md_does_not_use_status_for_auth() -> None:
         "— `status` is context-only. Use `notebooklm auth check` for auth verification."
     )
     assert "auth check" in text, (
-        "SKILL.md Agent Setup Verification section must mention `notebooklm auth check`."
+        "SKILL.md Setup and Authentication section must mention `notebooklm auth check`."
     )
+
+
+def test_skill_md_stays_compact() -> None:
+    """Keep version-specific catalogs in CLI help and maintained documentation."""
+    size = len(SKILL_MD.read_bytes())
+    assert size <= SKILL_MAX_BYTES, (
+        f"SKILL.md is {size:,} bytes; the {SKILL_MAX_BYTES:,}-byte entrypoint budget exists "
+        "to limit always-loaded context. Move conditional detail to CLI help or maintained docs."
+    )
+
+
+def test_skill_md_workflows_preserve_readiness_identity_and_safe_autonomy() -> None:
+    """The compact skill must retain the stateful safety invariants."""
+    text = _read(SKILL_MD)
+    setup = _section(text, "## Setup and Authentication", "## Operating Invariants")
+    operating = _section(text, "## Operating Invariants", "## Authorization Boundaries")
+    authorization = _section(text, "## Authorization Boundaries", "## Command Discovery")
+    workflow = _section(text, "## Canonical Source-to-Artifact Workflow", "## Deep Research")
+    deep_research = _section(text, "## Deep Research", "## Generation Notes")
+    python_api = _section(text, "## Python API Baseline", "## Generation Notes")
+    generation = _section(text, "## Generation Notes", "## Output and Citations")
+    output = _section(text, "## Output and Citations", "## Failure Handling")
+    failure_handling = _section(text, "## Failure Handling", "## Skill Installation")
+
+    assert "Gemini Notebook" in text
+    brand_text = text.replace("NotebookLMClient", "")
+    assert "NotebookLM" not in brand_text
+    assert "Google Gemini Notebook" not in text
+    assert "notebooklm auth check --test --json" in setup
+    assert "may heal and persist refreshed cookies" in setup
+    assert ".checks.token_fetch == true" in setup
+    assert "NOTEBOOKLM_MASTER_TOKEN_JSON" in setup
+    assert "secret-transport convention" in setup
+    assert "not an environment variable" in setup
+    assert "notebooklm auth refresh" in setup
+    assert text.count("NOTEBOOKLM_AUTH_JSON") == 1
+    assert "language set" in authorization
+    assert "research wait --import-all" in authorization
+    assert "ask --new --json" in authorization
+    assert "prompt absence as consent" in authorization
+    assert "research cancel" in authorization
+    assert "--run-id <research_run_id>" in authorization
+    assert 'status == "ready"' in text
+    assert "status=READY" not in text
+    assert "subagent" not in text.lower()
+    assert "Task(" not in text
+    assert "one sequential job" in text
+    assert "only after the wait exits 0" in text
+    assert "run safe read-only diagnosis first" in failure_handling
+    assert "notebooklm auth check --test --passive --json" in failure_handling
+    assert 'pip install "notebooklm-py[headless]"' in text
+    assert "For every concurrent run" in text
+    assert "NOTEBOOKLM_AUTH_JSON" not in operating
+    assert "master_token.json" in operating
+    assert "Never share one writable `storage_state.json`" in operating
+    assert "asynchronous generators" in text
+    assert "no task ID or separate `artifact wait` step" in text
+    assert "Mind map (`--kind note-backed`)" in generation
+    assert "Mind map (`--kind interactive`, default)" in generation
+    assert "CLI polls it to completion" in generation
+    assert "Both kinds accept `--instructions`" in generation
+    assert "A `source wait` timeout uses exit 2" in failure_handling
+    assert "`artifact wait` and `research wait` timeouts use exit 1" in failure_handling
+    assert '"status": "timeout"' in failure_handling
+    assert "proceed only on" in output
+    assert "await resolve_chat_reference_passage(client, notebook_id, reference)" in output
+
+    assert workflow.index("notebooklm create") < workflow.index("notebooklm source add")
+    assert workflow.index("notebooklm source add") < workflow.index("notebooklm source wait")
+    assert workflow.index("notebooklm source wait") < workflow.index("notebooklm generate audio")
+    assert workflow.index("notebooklm generate audio") < workflow.index("notebooklm artifact wait")
+    assert workflow.index("notebooklm artifact wait") < workflow.index("notebooklm download audio")
+    assert "for every captured source" in workflow
+    assert "-a {artifact_id} -n {notebook_id}" in workflow
+
+    assert deep_research.index("notebooklm source add-research") < deep_research.index(
+        "notebooklm research wait"
+    )
+    assert "--run-id {research_run_id}" in deep_research
+    assert "--mode deep --no-wait --json" in deep_research
+    assert "--import-all --timeout 1800 --json" in deep_research
+    assert ".imported_sources[].id" in deep_research
+    assert "per-phase budget" in deep_research
+
+    assert python_api.index("client.sources.add_url") < python_api.index(
+        "client.sources.wait_until_ready"
+    )
+    assert python_api.index("client.sources.wait_until_ready") < python_api.index("client.chat.ask")
+    assert python_api.index("client.artifacts.generate_audio") < python_api.index(
+        "client.artifacts.wait_for_completion"
+    )
+    assert python_api.index("client.artifacts.wait_for_completion") < python_api.index(
+        "client.artifacts.download_audio"
+    )
+    assert "task.task_id" in python_api
+    assert "artifact_id=task.task_id" in python_api
+    assert "final.is_complete" in python_api
+    assert "not thread-safe" in python_api
+
+    workflow_sections = {
+        "canonical source-to-artifact": workflow,
+        "deep research": deep_research,
+    }
+    notebook_scoped_prefixes = (
+        "notebooklm source ",
+        "notebooklm ask ",
+        "notebooklm generate ",
+        "notebooklm artifact ",
+        "notebooklm download ",
+        "notebooklm research ",
+    )
+    json_required_prefixes = (
+        "notebooklm create ",
+        "notebooklm source add ",
+        "notebooklm source add-research ",
+        "notebooklm ask ",
+        "notebooklm generate ",
+    )
+    for workflow_name, section in workflow_sections.items():
+        inline_commands = re.findall(r"`(notebooklm [^`\n]+)`", section)
+        fenced_commands = [
+            line.strip() for line in section.splitlines() if line.strip().startswith("notebooklm ")
+        ]
+        commands = [*inline_commands, *fenced_commands]
+        for command in commands:
+            if command.startswith(notebook_scoped_prefixes):
+                assert "-n {notebook_id}" in command, (
+                    f"{workflow_name} command is not notebook-pinned: {command}"
+                )
+            if command.startswith(json_required_prefixes):
+                assert "--json" in command, (
+                    f"{workflow_name} command must retain machine-readable output: {command}"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +426,7 @@ def test_troubleshooting_md_keeps_bare_platform_headings() -> None:
 
 
 def test_no_uv_sync_all_extras_in_canonical_install_paths() -> None:
-    """`uv sync --all-extras` includes `cookies`, which fails on Python 3.13+.
+    """`uv sync --all-extras` includes the optional `cookies` extractor.
     The `[all]` extra deliberately excludes `cookies`. Only the warning callout
     in installation.md is allowed to mention `--all-extras` as a flag.
 

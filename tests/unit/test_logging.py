@@ -188,6 +188,10 @@ _AUTH_TOKEN_SHAPE_CASES = [
     # absent from the runtime catch-alls, so ``JrWMbf``-carried keys routed
     # through data_at_failure / payload_preview leaked (codex review of #1517).
     ("X_UNKNOWN", "AIza" + "A" * 35, "AIza"),
+    # Google authorization key (``AQ.`` + 50-char synthetic tail). This also
+    # pins ``aq.`` in the runtime fast-path gate: without it the regex sweep is
+    # skipped before the new shape can redact the key (#2253 / #2254).
+    ("X_UNKNOWN", "AQ." + "A" * 50, "AQ."),
 ]
 
 
@@ -1108,6 +1112,7 @@ def test_fast_path_tokens_cover_every_redaction_pattern():
         ("_token=", "oauth body refresh_token=RT&access_token=AT&id_token=IT"),
         ("code=", "oauth callback code=AUTH_X"),
         ("sid", "cookie SID=v1; SAPISID=v2; HSID=v3"),
+        ("aq.", "bare authorization key " + "AQ." + "B" * 50),
         ("authorization", "Authorization: Bearer SECRET"),
         ("cookie", "Cookie: jar=foo"),
         ("set-cookie", "Set-Cookie: SID=fresh"),

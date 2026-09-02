@@ -1,5 +1,7 @@
 # MCP server guide
 
+**Last Updated:** 2026-09-02
+
 > **Experimental / preview.** The MCP server ships behind the optional `mcp` extra. Its
 > tool surface (names, parameters, output shapes) is **not** covered by the library's semver
 > guarantees and may change between releases. `pip install notebooklm-py` is unaffected — the
@@ -10,6 +12,10 @@ client (Claude Desktop, Claude Code, Cursor, Windsurf, …) as a set of **38 too
 notebooks and sources, chat over a notebook's sources, generate and download studio artifacts,
 and run deep research. It is a thin adapter over the same business logic the CLI uses, so it
 behaves identically to `notebooklm <command>`.
+
+See the [MCP subsystem diagram](https://teng-lin.github.io/notebooklm-py/diagrams/17-mcp-subsystem.html) for process and
+application boundaries. Remote file movement is expanded in the
+[transfer-security data flow](https://teng-lin.github.io/notebooklm-py/diagrams/30-transfer-security-boundaries.dataflow.html).
 
 ## Install
 
@@ -23,8 +29,8 @@ uvx --from "notebooklm-py[mcp]" notebooklm-mcp --help
 
 ## Authenticate (once)
 
-The server reuses the CLI's stored credentials — it does **not** log in on its own. Authenticate
-once before starting it:
+The server reuses a stored profile — it does **not** log in on its own. For the
+default Web backend, authenticate once before starting it:
 
 ```bash
 notebooklm login
@@ -35,6 +41,23 @@ uvx --from "notebooklm-py[mcp]" notebooklm login
 Credentials are stored per profile under `~/.notebooklm/`. The server binds the **active profile**
 at startup (override with `--profile`, below). See [configuration.md](configuration.md) for profiles
 and multi-account setup.
+
+For `--backend android`, include Android plus the browser needed for the one-time
+interactive bootstrap, then initialize the same profile the server will bind:
+
+```bash
+pip install "notebooklm-py[mcp,android,browser]"
+notebooklm --profile work login --master-token --account you@example.com
+notebooklm-mcp --profile work --backend android
+```
+
+After bootstrap, the MCP runtime needs `[mcp,android]`; `[browser]` can be
+omitted from a separate deployment environment. You can also bootstrap without
+Playwright by supplying the one-time `--oauth-token` documented in the
+[installation guide](installation.md#alternative-master-token-auth-no-cookie-file-to-ship-survives-expiry).
+Android mints bearer credentials from that durable profile token when the
+server opens; a cookie-only profile and `NOTEBOOKLM_AUTH_JSON` are Web-only
+authentication inputs.
 
 ## Connect a client
 
@@ -78,6 +101,7 @@ The console script is `notebooklm-mcp`:
 ```bash
 notebooklm-mcp                         # stdio transport (default — for desktop hosts)
 notebooklm-mcp --profile work          # bind a specific auth profile
+notebooklm-mcp --backend android        # Android adapters; requires Android auth setup
 notebooklm-mcp --transport http        # loopback streamable-HTTP on 127.0.0.1:9420
 notebooklm-mcp --transport http --port 9000
 ```
@@ -85,6 +109,7 @@ notebooklm-mcp --transport http --port 9000
 | Flag | Default | Notes |
 |------|---------|-------|
 | `--profile` | active profile | which stored auth profile the process binds |
+| `--backend` | `web` | `web` or `android`; overrides `NOTEBOOKLM_BACKEND` |
 | `--transport` | `stdio` | `stdio` (subprocess hosts) or `http` (loopback) |
 | `--host` | `127.0.0.1` | http only; non-loopback is **refused** unless `NOTEBOOKLM_MCP_ALLOW_EXTERNAL_BIND=1` |
 | `--port` | `9420` | http only |

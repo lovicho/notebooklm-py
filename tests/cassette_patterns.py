@@ -488,6 +488,8 @@ _DISPLAY_NAME_ALLOWLIST_ALT = "|".join(
 #   * ``sidts-`` / ``ya29\.`` — less distinctive prefixes, so each carries a
 #     length floor (``{10,}`` / ``{20,}``) to avoid firing on an incidental
 #     short literal such as a bare ``ya29`` mention in a comment.
+#   * ``AQ\.`` — the Google authorization-key prefix, with a conservative
+#     ``{20,}`` floor and an open-ended tail so no credential fragment survives.
 #
 # Anything matched collapses to ``SCRUBBED`` (which contains none of the
 # prefixes), so repeated passes are idempotent.
@@ -496,6 +498,7 @@ _AUTH_TOKEN_PATTERNS: list[str] = [
     r"g\.a000-[A-Za-z0-9_\-]+",
     r"sidts-[A-Za-z0-9_\-]{10,}",
     r"ya29\.[A-Za-z0-9_\-]{20,}",
+    r"AQ\.[A-Za-z0-9_\-]{20,}",
 ]
 
 # Google API-key shape (``AIza`` + 35 ``[A-Za-z0-9_-]`` chars), applied as a
@@ -1221,8 +1224,8 @@ _DETECT_AVATAR_URL = re.compile(r"https?://lh3\.googleusercontent\.com/(?:a|ogw)
 
 # Catch-all auth-token detector — the validator twin of
 # :data:`_AUTH_TOKEN_PATTERNS`. The scrubber collapses every ``g.a000-...`` /
-# ``sidts-...`` / ``ya29....`` token to ``SCRUBBED`` (which contains none of
-# these prefixes), so ANY match here is by definition an unredacted leak —
+# ``sidts-...`` / ``ya29....`` / ``AQ....`` token to ``SCRUBBED`` (which
+# contains none of these prefixes), so ANY match here is an unredacted leak —
 # regardless of which cookie name or body field carried it. This is the guard
 # rail that would have caught the ``LSID`` leak: it never depended on ``LSID``
 # being on the cookie allowlist.
@@ -1306,7 +1309,8 @@ _CREDENTIAL_DETECTORS: list[tuple[str, re.Pattern[str]]] = [
 # THE KNOWN-SHAPE BOUNDARY (residual-risk decision; ADR-0006, issue #1382).
 # ---------------------------------------------------------------------------
 # Everything ABOVE this point is *name-anchored* (cookie names, WIZ field IDs)
-# or *known-shape* (``aas_et/`` / ``g.a000-`` / ``sidts-`` / ``ya29.`` / ``AIza`` prefixes).
+# or *known-shape* (``aas_et/`` / ``g.a000-`` / ``sidts-`` / ``ya29.`` /
+# ``AIza`` / ``AQ.`` prefixes).
 # That makes the guard NECESSARY-but-not-SUFFICIENT: a credential family the
 # registry does not yet know about — a NOVEL token prefix, or a known secret
 # riding in an un-targeted JSON field — passes the targeted detectors silently.
@@ -1604,11 +1608,11 @@ def is_clean(text: str) -> tuple[bool, list[str]]:
         leaks.append(f"Leak (signed blob-capability URL): {match.group(0)!r}")
 
     # --- 8. Catch-all Google auth-token shapes -----------------------------
-    # ``aas_et/...`` / ``g.a000-...`` / ``sidts-...`` / ``ya29....`` tokens are scrubbed to
-    # ``SCRUBBED`` wherever they appear (cookie values on or off the allowlist,
-    # response bodies, headers). Any surviving raw token is a leak by
-    # definition — this is the cookie-name-agnostic backstop that closes the
-    # ``LSID`` gap.
+    # ``aas_et/...`` / ``g.a000-...`` / ``sidts-...`` / ``ya29....`` /
+    # ``AQ....`` tokens are scrubbed to ``SCRUBBED`` wherever they appear
+    # (cookie values on or off the allowlist, response bodies, headers). Any
+    # surviving raw token is a leak by definition — this is the carrier-agnostic
+    # backstop that closes the ``LSID`` gap and future API-key field drift.
     for match in _DETECT_AUTH_TOKEN.finditer(text):
         leaks.append(f"Leak (auth token): {match.group(0)!r}")
 
