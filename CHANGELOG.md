@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Chat generation status and cancellation on both backends (#2303):
+  `client.chat.session_status()` returns typed `ChatSessionStatus` state and
+  `client.chat.cancel()` idempotently stops the selected/latest session. Web
+  uses `oXwmh` / `XgrPMd`; Android uses the live-qualified gRPC status shape and
+  APK-exact cancel request. The new `chat_cancel` MCP tool also abandons the
+  server-owned stream when passed a detached `task_id`, while existing
+  `chat_status(notebook=...)` exposes live session state. The MCP registry is
+  now explicitly bound and cleared by the server lifespan loop protocol.
+- `notebooklm copy <title> [-n <notebook-id>] [--use] [--json]` exposes the
+  existing cross-backend `notebooks.copy()` operation in the CLI. It accepts
+  partial IDs or the active notebook, copies sources and Studio artifacts, and
+  can switch context to the new notebook explicitly with `--use`.
+- `sources.search(notebook_id, query, *, source_ids=None, limit=None)` on **both**
+  the Web and Android backends: ranked passage retrieval through
+  `RetrieveRelevantChunks` (Web id `ASU5Oe`) with optional source filtering and
+  a client-side global result limit. Results are immutable `RelevantChunk`
+  values carrying `source_id`, joined `text`, global `rank`, and the backend's
+  source-relative `start` / `end` span. The Web response layout and native
+  Android route were live-verified independently; the Android protobuf overlay,
+  public-client cassettes, and lazy-module-aware RPC drift classification pin the
+  recovered contract (#2283).
+- `notebooklm source search QUERY` exposes ranked passage retrieval in the CLI,
+  with repeatable `-s/--source` filters (including unique ID prefixes), an
+  optional `--limit`, a human-readable rank/source/span/text table, and the full
+  `RelevantChunk` array under `--json`.
+- **Google Play Books ("Expert Intelligence") sources** (#2292), initially on
+  the web backend: `sources.list_play_books()` lists the account's Play Books library as
+  `PlayBook` rows (content id, title, authors, `export_disabled` + `reason`),
+  and `sources.add_play_book(notebook_id, content_id, *, wait=…)` adds a title
+  (refusing a non-exportable one with `PlayBookNotExportableError`). The created
+  source ingests as `SourceType.EXPERT_INTELLIGENCE` and carries
+  `Source.expert_intelligence` (`ExpertIntelligenceSourceMetadata`) provenance.
+  CLI: `notebooklm source books` / `source add-book <content-id>`; MCP:
+  `source_list_play_books` / `source_add_play_book`. New RPC
+  `LIST_EXPERT_INTELLIGENCE_CONTENT` (web id `mVtEUb`).
+- **Google Play Books on the Android backend** (#2302, follow-up to #2292):
+  `sources.list_play_books()` / `add_play_book(...)` now work on the native
+  Android backend too, so the whole capability is backend-parity. The add path
+  needs the per-account GMS Phenotype experiment header
+  (`x-goog-ext-202964622-bin`) the app forwards from Play Services; the new
+  `PhenotypeTokenProvider` mints it headlessly from the user's existing
+  credentials — a single-package `getExperimentsAndConfigs` registration
+  (`experimentsandconfigs` scope, already granted) whose `serverToken` is
+  TTL-cached and attached to `AddSources`. No emulator or Play Services needed.
+  Verified live end-to-end on both tiers.
 - `research.discover(notebook_id, query, *, mode="default")` on **both** the
   Web and Android backends (`DiscoverSources`, web id `Es3dTe`): the
   synchronous "Discover sources" call the web dialog makes — one blocking
@@ -36,6 +81,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over native Android gRPC (`docs/android/copy-append-suggestion-evidence.md`);
   this also corrects the earlier note that `AddSourcesAsync` is blocked for the
   mobile bearer — the impersonation refusal was the Web upload-finalize path.
+- `chat_start` / `chat_status` MCP tools — a detached, watchdog-safe path for
+  long chat generations. Remote MCP transports (claude.ai custom connectors in
+  particular) cut a tool call at ~60s of time-to-first-response-byte, and the
+  cancellation propagates into the handler, killing a blocking `chat_ask`
+  mid-generation while the same question succeeds in the NotebookLM web UI.
+  `chat_start` resolves the ask, spawns it as a server-owned task
+  (`mcp/_chattasks.ChatTaskRegistry` — bounded, TTL-swept, ADR-0024-shaped
+  in-process state) and returns a `task_id` immediately; `chat_status` polls it
+  and returns the finished `chat_ask`-shaped payload inline. An identical ask
+  still in flight is attached to (no double generation, and a dropped
+  `chat_start` response is recovered by re-issuing it); a finished ask is never
+  replayed — asking again appends a new turn, like `chat_ask`, so an answer
+  cannot go stale after `source_add` / `chat_configure`. Finished payloads stay
+  pollable by `task_id` for ~30 minutes. Same re-invoke contract as `await_upload` and the
+  `studio_generate`/`studio_status`, `research_start`/`research_status` pairs —
+  chat was the last long-running surface without it.
+  Batch-friendly by design: submissions past the generation-concurrency
+  ceiling (`NOTEBOOKLM_MCP_CHAT_CONCURRENCY`, default 3 — deliberately small,
+  bursts on one shared Google account have empirically triggered account-level
+  throttling) queue FIFO and auto-start as slots free, so a caller submits a
+  whole batch of questions and just polls; `chat_status` accepts a list of
+  task_ids (one poll call per batch round), reports `queued` vs `generating`,
+  and carries `queued_s`/`generation_s` timings; `server_info` gains a live
+  `chat_tasks` load gauge (`{generating, queued, concurrency, cached_results}`).
+  Completion TTL runs on the wall clock, not `time.monotonic()` — observed
+  live on a gVisor-sandboxed host (bunny Magic Containers) whose monotonic
+  clock effectively freezes while the container idles, which let cached
+  results outlive their 30-minute window by wall-hours; the gauges also sweep
+  expired entries before counting.
 - `SourceType.GEMINI_CHAT`, `EXCEL`, `GMAIL`, `AI_MODE_CHAT` and
   `EXPERT_INTELLIGENCE` for backend type codes `18`, `12`, `15`, `19` and `20`.
   The decode map now covers `0`-`20` contiguously and matches every value of

@@ -138,6 +138,10 @@ class RPCMethod(str, Enum):
     REFRESH_SOURCE = "FLmJqe"  # -> RefreshSource
     CHECK_SOURCE_FRESHNESS = "yR9Yof"  # -> CheckSourceFreshness
     UPDATE_SOURCE = "b7Wfje"  # -> MutateSource
+    # -> RetrieveRelevantChunks. Ranked passage retrieval across all notebook
+    # sources or an explicit source-id subset. The registration lives in a
+    # lazy Web module rather than the entry bundle (#2283).
+    RETRIEVE_RELEVANT_CHUNKS = "ASU5Oe"
     # -> AddSourcesAsync. Same request as AddSources; returns the queued stub
     # rows plus a per-source acknowledgement list without waiting for ingest
     # (#2283). Served to both front doors (live-verified 2026-09-01).
@@ -148,6 +152,15 @@ class RPCMethod(str, Enum):
     # maps each original id to its new Source row. The sync twin CopySources
     # (Z8UXi) is dead on both front doors — never model it (#2283).
     COPY_SOURCES = "R27wvc"
+    # -> ListExpertIntelligenceContent. Lists the account's Google Play Books
+    # library eligible to be added as sources ("Expert Intelligence", US/18+).
+    # Web-verified live 2026-09-01; the Android tier serves the same method over
+    # gRPC. Adding a listed book rides ADD_SOURCE / ADD_SOURCES_ASYNC with an
+    # ExpertIntelligenceContent spec (see _web.params.sources) — no add method
+    # of its own. The Android write path additionally requires a per-account
+    # Phenotype experiment header the client cannot synthesize, so add is
+    # web-only (#2292).
+    LIST_EXPERT_INTELLIGENCE_CONTENT = "mVtEUb"
 
     # Source label operations (AI topic grouping).
     # NOTE: account-level *collections* (notebook grouping) reuse these four
@@ -215,6 +228,10 @@ class RPCMethod(str, Enum):
     # -> ListChatSessions (we read only the most recent session id)
     GET_LAST_CONVERSATION_ID = "hPTbtc"
     GET_CONVERSATION_TURNS = "khqZz"  # -> ListChatTurns. Returns full Q&A turns for a conversation
+    # -> GetChatSessionStatus. Returns an opaque generation token plus 1=idle / 2=active.
+    GET_CHAT_SESSION_STATUS = "oXwmh"
+    # -> CancelGeneration. Stops the active turn for a chat session; idempotent.
+    CANCEL_GENERATION = "XgrPMd"
     # -> DeleteChatTurns (deletes the chat turns; web UI's "Delete history")
     DELETE_CONVERSATION = "J7Gthc"
     # -> GeneratePromptSuggestions. AI-suggested questions/prompts to ask a notebook

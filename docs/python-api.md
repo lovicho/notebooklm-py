@@ -1261,6 +1261,7 @@ print(url)
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
 | `list(notebook_id, *, strict=False, statuses=None, types=None)` | `str, *, bool, Collection[SourceStatus] \| None, Collection[SourceType] \| None` | `list[Source]` | List sources, optionally filtered after normalization |
+| `search(notebook_id, query, *, source_ids=None, limit=None)` | `str, str, *, Sequence[str] \| None, int \| None` | `list[RelevantChunk]` | Search indexed passages across all notebook sources or an optional source-id subset. Results use global relevance rank (lower is better); `limit` is applied after global ordering. |
 | `get(notebook_id, source_id)` | `str, str` | `Source` | Get source details; raises `SourceNotFoundError` on a miss |
 | `get_or_none(notebook_id, source_id)` | `str, str` | `Source \| None` | Optional lookup; returns `None` when absent |
 | `get_fulltext(notebook_id, source_id, *, output_format="text")` | `str, str, *, output_format: Literal["text", "markdown"]` | `SourceFulltext` | Get full content; `"markdown"` requires the optional `markdownify` extra |
@@ -1269,6 +1270,8 @@ print(url)
 | `add_text(notebook_id, title, content, *, wait=False, wait_timeout=120.0, idempotent=False)` | `str, str, str, *, bool, float, bool` | `Source` | Add text content. `wait` / `wait_timeout` are keyword-only (the positional-wait shim was removed in v0.7.0). |
 | `add_file(notebook_id, file_path, mime_type=None, *, wait=False, wait_timeout=120.0, title=None, on_progress=None)` | `str, str \| Path, str \| None, *, bool, float, str \| None, Callable \| None` | `Source` | Upload file. `mime_type` is a **supported** parameter — it overrides filename-extension inference to set the resumable-upload content-type header (omit it to infer from the extension). `wait` / `wait_timeout` are keyword-only (the positional-wait shim was removed in v0.7.0). `title` sets the display name via a post-upload `UPDATE_SOURCE` and forces a brief registration wait even when `wait=False`. `on_progress(bytes_sent, total_bytes)` may be sync or async. |
 | `add_drive(notebook_id, file_id, title, mime_type="application/vnd.google-apps.document", *, wait=False, wait_timeout=120.0)` | `str, str, str, str, *, bool, float` | `Source` | Add Google Drive doc. `mime_type` defaults to Google Docs; override for Slides/Sheets/PDF via `DriveMimeType` (see `notebooklm.types`). `wait` / `wait_timeout` are keyword-only (the positional-wait shim was removed in v0.7.0). NotebookLM's backend re-derives the display title from live Drive metadata for native Drive imports, discarding the requested `title`; the method now issues an automatic best-effort follow-up `rename()` so an explicit `title` still wins (non-fatal — a rename failure logs a warning and keeps the added source under its upstream title; issue #1960). |
+| `list_play_books()` | - | `list[PlayBook]` | List the account's Google Play Books library ("Expert Intelligence"; US only, 18+) — every title, each exposing its own exportability (`export_disabled` / `reason`), not only the addable ones. Empty for an account with no Play Books library. Supported by both Web and Android backends. See [Google Play Books sources](#google-play-books-sources). |
+| `add_play_book(notebook_id, content_id, *, wait=False, wait_timeout=120.0)` | `str, str, *, bool, float` | `Source` | Add a Play Book by its `content_id` (from `list_play_books()`). Refuses a non-exportable title with `PlayBookNotExportableError`; the created source ingests as `SourceType.EXPERT_INTELLIGENCE` with `Source.expert_intelligence` provenance. Supported by both Web and Android backends. |
 | `rename(notebook_id, source_id, new_title, *, return_object=True)` | `str, str, str` | `Source \| None` | Rename source (prefers the `UPDATE_SOURCE` echo, else re-fetched; raises `SourceNotFoundError` if missing). `return_object=False` returns `None` without hydrating. |
 | `refresh(notebook_id, source_id)` | `str, str` | `None` | Refresh URL/Drive source. `None` means the server accepted the call; a rejection raises `RPCError` (v0.9.0, #2290 — previously a server-side `INVALID_ARGUMENT` also returned `None`). |
 | `check_freshness(notebook_id, source_id)` | `str, str` | `bool` | Check if source needs refresh |
@@ -1290,6 +1293,11 @@ await client.sources.add_url(nb_id, "https://example.com/article")
 await client.sources.add_url(nb_id, "https://youtube.com/watch?v=...")  # YouTube URLs autodetected
 await client.sources.add_text(nb_id, "My Notes", "Content here...")
 await client.sources.add_file(nb_id, Path("./document.pdf"))
+
+# Search ranked passages across every source, or pass source_ids=[...] to narrow it.
+chunks = await client.sources.search(nb_id, "revenue growth", limit=5)
+for chunk in chunks:
+    print(chunk.rank, chunk.source_id, chunk.text)
 
 # Upload a file with a custom display title (rename happens after upload via
 # UPDATE_SOURCE — a brief registration wait runs even when wait=False so the
@@ -1374,6 +1382,36 @@ filtered subset. There is intentionally no separate `sources.count()` or
 inventory object: the backend already returns the source rows needed to count,
 so another public surface would imply authority or efficiency that does not
 exist.
+
+#### Google Play Books sources
+
+NotebookLM can add ebooks from an account's **Google Play Books** library as
+sources ("Expert Intelligence"; US only, 18+). `list_play_books()` returns the
+library as `PlayBook` objects; `add_play_book(notebook_id, content_id)` adds one
+by its volume id. A title whose publisher opted out of content export has
+`export_disabled=True` and a `reason` (`PlayBookExportReason`); `add_play_book`
+refuses those client-side with `PlayBookNotExportableError`.
+
+```python
+books = await client.sources.list_play_books()
+for book in books:
+    print(
+        book.content_id, book.title, "" if not book.export_disabled else f"(blocked: {book.reason})"
+    )
+
+exportable = next(b for b in books if not b.export_disabled)
+source = await client.sources.add_play_book(nb_id, exportable.content_id, wait=True)
+assert source.kind is SourceType.EXPERT_INTELLIGENCE
+print(source.expert_intelligence.authors)  # ExpertIntelligenceSourceMetadata
+```
+
+Both Web and Android backends support these methods. The Android add path
+headlessly obtains and caches the account-bound GMS Phenotype experiment
+metadata required by the native service; no emulator or Play Services is
+needed. Added sources read back with type
+`SourceType.EXPERT_INTELLIGENCE` and carry `Source.expert_intelligence`
+(`ExpertIntelligenceSourceMetadata`) provenance decoded from `SourceMetadata`
+field 19.
 
 ---
 
@@ -1709,6 +1747,8 @@ else:
 | `get_settings(notebook_id)` | `str` | `ChatSettings` | Read the notebook's current chat configuration (`goal`, `response_length`, `custom_prompt`). A never-configured notebook reads back as `DEFAULT`/`DEFAULT`. |
 | `get_history(notebook_id, limit=100, conversation_id=None)` | `str, int, str` | `list[tuple[str, str]]` | Get Q&A pairs from most recent conversation |
 | `get_conversation_id(notebook_id)` | `str` | `str \| None` | Get most recent conversation ID from server |
+| `session_status(notebook_id, conversation_id=None)` | `str, str \| None` | `ChatSessionStatus` | Read the selected session's live generation state. Omitting `conversation_id` selects the most recent session; a notebook with no session is idle. |
+| `cancel(notebook_id, conversation_id=None)` | `str, str \| None` | `None` | Idempotently stop active generation for the selected session. Omitting `conversation_id` selects the most recent session. The caller holding a Web response stream must also abandon that stream after success. |
 | `delete_conversation(notebook_id, conversation_id)` | `str, str` | `None` | **DESTRUCTIVE.** Permanently delete a server-side conversation (web UI's "Delete history" action). The next `ask()` with no `conversation_id` then starts a brand-new conversation. |
 | `save_answer_as_note(notebook_id, ask_result, *, title=None)` | `str, AskResult, str \| None` | `Note` | Save a chat answer as a citation-rich note ([issue #660](https://github.com/teng-lin/notebooklm-py/issues/660)) — the resulting note's `[N]` markers remain interactive hover-anchored citations in the NotebookLM web UI. Owns the saved-from-chat workflow on `ChatAPI` (the data owner). Raises `ValueError` if `ask_result.references` is empty. When `title is None`, derives `f"Chat: {ask_result.answer[:50].strip().replace(chr(10), ' ')}"`. |
 
@@ -1745,7 +1785,7 @@ async def ask(
 
 **Example:**
 ```python
-from notebooklm import ChatGoal, ChatResponseLength
+from notebooklm import ChatGoal, ChatResponseLength, ChatSessionStatus
 
 # Ask questions (uses all sources)
 result = await client.chat.ask(nb_id, "What are the main themes?")
@@ -1764,6 +1804,15 @@ result = await client.chat.ask(nb_id, "Summarize the key points", source_ids=["s
 result = await client.chat.ask(
     nb_id, "Can you elaborate on the first point?", conversation_id=result.conversation_id
 )
+
+# Inspect or stop an in-flight generation. ChatSessionStatus is also exported
+# from notebooklm for annotations and isinstance checks.
+status = await client.chat.session_status(nb_id, result.conversation_id)
+assert isinstance(status, ChatSessionStatus)
+if status.generating:
+    print(status.token)  # opaque server token, when supplied
+    await client.chat.cancel(nb_id, result.conversation_id)
+# On Web, cancel the local task/iterator that owns the still-open HTTP stream too.
 
 # Force a fresh conversation (destructive — turns are not recoverable).
 # Mirrors the web UI's "Delete history" button.
@@ -3183,6 +3232,23 @@ one-call path when you need both (`get_account_limits()` and
 class UserSettings:
     limits: AccountLimits = AccountLimits()  # Account-level quota limits
     output_language: str | None = None  # Global output language, or None
+```
+
+### RelevantChunk
+
+Returned by `client.sources.search()`. Ranks are global across the searched
+sources and lower values are more relevant. A rank of `0` means the backend did
+not supply one. `start` and `end` are source-relative character offsets; both
+are `None` when the reply has no span.
+
+```python
+@dataclass(frozen=True)
+class RelevantChunk:
+    source_id: str
+    text: str
+    rank: int
+    start: int | None = None
+    end: int | None = None
 ```
 
 ### SourceFulltext

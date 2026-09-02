@@ -30,6 +30,11 @@ from .._app.source_content import (
     execute_source_guide,
     execute_source_stale,
 )
+from .._app.source_play_books import (
+    SourceAddPlayBookPlan,
+    execute_source_add_play_book,
+    fetch_play_books,
+)
 from .._app.source_wait import (
     SourceWaitPlan,
     execute_source_wait,
@@ -52,14 +57,17 @@ from ._source_render import (  # noqa: F401
     _print_add_research_task_ids,
     _print_clean_candidates,
     _render_add_research_result,
+    _render_play_books_result,
     _render_source_add_drive_file_result,
     _render_source_add_drive_result,
+    _render_source_add_play_book_result,
     _render_source_delete_result,
     _render_source_fulltext_result,
     _render_source_get_result,
     _render_source_guide_result,
     _render_source_refresh_result,
     _render_source_rename_result,
+    _render_source_search_result,
     _render_source_stale_result,
     _render_source_wait_outcome,
     _resolve_source_fulltext_output_path,
@@ -73,6 +81,7 @@ from .options import (
     _complete_sources,
     json_option,
     list_options,
+    multi_source_option,
     notebook_option,
     prompt_file_option,
     wait_polling_options,
@@ -126,9 +135,12 @@ def source():
     \b
     Commands:
       list             List sources in a notebook
+      search           Search ranked passages across notebook sources
       add              Add a source (url, text, file, youtube)
       add-drive        Add a Google Drive document (native Docs/Slides/Sheets + PDF)
       add-drive-file   Add an upload-only Drive file (epub/docx/txt/...) via download
+      books            List Google Play Books eligible to add as sources
+      add-book         Add a Google Play Book by its content id
       add-research     Search web/drive and add sources from results
       get              Get source details
       fulltext         Get full indexed text content
@@ -217,6 +229,60 @@ def source_list(
                 )
                 raise AssertionError("unreachable") from None  # pragma: no cover
             render_list(render)
+
+    return _run()
+
+
+@source.command("search")
+@click.argument("query")
+@notebook_option
+@multi_source_option
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Maximum number of globally ranked passages to return.",
+)
+@json_option
+@with_client
+def source_search(ctx, query, notebook_id, source_ids, limit, json_output, client_auth):
+    """Search indexed passages across notebook sources.
+
+    Results are globally ordered by relevance rank. Repeat ``--source`` to
+    restrict the search to selected source IDs or unique ID prefixes.
+
+    \b
+    Examples:
+      notebooklm source search "revenue growth" --limit 5
+      notebooklm source search "revenue growth" -s src1 -s src2 --json
+    """
+    nb_id = require_notebook(notebook_id)
+
+    async def _run():
+        async with resolve_client_factory(ctx)(client_auth) as client:
+            nb_id_resolved = await resolve_notebook_id(client, nb_id, json_output=json_output)
+            resolved_source_ids = await resolve_source_ids(
+                client,
+                nb_id_resolved,
+                tuple(source_ids),
+                json_output=json_output,
+            )
+            if json_output:
+                chunks = await client.sources.search(
+                    nb_id_resolved,
+                    query,
+                    source_ids=resolved_source_ids,
+                    limit=limit,
+                )
+            else:
+                with cli_status("Searching source passages...", ctx=ctx):
+                    chunks = await client.sources.search(
+                        nb_id_resolved,
+                        query,
+                        source_ids=resolved_source_ids,
+                        limit=limit,
+                    )
+            _render_source_search_result(chunks, json_output=json_output, ctx=ctx)
 
     return _run()
 
@@ -579,6 +645,58 @@ def source_add_drive_file(ctx, document_id, notebook_id, title, wait, json_outpu
                 with cli_status("Downloading + adding Drive file...", ctx=ctx):
                     result = await execute_source_add_drive_file(client, plan)
             _render_source_add_drive_file_result(result, json_output=json_output, ctx=ctx)
+
+    return _run()
+
+
+@source.command("books")
+@json_option
+@with_client
+def source_books(ctx, json_output, client_auth):
+    """List Google Play Books eligible to be added as sources (#2292).
+
+    Shows the account's "Expert Intelligence" library — purchased ebooks
+    NotebookLM can ingest (US only, 18+). Titles marked no cannot be added.
+    Add one with `source add-book <content-id>`. Web backend only.
+    """
+
+    async def _run():
+        async with resolve_client_factory(ctx)(client_auth) as client:
+            books = await fetch_play_books(client)
+            _render_play_books_result(books, json_output=json_output, ctx=ctx)
+
+    return _run()
+
+
+@source.command("add-book")
+@click.argument("content_id")
+@notebook_option
+@click.option("--wait", is_flag=True, default=False, help="Wait for processing to finish")
+@json_option
+@with_client
+def source_add_book(ctx, content_id, notebook_id, wait, json_output, client_auth):
+    """Add a Google Play Book as a source by its content id (#2292).
+
+    CONTENT_ID is a Play Books volume id from `source books`. The title must be
+    exportable (publisher-permitting); a blocked one is refused up front. Web
+    backend only. Reads back as an `expert_intelligence` source.
+    """
+    nb_id = require_notebook(notebook_id)
+
+    async def _run():
+        async with resolve_client_factory(ctx)(client_auth) as client:
+            nb_id_resolved = await resolve_notebook_id(client, nb_id, json_output=json_output)
+            plan = SourceAddPlayBookPlan(
+                notebook_id=nb_id_resolved,
+                content_id=content_id,
+                wait=wait,
+            )
+            if json_output:
+                result = await execute_source_add_play_book(client, plan)
+            else:
+                with cli_status("Adding Play Book source...", ctx=ctx):
+                    result = await execute_source_add_play_book(client, plan)
+            _render_source_add_play_book_result(result, json_output=json_output, ctx=ctx)
 
     return _run()
 

@@ -17,6 +17,7 @@ Design highlights:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Literal, cast
@@ -72,6 +73,7 @@ def register_all(mcp: FastMCP) -> None:
         sharing,
         sources,
         sources_drive,
+        sources_playbooks,
         studio,
     )
 
@@ -79,6 +81,7 @@ def register_all(mcp: FastMCP) -> None:
         notebooks,
         sources,
         sources_drive,
+        sources_playbooks,
         chat,
         notes,
         studio,
@@ -160,7 +163,17 @@ def create_server(
         set_active_profile(resolve_profile(profile))
         try:
             async with factory() as client:
-                yield AppState(client=client, file_transfer=file_transfer)
+                state = AppState(client=client, file_transfer=file_transfer)
+                state.chat_tasks.set_bound_loop(asyncio.get_running_loop())
+                state.chat_tasks.reset_after_open()
+                try:
+                    yield state
+                finally:
+                    # Cancel any detached chat asks BEFORE the factory context
+                    # closes the client, so no server-owned task ever touches a
+                    # closing client (see ChatTaskRegistry.aclose).
+                    await state.chat_tasks.aclose()
+                    state.chat_tasks.set_bound_loop(None)
         finally:
             set_active_profile(previous_profile)
 

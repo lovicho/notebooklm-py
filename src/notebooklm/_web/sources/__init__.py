@@ -2,7 +2,7 @@
 
 import builtins
 import logging
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 from typing import IO, Any, Literal
 from urllib.parse import urlparse
@@ -11,13 +11,16 @@ import httpx
 
 from ..._runtime.call_supervisor import CallSupervisor
 from ..._runtime.config import DEFAULT_MAX_CONCURRENT_UPLOADS
-from ..._sources import SourcesAPI
+from ..._sources import SourcesAPI, validate_search
 from ..._types.research import SourceGuide
+from ..._types.sources import _EXPERT_INTELLIGENCE_TYPE_CODE
 from ..._url_utils import is_youtube_url
 from ...exceptions import SourceNotFoundError
 from ...rpc import RPCMethod
 from ...types import (
     CopiedSource,
+    PlayBook,
+    RelevantChunk,
     Source,
     SourceFulltext,
     SourceStatus,
@@ -37,6 +40,8 @@ from .add import (
 from .batch import SourceBatchAddService, SourceUrlBatchItem
 from .content import SourceContentRenderer
 from .listing import SourceLister
+from .play_books import PlayBooksService
+from .search import SourceSearchService
 from .transfers import SourceTransferService
 from .upload import SourceUploadPipeline
 
@@ -110,6 +115,8 @@ class WebSourcesAPI(SourcesAPI):
         self._transfers = SourceTransferService()
         self._content = SourceContentRenderer(self._rpc, logger=logger)
         self._lister = SourceLister(self._rpc)
+        self._play_books = PlayBooksService(self._rpc)
+        self._searcher = SourceSearchService(self._rpc, logger=logger)
         super().__init__()
         self._upload_timeout = upload_timeout
         self._max_concurrent_uploads = max_concurrent_uploads
@@ -176,6 +183,100 @@ class WebSourcesAPI(SourcesAPI):
             statuses=statuses,
             types=types,
         )
+
+    async def search(
+        self,
+        notebook_id: str,
+        query: str,
+        *,
+        source_ids: Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> builtins.list[RelevantChunk]:
+        """Search indexed source passages by relevance.
+
+        Args:
+            notebook_id: Notebook containing the sources to search.
+            query: Natural-language relevance query.
+            source_ids: Optional source-id subset; omitted or empty searches
+                every source in the notebook.
+            limit: Optional positive maximum number of ranked chunks.
+
+        Returns:
+            Relevant chunks ordered by their global backend rank.
+        """
+        query, normalized_ids, limit = validate_search(query, source_ids, limit)
+        return await self._searcher.search(
+            notebook_id,
+            query,
+            source_ids=normalized_ids,
+            limit=limit,
+        )
+
+    async def list_play_books(self) -> builtins.list[PlayBook]:
+        """List Google Play Books eligible to be added as sources (#2292).
+
+        Returns the account's "Expert Intelligence" library — purchased ebooks
+        NotebookLM can ingest (US only, 18+). Empty for an account with no
+        Play Books library. Titles with ``export_disabled`` set cannot be added;
+        :meth:`add_play_book` refuses them client-side.
+        """
+        return await self._play_books.list_play_books()
+
+    async def add_play_book(
+        self,
+        notebook_id: str,
+        content_id: str,
+        *,
+        wait: bool = False,
+        wait_timeout: float = 120.0,
+    ) -> Source:
+        """Add a Google Play Book as a source (#2292).
+
+        Looks ``content_id`` up in :meth:`list_play_books` (which supplies the
+        title, description, cover, authors and opaque ``field_type`` the add
+        spec echoes back), refuses a non-exportable title with
+        :class:`~notebooklm.exceptions.PlayBookNotExportableError`, then adds it
+        via ``AddSourcesAsync``. The created source ingests as
+        :attr:`~notebooklm.types.SourceType.EXPERT_INTELLIGENCE`.
+
+        Args:
+            notebook_id: The notebook ID.
+            content_id: Play Books volume id (from a :class:`PlayBook`).
+            wait: If True, wait for the source to be READY before returning.
+            wait_timeout: Maximum seconds to wait if ``wait=True`` (default 120).
+
+        Returns:
+            The created :class:`Source`. With ``wait=False`` its status may be
+            ``PROCESSING``.
+
+        Raises:
+            SourceNotFoundError: ``content_id`` is not in the library.
+            PlayBookNotExportableError: the title cannot be exported.
+        """
+        async with self._supervisor.operation_scope("source.add_play_book"):
+            books = await self._play_books.list_play_books()
+            book = next((b for b in books if b.content_id == content_id), None)
+            if book is None:
+                raise SourceNotFoundError(
+                    content_id,
+                    method_id=RPCMethod.LIST_EXPERT_INTELLIGENCE_CONTENT.value,
+                )
+            source_id = await self._play_books.add_play_book_spec(notebook_id, book)
+            if wait:
+                return await self.wait_until_ready(notebook_id, source_id, timeout=wait_timeout)
+            # The add is confirmed (we hold ``source_id``). Return a PROCESSING
+            # stub directly rather than an extra ``get_or_none`` read: that read
+            # can raise on a transient transport/auth/decode fault (its contract
+            # only returns ``None`` on a genuine miss), which would turn a
+            # confirmed, non-idempotent add into an exception a caller might
+            # retry — duplicating the source. A caller who wants the richer row
+            # can poll ``get``/``list`` itself.
+            return Source(
+                id=source_id,
+                title=book.title,
+                _type_code=_EXPERT_INTELLIGENCE_TYPE_CODE,
+                status=SourceStatus.PROCESSING,
+            )
 
     async def add_url(
         self,

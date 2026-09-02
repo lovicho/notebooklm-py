@@ -108,6 +108,9 @@ See [Configuration](configuration.md) for full env-var precedence and CI/CD setu
 | `create <title>` | Create notebook (does not change active context) | `notebooklm create "Research"` |
 | `create <title> --use` | Create notebook and make it the active context | `notebooklm create "Research" --use` |
 | `create <title> --json` | JSON envelope; with `--use` includes `active_notebook_id` | `notebooklm create "X" --use --json` |
+| `copy <title>` | Copy the current notebook, including sources and Studio artifacts | `notebooklm copy "Research — Copy"` |
+| `copy <title> -n <id>` | Copy a specific notebook (partial IDs accepted) | `notebooklm copy "Research — Copy" -n abc123` |
+| `copy <title> --use --json` | Make the copy active and emit `{source_notebook_id, notebook, active_notebook_id}` | `notebooklm copy "Research — Copy" --use --json` |
 | `delete -n <id>` | Delete notebook (uses current notebook if `-n` omitted) | `notebooklm delete -n abc123` |
 | `delete -n <id> -y` | Skip confirmation | `notebooklm delete -n abc123 -y` |
 | `delete -n <id> --json` | Emit `{notebook_id, success}` envelope (plus `context_cleared: true` when deleting the active notebook); requires `-y` (refuses to prompt in JSON mode) | `notebooklm delete -n abc123 -y --json` |
@@ -158,9 +161,12 @@ Supported source types: URLs, YouTube videos, files (PDF, text, Markdown, Word, 
 | Command | Arguments | Options | Example |
 |---------|-----------|---------|---------|
 | `list` | - | `--json`, `--limit N`, `--no-truncate`, `--label`, `--status` | `source list --limit 20 --no-truncate` |
+| `search <query>` | Passage-search query | `-s/--source ID` (repeatable), `--limit N`, `--json` | `source search "revenue growth" --limit 5` |
 | `add <content>` | URL/file/text (use `-` for stdin) | `--title`, `--type`, `--timeout`, `--follow-symlinks`, `--allow-internal` (URL sources only), `--json` (file-source `--mime-type` overrides extension inference — see [detailed section](#source-add-mime-type-file-sources)) | `source add "https://..." --timeout 90` |
 | `add-drive <id> <title>` | Drive file ID, title | `--mime-type [google-doc\|google-slides\|google-sheets\|pdf]`, `--json` | `source add-drive abc123 "Doc" --mime-type google-slides` |
 | `add-drive-file <id>` | Drive file ID or share URL | `--title`, `--wait`, `--json` | `source add-drive-file abc123 --title "Notes" --wait` |
+| `books` | - | `--json` | `source books` |
+| `add-book <content-id>` | Play Books volume id (from `books`) | `--wait`, `--json` | `source add-book QhsZEAAAQBAJ -n nb123 --wait` |
 | `add-research [query]` | Search query (or `--prompt-file -` for stdin) | `--mode [fast\|deep]`, `--from [web\|drive]`, `--import-all`, `--cited-only`, `--no-wait`, `--timeout`, `--prompt-file PATH` | `source add-research "AI" --mode deep --no-wait` |
 | `get <id>` | Source ID | `--json` | `source get src123` |
 | `fulltext <id>` | Source ID | `--json`, `-o FILE`, `--force`, `--no-clobber`, `-f [text\|markdown]` | `source fulltext src123 -f markdown -o out.md` (`-f markdown` requires the `markdown` extra: `pip install "notebooklm-py[markdown]"` — full extras matrix: [docs/installation.md#optional-extras-matrix](installation.md#optional-extras-matrix)) |
@@ -177,6 +183,27 @@ Supported source types: URLs, YouTube videos, files (PDF, text, Markdown, Word, 
 | `copy <id>... --to <notebook>` | Source IDs (or prefixes), target notebook id/prefix | `--to` (required), `--json` | `source copy src1 src2 --to 1a2b3c` — copies into another notebook; prints original → copy pairs. A partial copy lists the ids left behind (`not_copied` under `--json`) and exits 1 |
 
 All `source` subcommands also accept `-n/--notebook ID` (resolves via flag > `NOTEBOOKLM_NOTEBOOK` env > active context).
+
+`source search <query>` searches the indexed passages of every source in the
+notebook and orders matches by global relevance rank (lower is better). Repeat
+`-s/--source ID` to restrict the search; full IDs and unique prefixes are both
+accepted. The optional `--limit` is applied after global ranking. Text mode
+shows rank, source ID, source-relative span, and passage text. `--json` emits
+the full result array directly:
+
+```json
+[
+  {
+    "source_id": "source-uuid",
+    "text": "The matching passage text...",
+    "rank": 1,
+    "start": 14202,
+    "end": 14733
+  }
+]
+```
+
+`start` and `end` are `null` when the backend provides no usable span.
 
 `source delete <id>` accepts only full source IDs or unique partial-ID prefixes. To delete by exact source title, use `source delete-by-title "<title>"`.
 
@@ -1771,6 +1798,31 @@ notebooklm source add-drive-file 1AbcD...XyZ
 
 # Custom title, wait for processing to complete
 notebooklm source add-drive-file 1AbcD...XyZ --title "Meeting Notes" --wait
+```
+
+### Source: `books`, `add-book` (Google Play Books)
+
+Add ebooks from your **Google Play Books** library as sources ("Expert Intelligence"; US only, 18+). `source books` lists the library — each row shows the volume `content id`, title, authors, and whether it can be added (a publisher can opt a title out of content export). `source add-book <content-id>` adds one; a non-exportable title is refused up front, and the source ingests as an `expert_intelligence` source you can chat over like any other.
+
+> **Web backend only.** Adding a Play Book on the Android backend requires a per-account experiment token the client cannot reproduce, so both commands run on the web tier; on an Android-backed client they report the operation as unsupported.
+
+```bash
+notebooklm source books [--json]
+notebooklm source add-book [OPTIONS] CONTENT_ID
+```
+
+**`add-book` options:**
+- `-n, --notebook ID` - Notebook ID (uses current if not set; supports partial IDs)
+- `--wait` - Wait for processing to finish
+- `--json` - Output as JSON
+
+**Examples:**
+```bash
+# List the Play Books library
+notebooklm source books
+
+# Add "The Art of War" and wait for it to finish ingesting
+notebooklm source add-book QhsZEAAAQBAJ -n nb_123 --wait
 ```
 
 ### Source: `stale`, `clean`

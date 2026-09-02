@@ -106,6 +106,9 @@ MUTATING_SKIP_LIST: frozenset[str] = frozenset(
         # the server returns [] unconditionally (no echo to confirm), so it is
         # not probed by the canary.
         "CANCEL_RESEARCH",
+        # Idempotently stops an active chat generation, but needs a real
+        # conversation and is still a write. Covered by adapter tests instead.
+        "CANCEL_GENERATION",
         # AI auto-groups / creates source labels (multi-mode write) — write op,
         # --full only. LIST_LABELS (read) is probed via get_test_params.
         "CREATE_LABEL",
@@ -132,7 +135,15 @@ MUTATING_SKIP_LIST: frozenset[str] = frozenset(
 PATH_NOT_METHOD_SKIP: frozenset[str] = frozenset()
 
 
-UNAVAILABLE_SKIP_LIST: frozenset[str] = frozenset()
+UNAVAILABLE_SKIP_LIST: frozenset[str] = frozenset(
+    {
+        # Read-only, but account-scoped: ListExpertIntelligenceContent returns a
+        # non-empty payload only for an account that has redeemed Google Play
+        # Books, and is empty (indistinguishable from a transport miss) on the
+        # canary account — so it is not a usable drift probe (#2292).
+        "LIST_EXPERT_INTELLIGENCE_CONTENT",
+    }
+)
 """Reserved for ``RPCMethod`` members that exist but aren't currently
 exercisable by the canary (e.g. unreleased / rolled-back Google features).
 Empty for now; the scaffolding is preserved so a future "exists but cannot
@@ -187,6 +198,14 @@ def test_every_rpc_method_is_probed_or_explicitly_skipped() -> None:
         "expensive op), PATH_NOT_METHOD_SKIP (a URL path), or "
         "UNAVAILABLE_SKIP_LIST (not currently exercisable)."
     )
+
+
+def test_chat_session_status_probe_does_not_require_notebook_id() -> None:
+    """Quick mode still exercises the account-safe placeholder status read."""
+    assert check_rpc_health.get_test_params(RPCMethod.GET_CHAT_SESSION_STATUS, None) == [
+        None,
+        "placeholder_conv_id",
+    ]
 
 
 def test_skip_lists_are_disjoint_from_probed() -> None:

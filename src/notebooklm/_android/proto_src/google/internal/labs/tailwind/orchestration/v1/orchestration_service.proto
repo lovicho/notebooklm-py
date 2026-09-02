@@ -45,6 +45,8 @@ service LabsTailwindOrchestrationService {
   rpc AddTentativeSources(AddTentativeSourcesRequest)
       returns (AddTentativeSourcesResponse);
   rpc AddSources(AddSourcesRequest) returns (AddSourcesResponse);
+  rpc ListExpertIntelligenceContent(ListExpertIntelligenceContentRequest)
+      returns (ListExpertIntelligenceContentResponse);
   rpc DeleteSources(DeleteSourcesRequest) returns (google.protobuf.Empty);
   rpc MutateSource(MutateSourceRequest) returns (MutateSourceResponse);
   rpc CheckSourceFreshness(CheckSourceFreshnessRequest)
@@ -53,6 +55,8 @@ service LabsTailwindOrchestrationService {
   rpc GenerateDocumentGuides(GenerateDocumentGuidesRequest)
       returns (GenerateDocumentGuidesResponse);
   rpc LoadSource(LoadSourceRequest) returns (LoadSourceResponse);
+  rpc RetrieveRelevantChunks(RetrieveRelevantChunksRequest)
+      returns (RetrieveRelevantChunksResponse);
 
   rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
   rpc GetArtifact(GetArtifactRequest) returns (GetArtifactResponse);
@@ -66,6 +70,9 @@ service LabsTailwindOrchestrationService {
   rpc ExportToDrive(ExportToDriveRequest) returns (ExportToDriveResponse);
 
   rpc ListChatSessions(ListChatSessionsRequest) returns (ListChatSessionsResponse);
+  rpc GetChatSessionStatus(GetChatSessionStatusRequest)
+      returns (GetChatSessionStatusResponse);
+  rpc CancelGeneration(CancelGenerationRequest) returns (CancelGenerationResponse);
   rpc ListChatTurns(ListChatTurnsRequest) returns (ListChatTurnsResponse);
   rpc DeleteChatTurns(DeleteChatTurnsRequest) returns (google.protobuf.Empty);
   rpc GenerateFreeFormStreamed(GenerateFreeFormStreamedRequest)

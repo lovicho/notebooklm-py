@@ -7,13 +7,16 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, cast
 
 import pytest
+from google.protobuf.timestamp_pb2 import Timestamp
 from tests._helpers.android_supervisor import SupervisedAndroidTransport
 
 from notebooklm._android.codecs.documents import decode_document, tailwind_doc_plain_text
 from notebooklm._android.codecs.sources import select_document_guide
+from notebooklm._android.phenotype import PhenotypeError, PhenotypeTokenProvider
 from notebooklm._android.proto.google.internal.labs.tailwind.orchestration.v1 import (
     chat_pb2,
     read_pb2,
@@ -32,6 +35,7 @@ from notebooklm._android.sources import (
     DELETE_SOURCES_METHOD,
     GENERATE_DOCUMENT_GUIDES_METHOD,
     GET_PROJECT_METHOD,
+    LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD,
     LOAD_SOURCE_METHOD,
     MUTATE_SOURCE_METHOD,
     REFRESH_SOURCE_METHOD,
@@ -39,11 +43,13 @@ from notebooklm._android.sources import (
 )
 from notebooklm._android.upload import AndroidUploadPipeline
 from notebooklm._types.research import SourceGuide
+from notebooklm._types.sources import PlayBookExportReason
 from notebooklm.exceptions import (
     AuthError,
     DecodingError,
     NetworkError,
     NonIdempotentRetryError,
+    PlayBookNotExportableError,
     RateLimitError,
     RPCError,
     RPCTimeoutError,
@@ -86,6 +92,7 @@ class FakeTransport:
         self.handlers: dict[str, Handler | deque[Any] | Any] = {}
         self.calls: list[tuple[str, Any, dict[str, Any]]] = []
         self.scopes: list[str] = []
+        self.timeline: list[str] = []
 
     @asynccontextmanager
     async def operation_scope(self, label: str, **kwargs: Any) -> AsyncIterator[_Lease]:
@@ -94,6 +101,7 @@ class FakeTransport:
         yield _Lease()
 
     async def unary(self, method: str, request: Any, **kwargs: Any) -> Any:
+        self.timeline.append(method)
         self.calls.append((method, request, kwargs))
         if method == GET_PROJECT_METHOD and method not in self.handlers:
             return _project(_source(SOURCE_A), _source(SOURCE_B))
@@ -106,11 +114,46 @@ class FakeTransport:
             raise result
         return result
 
+    async def prepare_metadata(
+        self,
+        metadata_augmentor: Any,
+        *,
+        expected_epoch: int,
+    ) -> tuple[tuple[str, str | bytes], ...]:
+        assert expected_epoch == 7
+        self.timeline.append("prepare_metadata")
+        return tuple(await metadata_augmentor("fake-bearer"))
 
-def _api(transport: FakeTransport) -> AndroidSourcesAPI:
+
+class FakePhenotype:
+    def __init__(self, *outcomes: Any) -> None:
+        self.outcomes = deque(outcomes)
+        self.calls: list[tuple[str, bool]] = []
+
+    async def experiment_metadata(
+        self,
+        bearer: str,
+        *,
+        force: bool = False,
+    ) -> tuple[tuple[str, bytes], ...]:
+        self.calls.append((bearer, force))
+        if self.outcomes:
+            outcome = self.outcomes.popleft()
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return cast(tuple[tuple[str, bytes], ...], outcome)
+        return (("x-phenotype-bin", b"metadata"),)
+
+
+def _api(
+    transport: FakeTransport,
+    *,
+    phenotype: FakePhenotype | None = None,
+) -> AndroidSourcesAPI:
     return AndroidSourcesAPI(
         cast(AndroidSession, transport),
         cast(AndroidUploadPipeline, object()),
+        phenotype=cast(PhenotypeTokenProvider, phenotype or FakePhenotype()),
     )
 
 
@@ -1562,3 +1605,198 @@ async def test_cancellation_between_registration_and_commit_dispatches_no_later_
     with pytest.raises(asyncio.CancelledError):
         await _api(transport).add_url(NOTEBOOK_ID, URL_A)
     assert [call[0] for call in transport.calls] == [ADD_TENTATIVE_SOURCES_METHOD]
+
+
+def _ei_item(
+    content_id: str,
+    *,
+    title: str = "The Art of War",
+    export_disabled: bool = False,
+    export_reason: int = 0,
+    field_type: float = 4.5,
+    updated_timestamp: Timestamp | None = None,
+) -> Any:
+    item = sources_pb2.ExpertIntelligenceContentItem(
+        content_id=content_id,
+        provider=1,
+        title=title,
+        description="<p>desc</p>",
+        thumbnail_image_url=f"https://books/{content_id}",
+        export_disabled=export_disabled,
+        export_reason=export_reason,
+        authors=["Sun Tzu"],
+        field_type=field_type,
+    )
+    if updated_timestamp is not None:
+        item.updated_timestamp.CopyFrom(updated_timestamp)
+    return item
+
+
+def _ei_response(*items: Any) -> Any:
+    return sources_pb2.ListExpertIntelligenceContentResponse(items=list(items))
+
+
+class TestPlayBooksAndroid:
+    """Play Books (Expert Intelligence) on the Android backend (#2302)."""
+
+    @pytest.mark.asyncio
+    async def test_list_play_books_decodes_items(self) -> None:
+        transport = FakeTransport()
+        transport.handlers[LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD] = _ei_response(
+            _ei_item("QhsZEAAAQBAJ", updated_timestamp=Timestamp(seconds=1_700_000_000)),
+            _ei_item("BAD", export_disabled=True, export_reason=1, field_type=0.0),
+        )
+        books = await _api(transport).list_play_books()
+        assert [b.content_id for b in books] == ["QhsZEAAAQBAJ", "BAD"]
+        first = books[0]
+        assert first.title == "The Art of War"
+        assert first.authors == ("Sun Tzu",)
+        assert first.export_disabled is False
+        assert first.reason is None
+        assert first.field_type == pytest.approx(4.5)
+        assert first.updated_at == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+        assert books[1].export_disabled is True
+        assert books[1].reason is PlayBookExportReason.OPTED_OUT
+
+    @pytest.mark.asyncio
+    async def test_list_play_books_sends_source_class(self) -> None:
+        transport = FakeTransport()
+        transport.handlers[LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD] = _ei_response()
+        await _api(transport).list_play_books()
+        method, request, kwargs = transport.calls[0]
+        assert method == LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD
+        assert request.source_class == 1
+        assert request.HasField("request_context")
+        assert kwargs["replay_safe"] is True
+
+    @pytest.mark.asyncio
+    async def test_add_play_book_unknown_content_id_raises(self) -> None:
+        transport = FakeTransport()
+        transport.handlers[LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD] = _ei_response(
+            _ei_item("QhsZEAAAQBAJ")
+        )
+        with pytest.raises(SourceNotFoundError):
+            await _api(transport).add_play_book(NOTEBOOK_ID, "MISSING")
+        assert all(m != ADD_SOURCES_METHOD for m, _, _ in transport.calls)
+
+    @pytest.mark.asyncio
+    async def test_add_play_book_refuses_non_exportable(self) -> None:
+        transport = FakeTransport()
+        transport.handlers[LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD] = _ei_response(
+            _ei_item("BAD", export_disabled=True, export_reason=1)
+        )
+        with pytest.raises(PlayBookNotExportableError):
+            await _api(transport).add_play_book(NOTEBOOK_ID, "BAD")
+        assert all(
+            m not in (ADD_TENTATIVE_SOURCES_METHOD, ADD_SOURCES_METHOD)
+            for m, _, _ in transport.calls
+        )
+
+    @pytest.mark.asyncio
+    async def test_add_play_book_commits_expert_intelligence_content(self) -> None:
+        transport = _successful_transport()
+        phenotype = FakePhenotype()
+        transport.handlers[LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD] = _ei_response(
+            _ei_item("QhsZEAAAQBAJ")
+        )
+        await _api(transport, phenotype=phenotype).add_play_book(
+            NOTEBOOK_ID,
+            "QhsZEAAAQBAJ",
+        )
+        add = next((req, kw) for method, req, kw in transport.calls if method == ADD_SOURCES_METHOD)
+        request, kwargs = add
+        content = request.user_content[0].expert_intelligence_content
+        assert content.content_id == "QhsZEAAAQBAJ"
+        assert content.provider == 1
+        assert content.authors == ["Sun Tzu"]
+        assert content.field_type == pytest.approx(4.5)
+        assert transport.timeline.index("prepare_metadata") < transport.timeline.index(
+            ADD_TENTATIVE_SOURCES_METHOD
+        )
+        assert phenotype.calls == [("fake-bearer", False)]
+        # The already-fetched metadata rides the commit without another POST.
+        assert callable(kwargs["metadata_augmentor"])
+        assert await kwargs["metadata_augmentor"]("new-bearer") == (
+            ("x-phenotype-bin", b"metadata"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_metadata_failure_precedes_tentative_registration(self) -> None:
+        transport = FakeTransport()
+        phenotype = FakePhenotype(PhenotypeError("fetch failed"))
+        transport.handlers[LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD] = _ei_response(
+            _ei_item("QhsZEAAAQBAJ")
+        )
+
+        with pytest.raises(PhenotypeError, match="fetch failed"):
+            await _api(transport, phenotype=phenotype).add_play_book(
+                NOTEBOOK_ID,
+                "QhsZEAAAQBAJ",
+            )
+
+        assert [method for method, _, _ in transport.calls] == [
+            LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD
+        ]
+        assert transport.timeline == [
+            LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD,
+            "prepare_metadata",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_internal_refusal_refreshes_after_tentative_readback(self) -> None:
+        transport = _successful_transport()
+        phenotype = FakePhenotype()
+        transport.handlers[LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD] = _ei_response(
+            _ei_item("QhsZEAAAQBAJ")
+        )
+        transport.handlers[ADD_SOURCES_METHOD] = deque(
+            [
+                ServerError("stale token", method_id=ADD_SOURCES_METHOD, rpc_code=13),
+                sources_pb2.AddSourcesResponse(
+                    sources=[_source(SOURCE_A, status=source_settings_pb2.SOURCE_STATUS_PENDING)]
+                ),
+            ]
+        )
+        transport.handlers[GET_PROJECT_METHOD] = deque(
+            [
+                _project(_source(SOURCE_A, status=source_settings_pb2.SOURCE_STATUS_TENTATIVE)),
+                _project(_source(SOURCE_A, status=source_settings_pb2.SOURCE_STATUS_COMPLETE)),
+            ]
+        )
+
+        source = await _api(transport, phenotype=phenotype).add_play_book(
+            NOTEBOOK_ID,
+            "QhsZEAAAQBAJ",
+        )
+
+        assert source.id == SOURCE_A
+        assert phenotype.calls == [("fake-bearer", False), ("fake-bearer", True)]
+        methods = [method for method, _, _ in transport.calls]
+        assert methods.count(ADD_TENTATIVE_SOURCES_METHOD) == 1
+        assert methods.count(ADD_SOURCES_METHOD) == 2
+        assert methods.count(GET_PROJECT_METHOD) == 2
+
+    @pytest.mark.asyncio
+    async def test_internal_refusal_does_not_retry_after_commit_proof(self) -> None:
+        transport = _successful_transport()
+        phenotype = FakePhenotype()
+        transport.handlers[LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD] = _ei_response(
+            _ei_item("QhsZEAAAQBAJ")
+        )
+        transport.handlers[ADD_SOURCES_METHOD] = ServerError(
+            "ambiguous internal",
+            method_id=ADD_SOURCES_METHOD,
+            rpc_code=13,
+        )
+        transport.handlers[GET_PROJECT_METHOD] = _project(
+            _source(SOURCE_A, status=source_settings_pb2.SOURCE_STATUS_PENDING)
+        )
+
+        source = await _api(transport, phenotype=phenotype).add_play_book(
+            NOTEBOOK_ID,
+            "QhsZEAAAQBAJ",
+        )
+
+        assert source.id == SOURCE_A
+        assert phenotype.calls == [("fake-bearer", False)]
+        assert [method for method, _, _ in transport.calls].count(ADD_SOURCES_METHOD) == 1

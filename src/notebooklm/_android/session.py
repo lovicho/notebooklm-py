@@ -7,7 +7,7 @@ import importlib
 import logging
 import math
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -137,6 +137,12 @@ class _Serializable(Protocol):
 
 def _serialize_message(message: object) -> bytes:
     return cast(_Serializable, message).SerializeToString()
+
+
+# A callback that, given the current bearer token, returns extra gRPC metadata to
+# append for one call (e.g. the Play Books Phenotype experiment header). Kept as a
+# generic seam so the transport stays unaware of the Phenotype concern.
+MetadataAugmentor = Callable[[str], Awaitable[Sequence[tuple[str, str | bytes]]]]
 
 
 class AndroidSession(LoopBoundPrimitive):
@@ -301,6 +307,48 @@ class AndroidSession(LoopBoundPrimitive):
 
         self._assert_epoch(expected_epoch)
 
+    async def prepare_metadata(
+        self,
+        metadata_augmentor: MetadataAugmentor,
+        *,
+        expected_epoch: int,
+    ) -> tuple[tuple[str, str | bytes], ...]:
+        """Resolve credential-derived metadata before a multi-call write begins."""
+
+        session = self
+        failure: BaseException | None = None
+        result: tuple[tuple[str, str | bytes], ...] | None = None
+        try:
+            result = await session._prepare_metadata_impl(
+                metadata_augmentor,
+                expected_epoch=expected_epoch,
+            )
+        except BaseException as error:
+            failure = sanitize_escaping_exception(error)
+        finally:
+            del self, session
+        if failure is not None:
+            raise failure
+        assert result is not None
+        return result
+
+    async def _prepare_metadata_impl(
+        self,
+        metadata_augmentor: MetadataAugmentor,
+        *,
+        expected_epoch: int,
+    ) -> tuple[tuple[str, str | bytes], ...]:
+        credential: BearerCredential | None = None
+        try:
+            self._assert_epoch(expected_epoch)
+            credential = await self._bearer_provider.get(expected_epoch=expected_epoch)
+            self._assert_epoch(expected_epoch)
+            metadata = tuple(await metadata_augmentor(credential.token))
+            self._assert_epoch(expected_epoch)
+            return metadata
+        finally:
+            del credential
+
     async def _unary_callable(
         self,
         method: str,
@@ -355,9 +403,10 @@ class AndroidSession(LoopBoundPrimitive):
         method: str,
         request: ReqT,
         response_type: type[RespT],
+        metadata_augmentor: MetadataAugmentor | None = None,
     ) -> _AttemptSuccess[RespT] | _AttemptFailure:
         credential: BearerCredential | None = None
-        metadata: tuple[tuple[str, str], ...] | None = None
+        metadata: tuple[tuple[str, str | bytes], ...] | None = None
         wire_call: Awaitable[RespT] | None = None
         try:
             try:
@@ -379,6 +428,18 @@ class AndroidSession(LoopBoundPrimitive):
 
             self._assert_epoch(lease.epoch)
             metadata = (("authorization", f"Bearer {credential.token}"),)
+            if metadata_augmentor is not None:
+                try:
+                    extra = await _await_with_deadline(
+                        metadata_augmentor(credential.token), lease.deadline
+                    )
+                except _DeadlineSignal:
+                    return _AttemptFailure(
+                        GrpcStatus("DEADLINE_EXCEEDED", 4),
+                        credential.generation,
+                    )
+                self._assert_epoch(lease.epoch)
+                metadata = metadata + tuple(extra)
             try:
                 wire_call = callable_(
                     request,
@@ -417,6 +478,7 @@ class AndroidSession(LoopBoundPrimitive):
         response_type: type[RespT],
         telemetry_method: str | None | _DefaultTelemetry = _DEFAULT_TELEMETRY,
         expected_epoch: int | None = None,
+        metadata_augmentor: MetadataAugmentor | None = None,
     ) -> RespT:
         """Invoke a unary RPC without retaining this secret owner in failures."""
 
@@ -427,6 +489,7 @@ class AndroidSession(LoopBoundPrimitive):
             result = await session._unary_impl(
                 method,
                 request,
+                metadata_augmentor=metadata_augmentor,
                 replay_safe=replay_safe,
                 timeout=timeout,
                 response_type=response_type,
@@ -451,6 +514,7 @@ class AndroidSession(LoopBoundPrimitive):
         response_type: type[RespT],
         telemetry_method: str | None | _DefaultTelemetry,
         expected_epoch: int | None,
+        metadata_augmentor: MetadataAugmentor | None = None,
     ) -> RespT:
         """Invoke one typed unary RPC with bounded replay of safe reads."""
 
@@ -472,7 +536,9 @@ class AndroidSession(LoopBoundPrimitive):
                 auth_replayed = False
                 unavailable_replayed = False
                 for _attempt in range(3):
-                    outcome = await self._unary_attempt(lease, method, request, response_type)
+                    outcome = await self._unary_attempt(
+                        lease, method, request, response_type, metadata_augmentor
+                    )
                     if isinstance(outcome, _AttemptSuccess):
                         return outcome.value
                     if outcome.status.name == "UNAUTHENTICATED":

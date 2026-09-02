@@ -18,7 +18,7 @@ from typing import Any, Literal, Protocol, TypeVar, cast
 from .._deadline import RuntimeDeadline
 from .._idempotency import mark_unconfirmed
 from .._source.batch import SourceUrlBatchItem
-from .._sources import SourcesAPI
+from .._sources import SourcesAPI, validate_search
 from .._types.documents import StructuredDocument
 from .._types.research import SourceGuide
 from .._url_utils import is_youtube_url
@@ -28,6 +28,7 @@ from ..exceptions import (
     DecodingError,
     NetworkError,
     NonIdempotentRetryError,
+    PlayBookNotExportableError,
     RateLimitError,
     RPCError,
     ServerError,
@@ -37,12 +38,20 @@ from ..exceptions import (
     SourceTimeoutError,
     ValidationError,
 )
-from ..types import Source, SourceFulltext, SourceStatus, SourceType
+from ..types import PlayBook, RelevantChunk, Source, SourceFulltext, SourceStatus, SourceType
 from .codecs.documents import decode_document, tailwind_doc_markdown, tailwind_doc_plain_text
 from .codecs.notebooks import decode_project, map_get_project_error, validate_project_identity
 from .codecs.sources import decode_source, decode_sources, select_document_guide
 from .drive_staging import _DRIVE_STAGED_UPLOAD_EXTENSIONS
+from .phenotype import PhenotypeTokenProvider
+from .play_books import (
+    build_expert_intelligence_content,
+    decode_play_book_item,
+    static_metadata_augmentor,
+    tentative_source_ids,
+)
 from .session import AndroidSession
+from .source_search import AndroidSourceSearchService
 from .source_transfers import (
     ADD_SOURCES_ASYNC_METHOD,
     APPEND_SOURCE_METHOD,
@@ -92,6 +101,7 @@ _SERVICE = "google.internal.labs.tailwind.orchestration.v1.LabsTailwindOrchestra
 GET_PROJECT_METHOD = f"/{_SERVICE}/GetProject"
 ADD_TENTATIVE_SOURCES_METHOD = f"/{_SERVICE}/AddTentativeSources"
 ADD_SOURCES_METHOD = f"/{_SERVICE}/AddSources"
+LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD = f"/{_SERVICE}/ListExpertIntelligenceContent"
 DELETE_SOURCES_METHOD = f"/{_SERVICE}/DeleteSources"
 MUTATE_SOURCE_METHOD = f"/{_SERVICE}/MutateSource"
 GENERATE_DOCUMENT_GUIDES_METHOD = f"/{_SERVICE}/GenerateDocumentGuides"
@@ -366,6 +376,7 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
         *,
         drive_download: DriveDownload | None = None,
         add_file_compat: AddFileCompat | None = None,
+        phenotype: PhenotypeTokenProvider | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """Bind the fully native source surface.
@@ -381,8 +392,10 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
         wait with a stepping clock instead of racing ``time.monotonic()``.
         """
         self._transport = session
+        self._searcher = AndroidSourceSearchService(session)
         self._upload_pipeline = upload_pipeline
         self._add_file_compat = add_file_compat
+        self._phenotype = phenotype or PhenotypeTokenProvider()
         self._monotonic = monotonic
         native_drive_download = getattr(upload_pipeline, "drive_download_scope", None)
         self._drive_download = drive_download or (
@@ -407,6 +420,23 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
             strict=strict,
             status_filter=status_filter,
             type_filter=type_filter,
+        )
+
+    async def search(
+        self,
+        notebook_id: str,
+        query: str,
+        *,
+        source_ids: Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> builtins.list[RelevantChunk]:
+        """Search indexed source passages through native Android gRPC."""
+        query, normalized_ids, limit = validate_search(query, source_ids, limit)
+        return await self._searcher.search(
+            notebook_id,
+            query,
+            source_ids=normalized_ids,
+            limit=limit,
         )
 
     async def _list_project_sources(
@@ -662,7 +692,7 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
         source_ids: Collection[str],
         *,
         expected_epoch: int,
-    ) -> tuple[dict[str, _CommitProof], set[str]]:
+    ) -> tuple[dict[str, _CommitProof], set[str], set[str]]:
         request = _read_proto().GetProjectRequest(
             project_id=notebook_id,
             include_audio_overview_ids=True,
@@ -677,11 +707,13 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
             )
             validate_project_identity(response.project, notebook_id, method_id=GET_PROJECT_METHOD)
             decode_project(response.project, method_id=GET_PROJECT_METHOD)
-            return _collect_commit_proofs(
+            proofs, unresolved = _collect_commit_proofs(
                 response.project.sources,
                 source_ids,
                 method_id=GET_PROJECT_METHOD,
             )
+            tentative = tentative_source_ids(response.project.sources, source_ids)
+            return proofs, unresolved, tentative
         except asyncio.CancelledError:
             raise
         except (KeyboardInterrupt, SystemExit):
@@ -691,7 +723,7 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
                 "Android source commit reconciliation failed; preserving only prior "
                 "affirmative response evidence"
             )
-            return {}, set()
+            return {}, set(), set()
 
     async def _commit_user_contents(
         self,
@@ -699,6 +731,8 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
         entries: Sequence[tuple[Any, str]],
         *,
         expected_epoch: int,
+        metadata_augmentor: Any = None,
+        metadata_refresher: Any = None,
     ) -> tuple[dict[str, _CommitProof], set[str]]:
         candidate_ids = [source_id for _, source_id in entries]
         request = _write_proto().AddSourcesRequest(
@@ -708,6 +742,7 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
         )
         response_proofs: dict[str, _CommitProof] = {}
         response_unresolved: set[str] = set()
+        commit_failure: ServerError | None = None
         try:
             response = await self._transport.unary(
                 ADD_SOURCES_METHOD,
@@ -715,13 +750,15 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
                 replay_safe=False,
                 response_type=_write_proto().AddSourcesResponse,
                 expected_epoch=expected_epoch,
+                metadata_augmentor=metadata_augmentor,
             )
         except asyncio.CancelledError:
             raise
         except (KeyboardInterrupt, SystemExit):
             raise
-        except (NetworkError, RateLimitError, ServerError):
-            pass
+        except (NetworkError, RateLimitError, ServerError) as exc:
+            if isinstance(exc, ServerError):
+                commit_failure = exc
         else:
             try:
                 response_proofs, response_unresolved = _collect_commit_proofs(
@@ -736,7 +773,7 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
                 response_proofs = {}
                 response_unresolved = set()
 
-        read_proofs, read_unresolved = await self._read_commit_proofs(
+        read_proofs, read_unresolved, read_tentative = await self._read_commit_proofs(
             notebook_id,
             candidate_ids,
             expected_epoch=expected_epoch,
@@ -753,6 +790,25 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
                 merged[source_id] = proof
             elif first is not None and later is not None:
                 unresolved.add(source_id)
+
+        if (
+            metadata_refresher is not None
+            and commit_failure is not None
+            and commit_failure.rpc_code == 13
+            and not merged
+            and not unresolved
+            and set(candidate_ids).issubset(read_tentative)
+        ):
+            refreshed = await self._transport.prepare_metadata(
+                metadata_refresher,
+                expected_epoch=expected_epoch,
+            )
+            return await self._commit_user_contents(
+                notebook_id,
+                entries,
+                expected_epoch=expected_epoch,
+                metadata_augmentor=static_metadata_augmentor(refreshed),
+            )
         return merged, unresolved
 
     async def _commit_urls(
@@ -794,9 +850,17 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
         build_content: Callable[[str], Any],
         wait: bool,
         wait_timeout: float,
+        metadata_augmentor: Any = None,
+        metadata_refresher: Any = None,
     ) -> Source:
         correlation = _correlation_name()
         async with self._transport.operation_scope(operation_label) as lease:
+            if metadata_augmentor is not None:
+                prepared = await self._transport.prepare_metadata(
+                    metadata_augmentor,
+                    expected_epoch=lease.epoch,
+                )
+                metadata_augmentor = static_metadata_augmentor(prepared)
             try:
                 (registration,) = await self._register_tentative_sources(
                     notebook_id,
@@ -831,6 +895,8 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
                 notebook_id,
                 [(build_content(source_id), source_id)],
                 expected_epoch=lease.epoch,
+                metadata_augmentor=metadata_augmentor,
+                metadata_refresher=metadata_refresher,
             )
             proof = proofs.get(source_id)
             if proof is None:
@@ -1113,6 +1179,90 @@ class AndroidSourcesAPI(AndroidSourceTransferMixin, SourcesAPI):
         if requested_title is not None and source.title != requested_title:
             source = await self._best_effort_title(notebook_id, source, requested_title)
         return source
+
+    async def list_play_books(self) -> builtins.list[PlayBook]:
+        """List the account's Google Play Books library (#2292, #2302).
+
+        Calls the Android ``ListExpertIntelligenceContent`` RPC — the same
+        library the web backend serves — and returns **every** title, addable or
+        not. Inspect :attr:`~notebooklm.types.PlayBook.export_disabled` before
+        passing a ``content_id`` to :meth:`add_play_book`.
+        """
+        request = _write_proto().ListExpertIntelligenceContentRequest(
+            request_context=android_request_context(),
+            source_class=1,
+        )
+        response = await self._transport.unary(
+            LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD,
+            request,
+            replay_safe=True,
+            response_type=_write_proto().ListExpertIntelligenceContentResponse,
+        )
+        return [
+            decode_play_book_item(item, method_id=LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD)
+            for item in response.items
+        ]
+
+    async def add_play_book(
+        self,
+        notebook_id: str,
+        content_id: str,
+        *,
+        wait: bool = False,
+        wait_timeout: float = 120.0,
+    ) -> Source:
+        """Add a Google Play Book as a source over the Android backend (#2302).
+
+        Looks ``content_id`` up in :meth:`list_play_books` (which supplies the
+        title, description, cover, authors, and opaque ``field_type`` echoed back
+        in the add), refuses a non-exportable title with
+        :class:`~notebooklm.exceptions.PlayBookNotExportableError`, then commits
+        it via ``AddSources``. The commit carries the GMS Phenotype experiment
+        header (``x-goog-ext-202964622-bin``) minted headlessly by
+        :class:`~notebooklm._android.phenotype.PhenotypeTokenProvider`; without
+        it the server refuses the Expert-Intelligence content with ``INTERNAL``.
+        The created source ingests as :attr:`~notebooklm.types.SourceType.EXPERT_INTELLIGENCE`.
+
+        Args:
+            notebook_id: The notebook ID.
+            content_id: Play Books volume id (from a :class:`PlayBook`).
+            wait: If True, wait for the source to be READY before returning.
+            wait_timeout: Maximum seconds to wait if ``wait=True`` (default 120).
+
+        Raises:
+            SourceNotFoundError: ``content_id`` is not in the library.
+            PlayBookNotExportableError: the title cannot be exported.
+        """
+        books = await self.list_play_books()
+        book = next((b for b in books if b.content_id == content_id), None)
+        if book is None:
+            raise SourceNotFoundError(
+                content_id,
+                method_id=LIST_EXPERT_INTELLIGENCE_CONTENT_METHOD,
+            )
+        if book.export_disabled:
+            raise PlayBookNotExportableError(book.content_id, book.reason)
+
+        async def _augment(bearer: str) -> tuple[tuple[str, bytes], ...]:
+            return await self._phenotype.experiment_metadata(bearer)
+
+        async def _refresh(bearer: str) -> tuple[tuple[str, bytes], ...]:
+            return await self._phenotype.experiment_metadata(bearer, force=True)
+
+        return await self._add_registered_content(
+            notebook_id,
+            subject=book.title or content_id,
+            kind="Play Books",
+            operation_label="source.add_play_book",
+            build_content=lambda source_id: _write_proto().UserContent(
+                expert_intelligence_content=build_expert_intelligence_content(book),
+                tentative_source_id=_read_proto().SourceId(id=source_id),
+            ),
+            wait=wait,
+            wait_timeout=wait_timeout,
+            metadata_augmentor=_augment,
+            metadata_refresher=_refresh,
+        )
 
     async def add_drive_file(
         self,

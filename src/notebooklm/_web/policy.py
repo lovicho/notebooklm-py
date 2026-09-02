@@ -431,6 +431,17 @@ def register_default_policies(registry: IdempotencyRegistry) -> None:
         ),
     )
     registry.register(
+        RPCMethod.ADD_SOURCES_ASYNC,
+        IdempotencyPolicy.NON_IDEMPOTENT_NO_RETRY,
+        variant="play_book",
+        notes=(
+            "the Play Books add (sources.add_play_book) enqueues a new "
+            "ExpertIntelligenceContent source row with no client-token slot and "
+            "no post-failure probe, so a blind retry after a lost response would "
+            "add the book a second time (#2292)"
+        ),
+    )
+    registry.register(
         RPCMethod.APPEND_SOURCE,
         IdempotencyPolicy.NON_IDEMPOTENT_NO_RETRY,
         notes=(
@@ -731,6 +742,9 @@ def register_default_policies(registry: IdempotencyRegistry) -> None:
             "set notebook title/settings to caller-supplied values; replay leaves the same state"
         ),
         RPCMethod.GET_SOURCE: "read-only source content fetch; replay does not mutate source state",
+        RPCMethod.RETRIEVE_RELEVANT_CHUNKS: (
+            "read-only ranked source-passage retrieval; replay does not mutate source state"
+        ),
         RPCMethod.CHECK_SOURCE_FRESHNESS: (
             "read-only freshness check; replay does not start a refresh job"
         ),
@@ -778,6 +792,12 @@ def register_default_policies(registry: IdempotencyRegistry) -> None:
         RPCMethod.GET_CONVERSATION_TURNS: (
             "read-only conversation history fetch; replay does not mutate chat state"
         ),
+        RPCMethod.GET_CHAT_SESSION_STATUS: (
+            "read-only chat generation-state fetch; replay does not mutate chat state"
+        ),
+        RPCMethod.CANCEL_GENERATION: (
+            "chat generation cancel is idempotent; replay leaves the session stopped"
+        ),
         # Live method DeleteChatTurns: deletes the conversation's chat turns
         # (the web UI "Delete history" action), idempotent set-op.
         RPCMethod.DELETE_CONVERSATION: (
@@ -814,6 +834,9 @@ def register_default_policies(registry: IdempotencyRegistry) -> None:
             "set user settings to caller-supplied values; replay leaves the same state"
         ),
         RPCMethod.LIST_LABELS: "read-only label list; replay does not mutate label state",
+        RPCMethod.LIST_EXPERT_INTELLIGENCE_CONTENT: (
+            "read-only Play Books library list; replay does not mutate any state (#2292)"
+        ),
         RPCMethod.UPDATE_LABEL: (
             "default (rename / set-emoji) sets label fields to caller-supplied values; "
             "replay leaves the same state. The add_sources variant is classified "

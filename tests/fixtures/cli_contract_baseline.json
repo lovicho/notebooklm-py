@@ -119,10 +119,12 @@
     "source": [
       "add",
       "add-async",
+      "add-book",
       "add-drive",
       "add-drive-file",
       "add-research",
       "append",
+      "books",
       "clean",
       "copy",
       "delete",
@@ -133,6 +135,7 @@
       "list",
       "refresh",
       "rename",
+      "search",
       "stale",
       "wait"
     ]
@@ -2063,6 +2066,77 @@
         }
       ],
       "short_help": "Configure chat persona and response settings."
+    },
+    "copy": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "title",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Set the copied notebook as the current context.",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "switch_context",
+          "opts": [
+            "--use",
+            "-u"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Copy a notebook, including its sources and..."
     },
     "create": {
       "class": "Command",
@@ -8499,6 +8573,7 @@
         "collection",
         "completion",
         "configure",
+        "copy",
         "create",
         "delete",
         "doctor",
@@ -10202,10 +10277,12 @@
       "commands": [
         "add",
         "add-async",
+        "add-book",
         "add-drive",
         "add-drive-file",
         "add-research",
         "append",
+        "books",
         "clean",
         "copy",
         "delete",
@@ -10216,6 +10293,7 @@
         "list",
         "refresh",
         "rename",
+        "search",
         "stale",
         "wait"
       ],
@@ -10459,6 +10537,76 @@
         }
       ],
       "short_help": "Queue one or more URL sources without..."
+    },
+    "source add-book": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "content_id",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Wait for processing to finish",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "wait",
+          "opts": [
+            "--wait"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Add a Google Play Book as a source by its..."
     },
     "source add-drive": {
       "class": "Command",
@@ -10900,6 +11048,30 @@
         }
       ],
       "short_help": "Append a plain-text block to an existing..."
+    },
+    "source books": {
+      "class": "Command",
+      "params": [
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "List Google Play Books eligible to be..."
     },
     "source clean": {
       "class": "Command",
@@ -11675,6 +11847,98 @@
       ],
       "short_help": "Rename a source."
     },
+    "source search": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "query",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "envvar": null,
+          "has_custom_shell_complete": true,
+          "help": "Limit to specific source IDs",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": true,
+          "name": "source_ids",
+          "opts": [
+            "--source",
+            "-s"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Maximum number of globally ranked passages to return.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "limit",
+          "opts": [
+            "--limit"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "clamp": false,
+            "max": null,
+            "min": 1,
+            "name": "integer range"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Search indexed passages across notebook..."
+    },
     "source stale": {
       "class": "Command",
       "params": [
@@ -12102,6 +12366,7 @@
     "collection",
     "completion",
     "configure",
+    "copy",
     "create",
     "delete",
     "doctor",
@@ -12138,6 +12403,7 @@
     "notebook": [
       "list",
       "create",
+      "copy",
       "delete",
       "rename",
       "metadata",

@@ -47,6 +47,8 @@
 | `Rytqqe` | RETRY_ARTIFACT | Retry a failed Studio artifact in place | `_web/artifacts.py` |
 | `hPTbtc` | GET_LAST_CONVERSATION_ID | Get most recent conversation ID | `_web/chat.py` |
 | `khqZz` | GET_CONVERSATION_TURNS | Get Q&A turns for a conversation | `_web/chat.py` |
+| `oXwmh` | GET_CHAT_SESSION_STATUS | Read idle/generating state and token for a chat session | `_web/chat.py` |
+| `XgrPMd` | CANCEL_GENERATION | Stop active generation for a chat session | `_web/chat.py` |
 | `J7Gthc` | DELETE_CONVERSATION | Delete a conversation (web UI's "Delete history") | `_web/chat.py` |
 | `otmP3b` | SUGGEST_PROMPTS | Get AI-suggested prompts for a notebook | `_web/notebooks.py` |
 | `CYK0Xb` | CREATE_NOTE | Create a note (placeholder) | `_web/notes.py` |
@@ -76,6 +78,8 @@
 | `X1snv` | ADD_SOURCES_ASYNC | Queue URL sources without waiting for ingest (batch; per-source acks) | `_web/sources/transfers.py` |
 | `QsNTEd` | APPEND_SOURCE | Append a plain-text block to an existing source in place | `_web/sources/transfers.py` |
 | `R27wvc` | COPY_SOURCES | Copy sources into another notebook (original → copy mapping) | `_web/sources/transfers.py` |
+| `mVtEUb` | LIST_EXPERT_INTELLIGENCE_CONTENT | List the account's Google Play Books library — every title, with per-row exportability (Expert Intelligence; Android uses its native RPC counterpart) | `_web/sources/play_books.py` |
+| `ASU5Oe` | RETRIEVE_RELEVANT_CHUNKS | Search ranked passages across notebook sources, optionally filtered by source id | `_web/sources/search.py` |
 | `mKDdke` | COPY_ARTIFACTS | Copy Studio artifacts into another notebook (full new rows inline) | `_web/artifacts.py` |
 | `OcvKNc` | SUGGEST_NEXT_STEPS | Grounded follow-up questions (the chat `next_steps` block, standalone) | `_web/notebooks.py` |
 | `sqTeoe` | GET_CUSTOMIZATION_CHOICES | Studio "Customize" option tables (account-level) | `_web/artifacts.py` |
@@ -115,6 +119,7 @@ Internal integer codes returned by `GET_NOTEBOOK` / `LIST_SOURCES` and consumed 
 | 14 | `GOOGLE_SPREADSHEET` | Google Sheets source **and** Drive-hosted binaries (see overload note) |
 | 16 | `CSV` | CSV upload |
 | 17 | `EPUB` | EPUB upload (added in v0.4.0) |
+| 20 | `EXPERT_INTELLIGENCE` | Google Play Books source added via `sources.add_play_book` (#2292); carries `ExpertIntelligenceSourceMetadata` at `metadata[18]` |
 
 > Codes outside this map are surfaced as `SourceType.UNKNOWN` and emit `UnknownTypeWarning` on first occurrence so unmapped types don't crash callers.
 
@@ -185,11 +190,11 @@ or local convenience that has no stable web-control equivalent in the capture.
 |-----------------|------------------|-------|
 | `NotebooksAPI.list/create/get/rename/delete/remove_from_recent` | Partial UI coverage | Home create/card/action-menu selectors are covered. Rename/delete/remove-recent are represented by project action menus and RPC payloads; destructive menu items were not re-mutated in the live probe. |
 | `NotebooksAPI.get_summary/get_description/get_metadata/get_raw/get_share_url` | Library-only/read-derived | Summary content is visible in the chat panel, but these are read/format helpers rather than direct UI controls. |
-| `SourcesAPI.list/get/add_url/add_text/add_file/add_drive/delete/rename` | UI covered | Source cards, add-source modal tabs, upload/Drive entry points, source menus, and submit selectors are documented. |
+| `SourcesAPI.list/get/search/add_url/add_text/add_file/add_drive/delete/rename` | UI covered | Source cards, indexed passage search, add-source modal tabs, upload/Drive entry points, source menus, and submit selectors are documented. |
 | `SourcesAPI.get_guide/get_fulltext` | UI covered/read-derived | Opening a source exposes the source viewer, source guide toggle, title input, and source content; `get_fulltext()` is the programmatic extraction path. |
 | `SourcesAPI.wait_*`, `refresh`, `check_freshness` | Library-only/partial UI | Wait methods are polling helpers. Refresh/freshness RPCs are documented, but no stable refresh selector was captured in the current source-list/label-list state. |
 | `LabelsAPI.list/sources/generate/create/update/rename/set_emoji/add_sources/remove_sources/delete` | UI covered | Auto-label, Reorganize all sources, manual label creation, inline rename, emoji picker, delete, label panels, and source Move to label checkboxes are documented. |
-| `ChatAPI.ask/get_history/delete_conversation/configure/save_answer_as_note` | UI covered | Chat input/send, options/delete history, configure dialog, and `Save message to a note` buttons are documented. `get_conversation_id`, cache methods, and history parsing are backend/local conveniences. |
+| `ChatAPI.ask/get_history/session_status/cancel/delete_conversation/configure/save_answer_as_note` | UI covered | Chat input/send, live generation state/cancel, options/delete history, configure dialog, and `Save message to a note` buttons are documented. `get_conversation_id`, cache methods, and history parsing are backend/local conveniences. |
 | `ArtifactsAPI.generate_*`, `suggest_reports`, `list/get/get_prompt/delete/rename/share/export` | UI covered/partial | All live Studio generation tiles and option sets are documented. Artifact list/open/menu/view-prompt/share/delete selectors are covered; export/download/retry availability depends on artifact type/status. |
 | `ArtifactsAPI.download_*`, `wait_for_completion`, `poll_status`, `revise_slide`, `retry_failed` | Library-only/conditional UI | Downloads, polling, and slide revision are programmatic conveniences. Retry requires a failed artifact row; the RPC is documented but no failed-row retry selector was present in the probe. |
 | `NotesAPI.list/get/create/update/delete` | UI covered/partial | Add note, note row, note view close/title input, and note menu delete are documented. Rich body editing uses NotebookLM's internal editor; keep selectors conservative. |
@@ -701,6 +706,40 @@ await rpc_call(
 )
 ```
 
+### RPC: RETRIEVE_RELEVANT_CHUNKS (ASU5Oe)
+
+**Source:** `_web/sources/search.py::SourceSearchService.search()`
+
+**Purpose:** Search the indexed source corpus and return globally ranked source
+passages. An omitted or empty source filter searches the whole notebook.
+
+```python
+params = [
+    notebook_id,
+    query,
+    None,
+    [1],
+]
+
+# Optional source filter at position 4:
+params.append([[[source_id] for source_id in source_ids]])
+
+await rpc_call(
+    RPCMethod.RETRIEVE_RELEVANT_CHUNKS,
+    params,
+    source_path=f"/notebook/{notebook_id}",
+    allow_null=True,
+    raise_on_null_status=True,
+)
+```
+
+The live response is `[[[source_id, [chunk, ...]], ...]]]`, where each chunk is
+`[[[[text_part, ...]]], rank, [[None, start, end], ...]]`. The decoder joins
+text parts and returns `RelevantChunk` values. This rpcid is registered by a
+lazy feature module, so the eager-homepage registry monitor reports it as
+`LAZY-MODULE`; the direct read-only RPC health probe remains its rotation
+canary.
+
 ---
 
 ## Source Labels
@@ -1077,6 +1116,41 @@ params = [
 **Response turn structure:**
 - `turn[2] == 1`: User question — text is at `turn[3]`
 - `turn[2] == 2`: AI answer — text is at `turn[4][0][0]`
+
+---
+
+### RPC: GET_CHAT_SESSION_STATUS (oXwmh)
+
+**Source:** shared `_chat.py::ChatAPI.session_status()` selection and
+`_web/chat.py::WebChatAPI._get_session_status()` send/decode.
+
+```python
+params = [
+    None,  # 0: reserved
+    conversation_id,  # 1: chat session id
+]
+```
+
+**Response:** `[None, 1]` when idle; `[generation_token, 2]` while generating.
+Unknown status codes or a missing token in state 2 fail closed as wire drift.
+
+---
+
+### RPC: CANCEL_GENERATION (XgrPMd)
+
+**Source:** shared `_chat.py::ChatAPI.cancel()` selection and
+`_web/chat.py::WebChatAPI._cancel_generation()` send.
+
+```python
+params = [
+    None,  # 0: reserved
+    conversation_id,  # 1: chat session id
+]
+```
+
+**Response:** empty `[]`. Generation stops, but an already-open Web streaming
+HTTP response does not close; its owner must abandon the local stream after
+this RPC succeeds.
 
 ---
 
@@ -3413,4 +3487,3 @@ params = [<context>, notebook_id]   # when a notebook id is supplied
 `[report_type, description, directive]`. The audio and video families (tags 1–2)
 are live-only — the APK schema declares only slides (3) and reports (4).
 Decoded via `_web/rows/customization.py`.
-

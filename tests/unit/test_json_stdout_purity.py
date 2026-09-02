@@ -47,7 +47,9 @@ from notebooklm.types import (
     NextStepSuggestion,
     Note,
     Notebook,
+    PlayBook,
     PromptSuggestion,
+    RelevantChunk,
     ReportPreset,
     ResearchSource,
     ResearchStart,
@@ -407,9 +409,47 @@ def _customize_source_fulltext(client: MagicMock) -> None:
     )
 
 
+def _customize_source_search(client: MagicMock) -> None:
+    client.sources.search = AsyncMock(
+        return_value=[
+            RelevantChunk(
+                source_id="src123def456ghi789jkl",
+                text="Ranked passage",
+                rank=1,
+                start=10,
+                end=24,
+            )
+        ]
+    )
+
+
 def _customize_source_guide(client: MagicMock) -> None:
     client.sources.get_guide = AsyncMock(
         return_value=SourceGuide(summary="a summary", keywords=["k1", "k2"])
+    )
+
+
+def _customize_source_books(client: MagicMock) -> None:
+    client.sources.list_play_books = AsyncMock(
+        return_value=[
+            PlayBook(
+                content_id="QhsZEAAAQBAJ",
+                title="The Art of War",
+                authors=("Sun Tzu",),
+                description_html="<p>…</p>",
+                cover_url="https://cover",
+                export_disabled=False,
+                reason=None,
+                field_type=4.6,
+                updated_at=None,
+            )
+        ]
+    )
+
+
+def _customize_source_add_book(client: MagicMock) -> None:
+    client.sources.add_play_book = AsyncMock(
+        return_value=Source(id="src_book", title="The Art of War", _type_code=20)
     )
 
 
@@ -508,6 +548,17 @@ def _customize_notebook_create(client: MagicMock) -> None:
     )
 
 
+def _customize_notebook_copy(client: MagicMock) -> None:
+    client.notebooks.copy = AsyncMock(
+        return_value=Notebook(
+            id="copyxyz123abc456def789",
+            title="My Notebook Copy",
+            created_at=datetime(2024, 1, 2),
+            is_owner=True,
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Filesystem-driven --json commands (doctor, profile list).
 # These cases bypass NotebookLMClient entirely and read ~/.notebooklm/...,
@@ -575,6 +626,11 @@ JSON_COMMANDS: list[tuple[str, list[str], object]] = [
     # source group
     ("source_list", ["source", "list", "-n", "abc123def456ghi789jkl", "--json"], None),
     (
+        "source_search",
+        ["source", "search", "ranked passage", "-n", "abc123def456ghi789jkl", "--json"],
+        _customize_source_search,
+    ),
+    (
         "source_fulltext",
         [
             "source",
@@ -610,6 +666,19 @@ JSON_COMMANDS: list[tuple[str, list[str], object]] = [
             "--json",
         ],
         _customize_source_add_research,
+    ),
+    ("source_books", ["source", "books", "--json"], _customize_source_books),
+    (
+        "source_add_book",
+        [
+            "source",
+            "add-book",
+            "QhsZEAAAQBAJ",
+            "-n",
+            "abc123def456ghi789jkl",
+            "--json",
+        ],
+        _customize_source_add_book,
     ),
     # artifact group
     ("artifact_list", ["artifact", "list", "-n", "abc123def456ghi789jkl", "--json"], None),
@@ -841,7 +910,7 @@ JSON_COMMANDS: list[tuple[str, list[str], object]] = [
         ["artifact", "choices", "-n", "abc123def456ghi789jkl", "--json"],
         _customize_artifact_choices,
     ),
-    # doctor / profile / notebook-create coverage (meta-audit G9 + I7 + I9):
+    # doctor / profile / notebook create/copy coverage (meta-audit G9 + I7 + I9):
     # `doctor` and `profile list` read NOTEBOOKLM_HOME directly and don't
     # build a NotebookLMClient — the parametrized test dispatches on these
     # case_ids and uses the ``_setup_fs_<case>`` helpers above instead of
@@ -850,6 +919,11 @@ JSON_COMMANDS: list[tuple[str, list[str], object]] = [
     ("doctor", ["doctor", "--json"], None),
     ("profile_list", ["profile", "list", "--json"], None),
     ("notebook_create", ["create", "My Notebook", "--json"], _customize_notebook_create),
+    (
+        "notebook_copy",
+        ["copy", "My Notebook Copy", "-n", "abc123def456ghi789jkl", "--json"],
+        _customize_notebook_copy,
+    ),
 ]
 
 
@@ -1178,6 +1252,8 @@ JSON_ERROR_WAIVED: dict[tuple[str, ...], str] = {
     ("source", "add"): _MUTATION_RATIONALE_ERROR,
     ("source", "add-drive"): _MUTATION_RATIONALE_ERROR,
     ("source", "add-drive-file"): _MUTATION_RATIONALE_ERROR,
+    ("source", "add-book"): _MUTATION_RATIONALE_ERROR,
+    ("source", "books"): _INTROSPECTION_RATIONALE,
     ("source", "clean"): _MUTATION_RATIONALE_ERROR,
     ("source", "delete"): _MUTATION_RATIONALE_ERROR,
     ("source", "delete-by-title"): _MUTATION_RATIONALE_ERROR,

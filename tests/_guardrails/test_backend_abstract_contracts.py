@@ -108,6 +108,7 @@ BASE_ABSTRACT_CONTRACTS: tuple[_AbstractContract, ...] = (
                 "add_drive",
                 "add_drive_file",
                 "add_file",
+                "add_play_book",
                 "add_text",
                 "add_url",
                 "add_urls_async",
@@ -118,8 +119,10 @@ BASE_ABSTRACT_CONTRACTS: tuple[_AbstractContract, ...] = (
                 "get_fulltext",
                 "get_guide",
                 "list",
+                "list_play_books",
                 "refresh",
                 "rename",
+                "search",
             }
         ),
         wire_hooks=frozenset(),
@@ -132,6 +135,8 @@ BASE_ABSTRACT_CONTRACTS: tuple[_AbstractContract, ...] = (
         abstract_methods=frozenset(
             {
                 "_list_turn_roles",
+                "_cancel_generation",
+                "_get_session_status",
                 "_send_delete_conversation",
                 "_send_note",
                 "_stream_answer",
@@ -142,7 +147,15 @@ BASE_ABSTRACT_CONTRACTS: tuple[_AbstractContract, ...] = (
                 "get_settings",
             }
         ),
-        wire_hooks=frozenset({"_send_delete_conversation", "_send_note", "_stream_answer"}),
+        wire_hooks=frozenset(
+            {
+                "_cancel_generation",
+                "_get_session_status",
+                "_send_delete_conversation",
+                "_send_note",
+                "_stream_answer",
+            }
+        ),
     ),
     _AbstractContract(
         module="notebooklm._collections",
@@ -249,7 +262,7 @@ BASE_ABSTRACT_CONTRACTS: tuple[_AbstractContract, ...] = (
 )
 
 _WIRE_HOOK_PREFIXES = ("_send_",)
-_WIRE_HOOK_NAMES = frozenset({"_stream_answer"})
+_WIRE_HOOK_NAMES = frozenset({"_cancel_generation", "_get_session_status", "_stream_answer"})
 
 _ARTIFACT_DOCSTRING_SHA256 = {
     ("ArtifactsAPI", "class"): "a46bd93059bf56db9586a741a0df1aca8b49a30cf74007a74e27997166ebb482",

@@ -214,6 +214,52 @@ MAPPINGS: tuple[Mapping, ...] = (
         "GoogleDriveSourceMetadata",
         "mimeType",
     ),
+    # ---- Source row: Expert Intelligence / Play Books provenance (#2292) ---
+    Mapping(
+        "sources",
+        "SourceRow",
+        "_META_EXPERT_INTELLIGENCE_POS",
+        "SourceMetadata",
+        "expertIntelligenceSourceMetadata",
+    ),
+    Mapping(
+        "sources",
+        "SourceRow",
+        "_EI_CONTENT_ID_POS",
+        "ExpertIntelligenceSourceMetadata",
+        "contentId",
+    ),
+    Mapping("sources", "SourceRow", "_EI_TITLE_POS", "ExpertIntelligenceSourceMetadata", "title"),
+    Mapping(
+        "sources", "SourceRow", "_EI_AUTHORS_POS", "ExpertIntelligenceSourceMetadata", "authors"
+    ),
+    Mapping(
+        "sources",
+        "SourceRow",
+        "_EI_THUMBNAIL_POS",
+        "ExpertIntelligenceSourceMetadata",
+        "thumbnailImageUrl",
+    ),
+    Mapping(
+        "sources",
+        "SourceRow",
+        "_EI_DESCRIPTION_POS",
+        "ExpertIntelligenceSourceMetadata",
+        "description",
+    ),
+    Mapping(
+        "sources",
+        "SourceRow",
+        "_EI_FIELD_TYPE_POS",
+        "ExpertIntelligenceSourceMetadata",
+        tag=7,
+        note=(
+            "the mobile BuilderInfo could not recover this field's name (it emits "
+            "the placeholder 'fieldType'), so the tag is pinned rather than the "
+            "name. Web index 6 == proto tag 7; live web capture puts the opaque "
+            "double here (#2292). Read by SourceRow.expert_intelligence.field_type."
+        ),
+    ),
     # ---- Artifact row: Artifact -------------------------------------------
     Mapping("artifacts", "ArtifactRow", "_ID_POS", "Artifact", "artifactId"),
     Mapping("artifacts", "ArtifactRow", "_TITLE_POS", "Artifact", "title"),
@@ -926,6 +972,16 @@ UNMAPPED: tuple[Unmapped, ...] = (
     Unmapped(
         "sources",
         "SourceRow",
+        "_EI_PROVIDER_POS",
+        "ExpertIntelligenceSourceMetadata declares no tag 2 in the recovered "
+        "mobile schema (contentId=1, title=3, …), but the web wire carries the "
+        "ContentProvider enum here (index 1 == tag 2): live web capture puts `1` "
+        "(GOOGLE_PLAY_BOOKS) at this slot on every ingested Play Book (#2292). "
+        "Read by SourceRow.expert_intelligence.provider.",
+    ),
+    Unmapped(
+        "sources",
+        "SourceRow",
         "_ID_ENVELOPE_PLAIN_POS",
         "SourceId.id (tag 1) — the only field the message has",
     ),
@@ -1206,6 +1262,86 @@ UNREAD_SHARE_STATUS_SLOTS: dict[int, str] = {
 
 
 PINNED: tuple[Pinned, ...] = (
+    Pinned(
+        "chunks",
+        "RelevantChunkSourceRow",
+        "_SOURCE_ID_POS",
+        0,
+        "SourceRelevantChunks tag 1 — source id string",
+        "docs/android/source-search-evidence.md#wire-layout: Web and Android live probes",
+    ),
+    Pinned(
+        "chunks",
+        "RelevantChunkSourceRow",
+        "_CHUNKS_POS",
+        1,
+        "SourceRelevantChunks tag 2 — repeated relevant chunks",
+        "docs/android/source-search-evidence.md#wire-layout: Web and Android live probes",
+    ),
+    Pinned(
+        "chunks",
+        "RelevantChunkRow",
+        "_CONTENT_POS",
+        0,
+        "RelevantChunk tag 1 — content wrapper",
+        "docs/android/source-search-evidence.md#wire-layout: Web and Android live probes",
+    ),
+    Pinned(
+        "chunks",
+        "RelevantChunkRow",
+        "_RANK_POS",
+        1,
+        "RelevantChunk tag 2 — global relevance rank",
+        "docs/android/source-search-evidence.md#wire-layout: Web and Android live probes",
+    ),
+    Pinned(
+        "chunks",
+        "RelevantChunkRow",
+        "_SPANS_POS",
+        2,
+        "RelevantChunk tag 3 — repeated source-relative spans",
+        "docs/android/source-search-evidence.md#wire-layout: Web and Android live probes",
+    ),
+    Pinned(
+        "chunks",
+        "RelevantChunkRow",
+        "_TEXT_POS",
+        0,
+        "RelevantChunkContent tag 1 — text wrapper",
+        "docs/android/source-search-evidence.md#wire-layout: Web and Android live probes",
+    ),
+    Pinned(
+        "chunks",
+        "RelevantChunkRow",
+        "_PARTS_POS",
+        0,
+        "RelevantChunkText tag 1 — repeated text parts",
+        "docs/android/source-search-evidence.md#wire-layout: Web and Android live probes",
+    ),
+    Pinned(
+        "chunks",
+        "RelevantChunkRow",
+        "_FIRST_SPAN_POS",
+        0,
+        "first element of the RelevantChunk.spans repeated field",
+        "docs/android/source-search-evidence.md#wire-layout: Web and Android live probes",
+    ),
+    Pinned(
+        "chunks",
+        "RelevantChunkRow",
+        "_SPAN_START_POS",
+        1,
+        "RelevantChunkSpan tag 2 — source-relative start offset",
+        "docs/android/source-search-evidence.md#wire-layout: Web and Android live probes",
+    ),
+    Pinned(
+        "chunks",
+        "RelevantChunkRow",
+        "_SPAN_END_POS",
+        2,
+        "RelevantChunkSpan tag 3 — source-relative end offset",
+        "docs/android/source-search-evidence.md#wire-layout: Web and Android live probes",
+    ),
     Pinned(
         "sources",
         "SourceRow",

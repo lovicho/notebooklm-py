@@ -32,9 +32,9 @@ consolidated document rather than encoded in filenames.
 |---|---|
 | [`endpoints.md`](endpoints.md) | gRPC method surface and mobile ⇄ Web cross-reference |
 | [`proto-evidence-ledger.md`](proto-evidence-ledger.md) | exact/local compile closure, replay policy, hashes, and admission decisions |
-| [`schema.proto`](schema.proto) | generated 295-message / 767-field Dart-AOT recovery parsed by CI |
-| [`enums.txt`](enums.txt) | generated 77-enum integer inventory parsed by CI |
-| [`grpc-service-signature-inferences.json`](grpc-service-signature-inferences.json) | ten Web-derived signatures with conventional request/response type names |
+| [`schema.proto`](schema.proto) | generated 323-message / 868-field Dart-AOT recovery parsed by CI |
+| [`enums.txt`](enums.txt) | generated 104-block (94 enum names) integer inventory parsed by CI |
+| [`grpc-service-signature-inferences.json`](grpc-service-signature-inferences.json) | seventeen Web-derived signatures with conventional request/response type names |
 | [`grpc-service-signature-exceptions.json`](grpc-service-signature-exceptions.json) | empty implemented-path exception manifest |
 | [`grpc-runtime-parser-overrides.json`](grpc-runtime-parser-overrides.json) | exact paths intentionally decoded through local live-field overlays |
 
@@ -49,8 +49,10 @@ consolidated document rather than encoded in filenames.
 | [`file-transfer-evidence.md`](file-transfer-evidence.md) | Scotty upload and artifact-download protocol with interception details |
 | [`deep-research-evidence.md`](deep-research-evidence.md) | Deep Research wire contract, lifecycle, reproducer, and interception |
 | [`copy-append-suggestion-evidence.md`](copy-append-suggestion-evidence.md) | live Android gRPC evidence for the #2283 family: `AddSourcesAsync`, `AppendSource`, `CopySourcesAsync`, `CopyArtifactsAsync`, `NextStepSuggestions`, `GetArtifactCustomizationChoices` |
+| [`source-search-evidence.md`](source-search-evidence.md) | live Web and Android wire evidence for `RetrieveRelevantChunks` / `sources.search` |
 | [`auth-research.md`](auth-research.md) | Android OAuth identity, scopes, and bearer validation |
 | [`blutter-grpc-signature-evidence.md`](blutter-grpc-signature-evidence.md) | exact generated-client bindings for formerly unresolved response FQNs |
+| [`chat-session-control-evidence.md`](chat-session-control-evidence.md) | live Web/Android session-status and cancellation semantics for #2303 |
 
 ### Capture and tooling
 
@@ -65,22 +67,57 @@ They are committed because CI parses them; regenerate rather than hand-edit.
 The generator is [`scripts/parse_pbschema.py`](../../scripts/parse_pbschema.py).
 
 ```bash
-uv run python scripts/parse_pbschema.py /path/to/blutter/out/full/asm \
+uv run python scripts/parse_pbschema.py /path/to/blutter/out/<build>/asm \
   > docs/android/schema.proto
+uv run python scripts/parse_pbenums.py /path/to/blutter/out/<build> \
+  > docs/android/enums.txt
 ```
 
-The default package-directory selectors preserve the complete 54-file historical evidence scope.
-The generator reports `295 messages, 767 fields` and resolves package identity through the sibling
-`objs.txt`; an unresolved package remains explicit rather than being inferred from its directory.
+The default package-directory selectors preserve the complete historical evidence scope (66 files
+in the current dump). The schema generator reports `323 messages, 868 fields` and resolves package
+identity through the sibling `objs.txt`; an unresolved package remains explicit rather than being
+inferred from its directory. In particular `FunctionCall`, `FunctionResponse`, `TailwindStruct`,
+and `TailwindValue` sit in Dart libraries under an `orchestration.v1.agency` directory but are
+registered with the `google.internal.labs.tailwind.orchestration.v1` `PackageName` object, and no
+`…agency` package object exists in either dump; the schema records the registered package. Nested
+messages keep the dotted name handed to `BuilderInfo` in their `// Protobuf FQN:` line
+(`…TailwindStruct.TailwindStructEntry`) while the `message` identifier stays the Dart class name.
+
+The enum generator merges the object pool with the object store and emits **one block per
+(Dart library, enum class)**: ten class names (`ArtifactType`, `DiscoveryMode`,
+`OriginalSourceContentType`, `UserAction`, …) are declared by two libraries with different
+integers, and a class-name-only merge would let one silently shadow the other. Each header names
+its `[library …]`; `[objs adds …]` lists the integers that only the object store proved,
+`[objs-ONLY]` marks an enum with no pool object at all, and `[aliases …]` would flag an integer
+carrying two names inside one enum (none today). The guardrail loader keeps only the wire-library
+blocks for a shared name and raises if two of those disagree.
+
+### Current regeneration identity
+
+Both artifacts were regenerated from this build (verified from the binary, not assumed):
+
+| Item | Value |
+|---|---|
+| App | Gemini Notebook (NotebookLM) `1.55.10.971450265` (`versionCode=153888`), posted 2026-08-29 |
+| AOT library | `lib/arm64-v8a/libNotebookLM_prod_android_library_flutter_artifacts.so` |
+| AOT library SHA-256 | `77bff7507e393c092b78ff1756bb3d726881050b22728dcc8c46cf0fecd7cda7` |
+| Dart SDK | `3.14.0-166.0.dev` (dev channel), snapshot hash `8c325a9e3a1c32ffd39325f735c49133` |
+| Regenerated | 2026-09-01 |
+
+The `1.46.7` snapshot (`082d75e3…`, Dart `3.13.0-256.0.dev`) remains the basis for the dated
+capture reports, the version-scoped method manifest, and
+[`blutter-grpc-signature-evidence.md`](blutter-grpc-signature-evidence.md). The checked-in
+[`blutter-dart3.13.patch`](blutter-dart3.13.patch) targets Dart 3.13; the Dart 3.14 build used for
+this regeneration is not yet captured as a patch.
 
 The reduced compile inputs used by the internal Android adapters live under
 `src/notebooklm/_android/proto_src/`. Regenerate their checked-in Python modules and the full
 descriptor fixture with `python scripts/regenerate_android_protos.py --write`; use `--check` in CI.
-The cumulative `orchestration_service.proto` owns the 47-method orchestration service;
+The cumulative `orchestration_service.proto` owns the 57-method orchestration service;
 `sharing.proto` owns the separately proven two-method exact sharing service, and individual
-orchestration message overlays remain service-free. Ten orchestration signatures are explicitly
+orchestration message overlays remain service-free. Seventeen orchestration signatures are explicitly
 marked as web-derived conventional-name inferences; all other generated signatures are exact.
-The 49 generated methods exhaustively equal the 49 implemented adapter paths, and the signature
+The 59 generated methods exhaustively equal the 59 implemented adapter paths, and the signature
 exception manifest is empty. Generated descriptors, adapter paths, inference provenance, and the
 hash-pinned external method manifest are checked in both
 directions, so a locally repeated claim cannot admit a normalized or unresolved response type.
@@ -143,7 +180,7 @@ deletion returns `None`. The Web soft-delete tombstone is a storage leak rather 
 
 **`fieldType` in `schema.proto` is a parse failure, not a field name.** The
 extractor emits that placeholder where it could not recover a real name — 11 of
-767 fields. Do not treat it as real.
+868 fields. Do not treat it as real.
 
 **Several messages appear twice with *different* tags.** One copy is the wire
 schema (`…orchestration.v1`, `…tailwind.v1`), the other is the app's local
@@ -151,7 +188,8 @@ persistence schema (`…mobile.app.protos.persistence`). Always scope a lookup t
 the right package; the guardrail refuses ambiguous matches rather than guessing.
 
 **Use the merged enum dump, not the object pool alone.** The snapshot object pool
-yields 74 enums / 273 values; merging it with the object store yields 77 / ~1900.
+inlines objects for 102 of the 104 (library, class) blocks and only a fraction of their members;
+merging it with the object store yields the full 104 blocks / 94 class names / 2180 values.
 Auditing against the pool alone manufactures false "we invented this value"
 findings and hides real members — `ARTIFACT_PENDING_REVIEW` was missed exactly
 that way.

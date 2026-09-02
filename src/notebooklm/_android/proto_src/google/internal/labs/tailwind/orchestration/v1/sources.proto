@@ -3,6 +3,7 @@ syntax = "proto3";
 package google.internal.labs.tailwind.orchestration.v1;
 
 import "google/internal/labs/tailwind/orchestration/v1/read.proto";
+import "google/protobuf/timestamp.proto";
 import "labs/language/tailwind/common/protos/metadata.proto";
 import "labs/language/tailwind/common/protos/provenance.proto";
 
@@ -93,6 +94,44 @@ message UserContent {
   TextContentType text_content_type = 4; // evidence: docs/android/deep-research-evidence.md
   VideoContent video_content = 8;
   SourceId tentative_source_id = 9; // evidence: docs/android/proto-evidence-ledger.md#source-field-ledger
+  ExpertIntelligenceContent expert_intelligence_content = 16; // evidence: 1.55.10 Play Books capture (#2302)
+}
+
+// Google Play Books ("Expert Intelligence") add content. Field types are
+// live-captured: provider and field_type are load-bearing (field_type is a
+// double on the wire, wire-type 1). See docs/android/schema.proto.
+message ExpertIntelligenceContent {
+  int32 provider = 1;
+  string content_id = 2;
+  string title = 3;
+  string description = 4;
+  string thumbnail_image_url = 5;
+  double field_type = 6;
+  repeated string authors = 7;
+}
+
+// One title from ListExpertIntelligenceContent. Field numbers are live-captured
+// (#2302); export_reason (7) is absent when the title is exportable.
+message ExpertIntelligenceContentItem {
+  string content_id = 1;
+  int32 provider = 2;
+  string title = 3;
+  string description = 4;
+  string thumbnail_image_url = 5;
+  bool export_disabled = 6;
+  int32 export_reason = 7;
+  repeated string authors = 8;
+  double field_type = 9;
+  google.protobuf.Timestamp updated_timestamp = 10;
+}
+
+message ListExpertIntelligenceContentRequest {
+  .labs.language.tailwind.common.protos.RequestContext request_context = 1;
+  int32 source_class = 2; // constant 1 in captures
+}
+
+message ListExpertIntelligenceContentResponse {
+  repeated ExpertIntelligenceContentItem items = 1;
 }
 
 message AddSourcesRequest {
@@ -180,6 +219,53 @@ message UploadFileRequest {
   .labs.language.tailwind.common.protos.RequestContext request_context = 4; // evidence: docs/android/file-transfer-evidence.md
   string source_id = 5; // evidence: docs/android/file-transfer-evidence.md
   .labs.language.tailwind.common.protos.Provenance provenance = 6; // evidence: docs/android/file-transfer-evidence.md
+}
+
+// RetrieveRelevantChunks is absent from the app's eager generated closure but
+// is served by both front doors. The request and response tags below were
+// cross-checked against a successful Web call and live Android bearer calls on
+// 2026-09-01 (docs/android/source-search-evidence.md#wire-layout; #2283).
+message RetrieveRelevantChunksOptions {
+  int32 mode = 1;
+}
+
+message SourceIdFilter {
+  repeated SourceId source_ids = 1;
+}
+
+message RetrieveRelevantChunksRequest {
+  string project_id = 1;
+  string query = 2;
+  RetrieveRelevantChunksOptions options = 4;
+  SourceIdFilter source_filter = 5;
+}
+
+message RelevantChunkText {
+  repeated string parts = 1;
+}
+
+message RelevantChunkContent {
+  RelevantChunkText text = 1;
+}
+
+message RelevantChunkSpan {
+  int32 start = 2;
+  int32 end = 3;
+}
+
+message RelevantChunk {
+  RelevantChunkContent content = 1;
+  int32 rank = 2;
+  repeated RelevantChunkSpan spans = 3;
+}
+
+message SourceRelevantChunks {
+  string source_id = 1;
+  repeated RelevantChunk chunks = 2;
+}
+
+message RetrieveRelevantChunksResponse {
+  repeated SourceRelevantChunks source_chunks = 1;
 }
 
 // ---------------------------------------------------------------------------

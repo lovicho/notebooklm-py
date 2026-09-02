@@ -41,6 +41,7 @@ def test_source_generated_package_overlay_is_complete_and_service_free() -> None
     assert sources_pb2.DESCRIPTOR.package == ORCHESTRATION_PACKAGE
     assert [dependency.name for dependency in sources_pb2.DESCRIPTOR.dependencies] == [
         "google/internal/labs/tailwind/orchestration/v1/read.proto",
+        "google/protobuf/timestamp.proto",
         "labs/language/tailwind/common/protos/metadata.proto",
         "labs/language/tailwind/common/protos/provenance.proto",
     ]
@@ -48,6 +49,10 @@ def test_source_generated_package_overlay_is_complete_and_service_free() -> None
     assert set(sources_pb2.DESCRIPTOR.message_types_by_name) == {
         "AddSourcesRequest",
         "AddSourcesResponse",
+        "ExpertIntelligenceContent",
+        "ExpertIntelligenceContentItem",
+        "ListExpertIntelligenceContentRequest",
+        "ListExpertIntelligenceContentResponse",
         "AddTentativeSourcesRequest",
         "AddTentativeSourcesResponse",
         "CheckSourceFreshnessRequest",
@@ -66,6 +71,15 @@ def test_source_generated_package_overlay_is_complete_and_service_free() -> None
         "PlainTextSourceContent",
         "RefreshSourceRequest",
         "RefreshSourceResponse",
+        "RelevantChunk",
+        "RelevantChunkContent",
+        "RelevantChunkSpan",
+        "RelevantChunkText",
+        "RetrieveRelevantChunksOptions",
+        "RetrieveRelevantChunksRequest",
+        "RetrieveRelevantChunksResponse",
+        "SourceIdFilter",
+        "SourceRelevantChunks",
         "ChangeTitle",
         "Snippet",
         "SourceMutation",
@@ -139,6 +153,55 @@ def test_source_generated_package_overlay_is_complete_and_service_free() -> None
             FieldDescriptor.TYPE_MESSAGE,
             f"{ORCHESTRATION_PACKAGE}.SourceId",
         ),
+        "expert_intelligence_content": (
+            16,
+            False,
+            FieldDescriptor.TYPE_MESSAGE,
+            f"{ORCHESTRATION_PACKAGE}.ExpertIntelligenceContent",
+        ),
+    }
+    assert _shape(sources_pb2.ExpertIntelligenceContent) == {
+        "provider": (1, False, FieldDescriptor.TYPE_INT32, None),
+        "content_id": (2, False, FieldDescriptor.TYPE_STRING, None),
+        "title": (3, False, FieldDescriptor.TYPE_STRING, None),
+        "description": (4, False, FieldDescriptor.TYPE_STRING, None),
+        "thumbnail_image_url": (5, False, FieldDescriptor.TYPE_STRING, None),
+        "field_type": (6, False, FieldDescriptor.TYPE_DOUBLE, None),
+        "authors": (7, True, FieldDescriptor.TYPE_STRING, None),
+    }
+    assert _shape(sources_pb2.ExpertIntelligenceContentItem) == {
+        "content_id": (1, False, FieldDescriptor.TYPE_STRING, None),
+        "provider": (2, False, FieldDescriptor.TYPE_INT32, None),
+        "title": (3, False, FieldDescriptor.TYPE_STRING, None),
+        "description": (4, False, FieldDescriptor.TYPE_STRING, None),
+        "thumbnail_image_url": (5, False, FieldDescriptor.TYPE_STRING, None),
+        "export_disabled": (6, False, FieldDescriptor.TYPE_BOOL, None),
+        "export_reason": (7, False, FieldDescriptor.TYPE_INT32, None),
+        "authors": (8, True, FieldDescriptor.TYPE_STRING, None),
+        "field_type": (9, False, FieldDescriptor.TYPE_DOUBLE, None),
+        "updated_timestamp": (
+            10,
+            False,
+            FieldDescriptor.TYPE_MESSAGE,
+            "google.protobuf.Timestamp",
+        ),
+    }
+    assert _shape(sources_pb2.ListExpertIntelligenceContentRequest) == {
+        "request_context": (
+            1,
+            False,
+            FieldDescriptor.TYPE_MESSAGE,
+            f"{COMMON_PACKAGE}.RequestContext",
+        ),
+        "source_class": (2, False, FieldDescriptor.TYPE_INT32, None),
+    }
+    assert _shape(sources_pb2.ListExpertIntelligenceContentResponse) == {
+        "items": (
+            1,
+            True,
+            FieldDescriptor.TYPE_MESSAGE,
+            f"{ORCHESTRATION_PACKAGE}.ExpertIntelligenceContentItem",
+        ),
     }
     assert _shape(sources_pb2.AddSourcesRequest) == {
         "user_content": (
@@ -191,6 +254,57 @@ def test_source_generated_package_overlay_is_complete_and_service_free() -> None
             FieldDescriptor.TYPE_MESSAGE,
             f"{COMMON_PACKAGE}.Provenance",
         ),
+    }
+
+
+def test_retrieve_relevant_chunks_shapes_are_live_pinned() -> None:
+    """#2283: the Web layout and native Android reply agree field-for-field."""
+    message = FieldDescriptor.TYPE_MESSAGE
+    string = FieldDescriptor.TYPE_STRING
+    integer = FieldDescriptor.TYPE_INT32
+    assert _shape(sources_pb2.RetrieveRelevantChunksOptions) == {
+        "mode": (1, False, integer, None),
+    }
+    assert _shape(sources_pb2.SourceIdFilter) == {
+        "source_ids": (1, True, message, f"{ORCHESTRATION_PACKAGE}.SourceId"),
+    }
+    assert _shape(sources_pb2.RetrieveRelevantChunksRequest) == {
+        "project_id": (1, False, string, None),
+        "query": (2, False, string, None),
+        "options": (
+            4,
+            False,
+            message,
+            f"{ORCHESTRATION_PACKAGE}.RetrieveRelevantChunksOptions",
+        ),
+        "source_filter": (
+            5,
+            False,
+            message,
+            f"{ORCHESTRATION_PACKAGE}.SourceIdFilter",
+        ),
+    }
+    assert _shape(sources_pb2.RelevantChunkText) == {
+        "parts": (1, True, string, None),
+    }
+    assert _shape(sources_pb2.RelevantChunkContent) == {
+        "text": (1, False, message, f"{ORCHESTRATION_PACKAGE}.RelevantChunkText"),
+    }
+    assert _shape(sources_pb2.RelevantChunkSpan) == {
+        "start": (2, False, integer, None),
+        "end": (3, False, integer, None),
+    }
+    assert _shape(sources_pb2.RelevantChunk) == {
+        "content": (1, False, message, f"{ORCHESTRATION_PACKAGE}.RelevantChunkContent"),
+        "rank": (2, False, integer, None),
+        "spans": (3, True, message, f"{ORCHESTRATION_PACKAGE}.RelevantChunkSpan"),
+    }
+    assert _shape(sources_pb2.SourceRelevantChunks) == {
+        "source_id": (1, False, string, None),
+        "chunks": (2, True, message, f"{ORCHESTRATION_PACKAGE}.RelevantChunk"),
+    }
+    assert _shape(sources_pb2.RetrieveRelevantChunksResponse) == {
+        "source_chunks": (1, True, message, f"{ORCHESTRATION_PACKAGE}.SourceRelevantChunks"),
     }
 
 

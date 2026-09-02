@@ -209,6 +209,8 @@ def test_android_selected_public_callable_inventory_is_exact() -> None:
             "add_drive",
             "add_drive_file",
             "add_file",
+            "add_play_book",
+            "list_play_books",
             "add_text",
             "add_url",
             "add_urls_async",
@@ -223,6 +225,7 @@ def test_android_selected_public_callable_inventory_is_exact() -> None:
             "list",
             "refresh",
             "rename",
+            "search",
             "wait_all_until_ready",
             "wait_for_sources",
             "wait_until_ready",
@@ -277,6 +280,7 @@ def test_android_selected_public_callable_inventory_is_exact() -> None:
         "chat": {
             "ask",
             "cache_size",
+            "cancel",
             "clear_cache",
             "configure",
             "delete_conversation",
@@ -286,6 +290,7 @@ def test_android_selected_public_callable_inventory_is_exact() -> None:
             "get_history",
             "get_settings",
             "save_answer_as_note",
+            "session_status",
             "set_mode",
         },
         "research": {
@@ -373,7 +378,7 @@ def test_android_selected_public_callable_inventory_is_exact() -> None:
     }
 
     assert observed_names == expected_names
-    assert sum(map(len, observed_names.values())) == 152
+    assert sum(map(len, observed_names.values())) == 157
 
 
 @pytest.mark.parametrize("backend", [None, "web"])
@@ -571,6 +576,7 @@ def test_android_selection_extends_the_frozen_lifecycle_ownership_graph() -> Non
         client._android_session,
         client.artifacts._asset_downloads,
         client.sources._upload_pipeline,
+        client.sources._phenotype,
     )
     assert lifecycle._loop_participants[-3:] == (
         client._android_bearer_provider,

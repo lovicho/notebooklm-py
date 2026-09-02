@@ -3,7 +3,7 @@
 **Status:** Recovered from capture, schema-level (field numbers + wire types), not
 field-named by Google
 
-**Last verified:** 2026-08-31 (`1.46.7` capture snapshot plus `1.55.10` binary delta; `GenerateDocumentGuides` echo re-probed live across repeat calls)
+**Last verified:** 2026-09-01 (`1.46.7` capture snapshot plus `1.55.10` binary delta; chat session status/cancel re-probed live)
 
 **Scope:** the original `1.46.7.940945420` **49-method surface** (4 gRPC services) is enumerated
 and cross-referenced to the 48-method Web registry used for that audit. The newer Google-signed
@@ -11,8 +11,9 @@ and cross-referenced to the 48-method Web registry used for that audit. The newe
 The original traffic capture exercised 21 methods and decoded their wire shapes here; later direct
 bearer/gRPC probes also exercised APK-unwired methods and destructive APK-present methods on
 disposable copies. The
-**complete protobuf schema** — 295 messages / 767 fields with real field names, tags, types, and
-cardinality — was recovered by decompiling the Flutter binary with a Dart-3.13-ported blutter, and
+**complete protobuf schema** — 323 messages / 868 fields with real field names, tags, types, and
+cardinality — was recovered by decompiling the Flutter binary with a Dart-ported blutter (3.13 for the
+`1.46.7` snapshot, 3.14 for the current `1.55.10` regeneration), and
 is checked in at **[android/schema.proto](schema.proto)**. The inline shapes below keep their
 wire-capture form (field `#N` + type); the `.proto` file is authoritative for names. Read paths
 were driven on real notebooks; mutations were confined to throwaway notebooks or copies and
@@ -135,7 +136,7 @@ Status vocabulary below:
   Drive/share/generation side effect;
 - **compiled** — present in the APK/schema but not independently exercised here.
 
-### Complete web-library → APK/backend matrix (48/48)
+### Complete web-library → APK/backend matrix (49/49)
 
 | Server method | web `rpcid` (constant) | APK | mobile backend evidence |
 |---|---|---:|---|
@@ -150,6 +151,7 @@ Status vocabulary below:
 | AddTentativeSources | `o4cbdc` (ADD_SOURCE_FILE) | ✅ | captured; file/tentative registration path |
 | DeleteSources | `tGMBJ` (DELETE_SOURCE) | ✅ | captured + live delete/read-back on copied source |
 | LoadSource | `hizoJc` (GET_SOURCE) | ✅ | captured |
+| **RetrieveRelevantChunks** | `ASU5Oe` (RETRIEVE_RELEVANT_CHUNKS) | ❌ | **live** unfiltered and source-filtered native calls; [wire evidence](source-search-evidence.md) |
 | **MutateSource** | `b7Wfje` (UPDATE_SOURCE) | ❌ | **live** title mutation + read-back |
 | **RefreshSource** | `FLmJqe` (REFRESH_SOURCE) | ❌ | **live** on a stale native Google Doc; an earlier copied-URL probe returned `INVALID_ARGUMENT` for four context variants |
 | **CheckSourceFreshness** | `yR9Yof` (CHECK_SOURCE_FRESHNESS) | ❌ | **live** on copied URL source |
@@ -327,6 +329,8 @@ Write / mutation RPCs (see [Write RPCs](#write--mutation-rpcs) — **do not repl
 | `GenerateArtifact` / `ExportToDrive` / `ShareAudio` | variable | mixed | retry wire + READY precondition rejection; report-to-Docs success/read-back/delete; ShareAudio invalid-ID only |
 | `DiscoverSources` | 136 | 2,047 | research / "find sources from the web" |
 | `GenerateFreeFormStreamed` | 476 | streamed | chat: ask the notebook (**server-streaming**) |
+| `GetChatSessionStatus` | variable | status/token row | chat: read idle/generating state; Web-derived signature, mobile-live tags |
+| `CancelGeneration` | variable | named empty response | chat: stop an active WEB-client-type stream; APK-exact signature |
 | `DeleteChatTurns` | 103 | 0 | chat: clear history |
 | `ShareProject` † | 109 | 0 | set notebook visibility |
 | `GetProjectDetails` † | 101 | 157–161 | read share settings |
@@ -804,6 +808,21 @@ sourceAttribution.ingestedSource.source`, with cited paragraph text from `Citati
 answer anchors from `TailwindDoc.body.inlineObjectLocations`. Speculative flattened citation slots
 are not part of the compile closure.
 
+### GetChatSessionStatus / CancelGeneration — inspect or stop generation
+
+`GetChatSessionStatus` takes the chat session ID at request tag 2. Response tag 2 is status `1`
+(idle) or `2` (generating); the generating response also carries an opaque token at tag 1.
+`CancelGeneration` uses the APK-exact request (`RequestContext #1`, chat session ID `#2`, optional
+agency session ID `#3`) and a named empty response. An unowned session preserves gRPC
+`PERMISSION_DENIED` instead of being flattened into success.
+
+Cancellation stops server emission, but an existing Web HTTP response does not close itself. Live
+probes also show that Google cancels only streams whose generation request context says
+`clientType=WEB` (2), not `ANDROID_APP` (3). The Android adapter therefore keeps Android
+metadata/provenance while using client type 2 for this isolated generation/cancel path. Full probe
+notes and provenance are in
+[`chat-session-control-evidence.md`](chat-session-control-evidence.md).
+
 ### DeleteChatTurns — clear chat history
 
 ```text
@@ -871,7 +890,7 @@ Graduated options, cheapest first:
 
    **Outcome (2026-07-22): success — full schema recovered.** blutter was ported to Dart 3.13 and
    run to completion; the recovered schema is checked in at
-   [docs/android/schema.proto](schema.proto) (**295 messages, 767 fields**, field
+   [docs/android/schema.proto](schema.proto) (**295 messages, 767 fields** at the time, field
    numbers/names/types/cardinality from the binary). The port took two kinds of change, captured as
    a patch in [docs/android/blutter-dart3.13.patch](blutter-dart3.13.patch):
 
@@ -918,11 +937,14 @@ probes, and one routed-but-rejected `RefreshSource` result. A later stale-Google
 also live-verified on a rich disposable copy. These later results supplement the 21 captured
 shapes; they do not change the capture count.
 
-**Field names/tags/types — recovered:** the full protobuf schema (295 messages, 767 fields) is in
+**Field names/tags/types — recovered:** the full protobuf schema (323 messages, 868 fields) is in
 [android/schema.proto](schema.proto), decompiled from the binary. This supersedes the
 `(inferred)` names in the inline shapes — including every message not reachable from the mobile UI
-(`CreateNote`/`MutateNote`/`DeleteNotes`, `ActOnSources`, artifact ops, the WebRTC Live messages,
-`PrototypeNotebookSearch`). Enum *value* names are in [Enums](#enums-recovered-from-the-binary).
+(`CreateNote`/`MutateNote`/`DeleteNotes`, `ActOnSources`, artifact ops, the WebRTC Live messages).
+The one exception is `PrototypeNotebookSearch`: the `1.55.10` build dropped that RPC and its four
+`Prototype*` discovery messages, so the current file no longer carries them; their recovered names
+and tags remain in the `1.46.7` schema at commit `d5df15e77`. Enum *value* names are in
+[Enums](#enums-recovered-from-the-binary).
 
 **Still approximate:** a few scalar int widths (`int32` vs `int64`) from the adder heuristic; the
 deep rich-text/citation grammar inside `ListChatTurns`/`ListArtifacts`/`LoadSource`/
