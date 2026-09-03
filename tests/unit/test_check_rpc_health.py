@@ -103,6 +103,7 @@ def _result(
         # issues. Pin both phrasings (decoder.py:117 and :470).
         "Parse error: API rate limit exceeded. Please wait before retrying.",
         "Parse error: API rate limit or quota exceeded. Please wait before retrying.",
+        "Parse error: RateLimitError",
         # ``httpx.ReadTimeout`` with an empty message stringifies to the
         # class name (see issue #864 fallback in make_rpc_request) and is
         # a Google-side flake that passes on retry — see #1004 and the
@@ -283,6 +284,15 @@ class _TimingOutClient:
         raise httpx.ReadTimeout("")
 
 
+class _LeakyRequestClient:
+    async def post(self, url: str, *, content: str, headers: dict[str, str]) -> httpx.Response:
+        request = httpx.Request("POST", url)
+        raise httpx.ConnectError(
+            "failed request for /notebook/disposable-resource-handle",
+            request=request,
+        )
+
+
 @pytest.fixture
 def timing_out_auth() -> check_rpc_health.AuthTokens:
     return check_rpc_health.AuthTokens(
@@ -304,6 +314,22 @@ async def test_make_rpc_request_surfaces_class_name_for_empty_message_errors(
     )
     assert response_text is None
     assert error == "ReadTimeout"
+
+
+@pytest.mark.asyncio
+async def test_make_rpc_request_withholds_url_and_resource_handle(
+    timing_out_auth: check_rpc_health.AuthTokens,
+) -> None:
+    response_text, error = await make_rpc_request(
+        _LeakyRequestClient(),
+        timing_out_auth,
+        check_rpc_health.RPCMethod.GET_SUGGESTED_REPORTS,
+        [[2], "disposable-resource-handle"],
+        source_path="/notebook/disposable-resource-handle",
+    )
+    assert response_text is None
+    assert error == "ConnectError"
+    assert "disposable-resource-handle" not in error
 
 
 @pytest.mark.asyncio
@@ -336,6 +362,38 @@ async def test_test_rpc_method_with_data_propagates_empty_message_errors(
 
 
 @pytest.mark.asyncio
+async def test_test_rpc_method_with_data_keeps_redacted_rate_limit_transient(
+    monkeypatch: pytest.MonkeyPatch,
+    timing_out_auth: check_rpc_health.AuthTokens,
+) -> None:
+    method = check_rpc_health.RPCMethod.CREATE_NOTEBOOK
+
+    async def fake_request(*args: Any, **kwargs: Any) -> tuple[str, None]:
+        return "wire response", None
+
+    def raise_rate_limit(*args: Any, **kwargs: Any) -> Any:
+        raise check_rpc_health.RateLimitError("quota response with sensitive detail")
+
+    monkeypatch.setattr(check_rpc_health, "make_rpc_request", fake_request)
+    monkeypatch.setattr(check_rpc_health, "strip_anti_xssi", lambda value: value)
+    monkeypatch.setattr(check_rpc_health, "parse_chunked_response", lambda value: [])
+    monkeypatch.setattr(check_rpc_health, "collect_rpc_ids", lambda chunks: [method.value])
+    monkeypatch.setattr(check_rpc_health, "decode_response", raise_rate_limit)
+
+    result, data = await check_rpc_health.test_rpc_method_with_data(
+        _TimingOutClient(),
+        timing_out_auth,
+        method,
+        ["Title"],
+    )
+
+    assert data is None
+    assert result.error == "Parse error: RateLimitError"
+    assert check_rpc_health.is_transient_error(result.error)
+    assert "sensitive detail" not in result.error
+
+
+@pytest.mark.asyncio
 async def test_check_method_propagates_empty_message_errors(
     timing_out_auth: check_rpc_health.AuthTokens,
 ) -> None:
@@ -361,6 +419,7 @@ def test_is_transient_error_classifies_readtimeout_as_transient() -> None:
     # point at client- or network-side problems worth surfacing. If this
     # policy ever changes, update this test deliberately — don't drop it.
     assert is_transient_error("ReadTimeout") is True
+    assert is_transient_error("Chat rate limit reached: terminal stream sequence 3") is True
     assert is_transient_error("ConnectTimeout") is False
     assert is_transient_error("WriteTimeout") is False
     assert is_transient_error("PoolTimeout") is False
@@ -703,6 +762,28 @@ async def test_chat_probe_ok_on_recognized_server_error_frame() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_probe_ok_on_rate_limit_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A terminal stream sequence without an RPC payload raises RateLimitError
+    # (server quota exhausted): the wire contract is intact, the server merely
+    # declined. -> OK (#2323).
+    from notebooklm.exceptions import RateLimitError
+
+    def _raise_rate_limit(_text: str) -> Any:
+        raise RateLimitError(
+            "Chat rate limit reached: the request ended before the server "
+            "returned an RPC payload (terminal stream sequence 3). Retry later."
+        )
+
+    monkeypatch.setattr(check_rpc_health, "parse_streaming_chat_response", _raise_rate_limit)
+    client = _ChatClient(text=")]}'\n")
+    result = await check_rpc_health.check_chat_query(client, _chat_auth(), "nb_123")
+    assert result.status is CheckStatus.OK
+    assert "Server declined (recognized frame)" in (result.error or "")
+    assert "RateLimitError" in (result.error or "")
+    assert "rate limit reached" not in (result.error or "")
+
+
+@pytest.mark.asyncio
 async def test_chat_probe_error_on_http_status() -> None:
     client = _ChatClient(status=500, text="boom")
     result = await check_rpc_health.check_chat_query(client, _chat_auth(), "nb_123")
@@ -750,15 +831,36 @@ def test_main_exits_two_when_auth_missing(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert excinfo.value.code == 2
 
 
-async def _load_auth_raising(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
-    """Run ``load_auth`` with the private storage owner raising ``error``."""
-    from notebooklm._auth import tokens as tokens_module
+def test_main_exits_two_on_unhandled_crash(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unhandled crash in main must return exit code 2 (infrastructure failure),
+    never exit 1 which the workflow interprets as an RPC mismatch (#2323).
+    Secrets in the exception and formatted traceback must be scrubbed.
+    """
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", "{}")
+    monkeypatch.setattr("sys.argv", ["check_rpc_health.py"])
 
-    async def load(_self: object, **_kwargs: Any) -> Any:
+    async def _crashing_run(*_args: Any, **_kwargs: Any) -> Any:
+        # Include a secret token that should be redacted by scrub_secrets
+        raise RuntimeError("Crash with SID=secret_cookie_value_here")
+
+    monkeypatch.setattr(check_rpc_health, "run_health_check", _crashing_run)
+    exit_code = check_rpc_health.main()
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "FATAL: RPC health check crashed:" in err
+    assert "secret_cookie_value_here" not in err
+    assert "***" in err
+
+
+def _raising_stored_auth(error: BaseException):
+    """Return an injected stored-auth loader that raises ``error``."""
+
+    async def load(**_kwargs: Any) -> Any:
         raise error
 
-    monkeypatch.setattr(tokens_module.StoredAuthLoader, "load", load)
-    await check_rpc_health.load_auth(None)
+    return load
 
 
 @pytest.mark.asyncio
@@ -808,8 +910,9 @@ async def test_load_auth_uses_private_owner_with_exact_arguments_and_no_warning(
 async def test_load_auth_preserves_unmapped_error_identity(
     monkeypatch: pytest.MonkeyPatch, error: BaseException
 ) -> None:
+    monkeypatch.setattr(check_rpc_health, "_load_stored_auth", _raising_stored_auth(error))
     with pytest.raises(type(error)) as excinfo:
-        await _load_auth_raising(monkeypatch, error)
+        await check_rpc_health.load_auth(None)
     assert excinfo.value is error
 
 
@@ -822,8 +925,10 @@ async def test_load_auth_exits_two_and_names_the_source_on_value_error(
     with no context, so without the source line a corrupt storage_state.json
     prints only ``Expecting value: line 1 column 1 (char 0)``.
     """
+    error = ValueError("Expecting value: line 1 column 1")
+    monkeypatch.setattr(check_rpc_health, "_load_stored_auth", _raising_stored_auth(error))
     with pytest.raises(SystemExit) as excinfo:
-        await _load_auth_raising(monkeypatch, ValueError("Expecting value: line 1 column 1"))
+        await check_rpc_health.load_auth(None)
     assert excinfo.value.code == 2
 
     stderr = capsys.readouterr().err
@@ -844,8 +949,9 @@ async def test_load_auth_exits_two_and_scrubs_secrets_on_http_error(
         "All connection attempts failed for "
         "https://notebooklm.google.com/batchexecute?f.sid=-8891234567890123456"
     )
+    monkeypatch.setattr(check_rpc_health, "_load_stored_auth", _raising_stored_auth(leaky))
     with pytest.raises(SystemExit) as excinfo:
-        await _load_auth_raising(monkeypatch, leaky)
+        await check_rpc_health.load_auth(None)
     assert excinfo.value.code == 2
 
     stderr = capsys.readouterr().err
@@ -1352,6 +1458,25 @@ async def test_rebrand_chat_present_on_recognized_server_frame() -> None:
         client, _chat_auth(), "notebook.google.com", "nb_123"
     )
     assert probe.status is RebrandProbeStatus.PRESENT
+
+
+@pytest.mark.asyncio
+async def test_rebrand_chat_present_on_rate_limit_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rate-limit frame proves the endpoint is live — it just declined (#2323)."""
+    from notebooklm.exceptions import RateLimitError
+
+    def _raise_rate_limit(_text: str) -> Any:
+        raise RateLimitError("Chat rate limit reached")
+
+    monkeypatch.setattr(check_rpc_health, "parse_streaming_chat_response", _raise_rate_limit)
+    client = _ChatClient(text=")]}'\n")
+    probe = await check_rpc_health.probe_rebrand_chat(
+        client, _chat_auth(), "notebook.google.com", "nb_123"
+    )
+    assert probe.status is RebrandProbeStatus.PRESENT
+    assert "recognized server frame" in probe.detail
 
 
 @pytest.mark.asyncio
@@ -1902,10 +2027,13 @@ async def test_fetch_app_shell_gives_up_on_a_redirect_loop() -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_app_shell_reports_a_transport_error() -> None:
-    client = _ShellClient(raises=httpx.ConnectError("connection refused"))
+    client = _ShellClient(
+        raises=httpx.ConnectError("connection refused for disposable-resource-handle")
+    )
     html, detail = await fetch_app_shell(client, "https://notebook.google.com/")
     assert html is None
-    assert "connection refused" in detail
+    assert detail == "ConnectError"
+    assert "disposable-resource-handle" not in detail
 
 
 @pytest.mark.asyncio

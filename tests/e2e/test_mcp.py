@@ -212,11 +212,14 @@ TOOL_COVERAGE: dict[str, str] = {
     "source_delete": "TestMcpSources.test_source_roundtrip",
     "source_wait": "TestMcpSources.test_source_roundtrip",
     "source_add_drive_file": "tests/unit/mcp/test_sources_drive.py (Drive-doc auto-route; unit — needs a real Drive document_id)",
+    "source_list_play_books": "tests/unit/mcp/test_sources_playbooks.py (list, pagination, and unsupported-backend paths)",
+    "source_add_play_book": "tests/unit/mcp/test_sources_playbooks.py (add, wait, and non-exportable-book paths)",
     "await_upload": "tests/unit/mcp/test_await_upload.py (completion-map poll) + test_fileroutes.py (POST records result; unit — remote signed-URL side-channel, no live browser upload)",
     # chat
     "chat_ask": "TestMcpChat.test_configure_then_ask",
     "chat_start": "tests/unit/mcp/test_chat_start.py (detached-ask registry + tool cycle)",
     "chat_status": "tests/unit/mcp/test_chat_start.py (detached-ask registry + tool cycle)",
+    "chat_cancel": "tests/unit/mcp/test_chat_start.py (backend and detached-task cancellation)",
     "chat_configure": "TestMcpChat.test_configure_then_ask",
     # notes
     "note_save": "TestMcpNotes.test_note_crud",
@@ -369,13 +372,13 @@ class TestMcpSources:
 @requires_auth
 @pytest.mark.live_chat_ask
 class TestMcpChat:
-    """Chat domain: configure then ask against the read-only notebook."""
+    """Chat domain: configure then ask against an isolated notebook."""
 
     @pytest.mark.asyncio
-    @pytest.mark.readonly
-    async def test_configure_then_ask(self, client, read_only_notebook_id):
+    @pytest.mark.timeout(240)
+    async def test_configure_then_ask(self, client, temp_notebook):
         """``chat_configure`` then ``chat_ask`` returns a non-empty answer."""
-        nb = read_only_notebook_id
+        nb = temp_notebook.id
 
         configured = await _call(client, "chat_configure", {"notebook": nb, "chat_mode": "concise"})
         assert isinstance(configured, dict)
@@ -439,24 +442,23 @@ class TestMcpArtifacts:
 
     @pytest.mark.asyncio
     @pytest.mark.readonly
-    async def test_artifact_list(self, client, generation_notebook_id):
+    async def test_artifact_list(self, client, read_only_notebook_id):
         """``studio_list`` returns the notebook's merged notes+artifacts as a list."""
-        structured = await _call(client, "studio_list", {"notebook": generation_notebook_id})
+        structured = await _call(client, "studio_list", {"notebook": read_only_notebook_id})
         assert isinstance(structured["items"], list)
 
     @pytest.mark.asyncio
     @pytest.mark.readonly
-    async def test_download_existing_artifact(self, client, generation_notebook_id, tmp_path):
+    async def test_download_existing_artifact(self, client, read_only_notebook_id, tmp_path):
         """Download an EXISTING artifact (no fresh generation) to a local path.
 
-        Reuses whatever downloadable artifact the notebook already has (generation
-        e2e populates them nightly). Skips cleanly when none is present so this
-        never depends on cross-file test ordering.
+        Reuses a downloadable artifact from the prepared reference copy. Skips
+        cleanly when none is present, so this never depends on cross-file ordering.
         """
-        listing = await _call(client, "studio_list", {"notebook": generation_notebook_id})
+        listing = await _call(client, "studio_list", {"notebook": read_only_notebook_id})
         candidate = _pick_downloadable_artifact(listing["items"])
         if candidate is None:
-            pytest.skip("no existing downloadable artifact on the generation notebook")
+            pytest.skip("no existing downloadable artifact on the reference notebook")
 
         # A merged item's hyphenated ``type`` IS the studio_download key.
         dl_type = candidate["type"]
@@ -465,7 +467,7 @@ class TestMcpArtifacts:
             client,
             "studio_download",
             {
-                "notebook": generation_notebook_id,
+                "notebook": read_only_notebook_id,
                 "artifact_type": dl_type,
                 "path": str(out_path),
             },
@@ -479,15 +481,16 @@ class TestMcpArtifacts:
 
     @pytest.mark.asyncio
     @pytest.mark.variants
-    async def test_generate_report_wiring(self, client, generation_notebook_id):
+    async def test_generate_report_wiring(self, client, generation_notebook_id, generation_journal):
         """Wiring smoke: ``studio_generate`` threads through and returns a
         ``task_id``; one ``studio_status`` poll dispatches. Does NOT poll to
         completion (the RPC health of generation is proven by ``test_generation``)."""
-        generated = await _call(
-            client,
-            "studio_generate",
-            {"notebook": generation_notebook_id, "artifact_type": "report"},
-        )
+        with generation_journal.producer_surface("mcp"):
+            generated = await _call(
+                client,
+                "studio_generate",
+                {"notebook": generation_notebook_id, "artifact_type": "report"},
+            )
         task_id = generated.get("task_id")
         assert task_id, f"studio_generate returned no task_id: {generated}"
 

@@ -6,6 +6,47 @@ Accepted (#2156). Amended by
 [ADR-0034](0034-auth-storage-object-model.md), which preserves this record's consolidation safety
 boundary while extracting independently owned state and lifecycles from the consolidated facade.
 
+**Amended 2026-09-03 (test-patch coupling).** The old patch-site totals were an
+aggregate diagnostic, not a migration-safe invariant. The registered schema-v2
+auth/browser/facade projections now retain package, target, test path, lexical
+owner, owner kind, idiom, and count. A combined scorecard and shared-lifetime
+mutation projection reject package relocation, helper hiding, direct/item/bulk
+namespace mutation, and displacement to classes or process-default owners.
+Non-underscore is a lexical spelling classification, not a statement that the
+target is supported API; reviewers must read total and private-name counts
+together.
+
+The PR-1 schema-v2 measurement is 244 `_auth` sites (145 private-name, 99
+non-underscore), 66 `_browser` sites (17/49), and 526 public-facade sites
+(0/526): 836 family sites total, 162 private-name, 97 distinct package/target
+identities, 96 files, 714 lexical owners, and 6 direct assignments. This is one
+site above the legacy `_auth` projection because the old collector silently
+ignored a real patch whose attribute was a module-level string constant; the
+fail-closed collector expands that constant. The shared-lifetime companion
+projection starts at 188 operations (32 private-name, 46 in fixture/helper
+bodies, zero direct assignments).
+
+**Measurement boundary.** These projections are repository-specific ratchets,
+not general Python dataflow or pytest-fixture analyzers. Their supported grammar
+is deliberately finite: explicit family imports and lexical aliases; direct
+attribute, item, namespace, and bulk mutation; literal mutation names and finite
+literal loops/containers without unpacking; the suite-used syntactic `list(...)`
+wrapper; and direct local helper forwarding whose explicit arguments resolve to a
+finite target set. The three outcomes inside that grammar
+are: count a resolved family/shared target, exclude a proven-fresh or
+proven-non-family target, or reject an unresolved family-related target. The
+last outcome is opaque debt with a baseline of zero, not an invitation to
+approximate more of Python.
+
+Consequently, arbitrary control flow, closure capture, runtime registries,
+descriptor behavior, and pytest plugin/fixture discovery are known limits. A
+rewrite using such a form cannot be offered as proof that coupling decreased:
+it must be rewritten into the supported grammar or retain the prior projected
+row. Review findings about unsupported semantics are blocking only when they
+reproduce current repository behavior or demonstrate a simple laundering
+rewrite within the supported grammar. Dynamic names or keys against an
+already-resolved family/shared owner always fail closed.
+
 **Amended 2026-08-12 (module-size budget raise):** `MODULE_SIZE_BUDGET` moved 1000 → 1500 under
 ADR-0008. This ADR's sanctioned-merge machinery is unaffected in substance, but one mechanical
 consequence needed handling: the shrink-lock guarantee below was carried by
@@ -19,6 +60,27 @@ dedicated `SHRINK_LOCKED_CEILINGS` view loaded by
 carries the same grow/tighten semantics but is deliberately exempt from the
 budget-below-every-ceiling invariant. **The guarantee in this ADR is unchanged; only its
 enforcement site moved.**
+
+**Amended 2026-09-02 (early compatibility-shim removal):** the six private compatibility shims
+created by this consolidation were removed in v0.8.x by explicit maintainer decision, before their
+documented next-major removal window. This is an intentional compatibility-policy override for
+out-of-tree private importers; no replacement shims were added. The canonical replacements are:
+
+| removed private module | canonical replacement |
+|---|---|
+| `_auth._browser_cookie_filter` | `_auth.cookie_filter` |
+| `_auth.browser_cookie_recovery` | `_auth.psidts_recovery` |
+| `_auth.browser_state_validation` | `_browser.browser_capture` |
+| `_auth.login_wait_trace` | `_browser.browser_capture` |
+| `_auth.storage_transaction` | `_auth.profile_store` |
+| `_auth.storage_writer` | `_auth.storage` |
+
+**Amended 2026-09-02 (browser-package relocation):** the browser-acquisition
+implementation moved from `_auth` to `_browser` under ADR-0036. The exact
+`browser_capture.py` shrink lock moved with the file into the separate browser
+module-size projection; it was not dropped or granted headroom. `_auth` now has
+no `_browser`/Playwright edge and reaches L3 through the neutral installed-rung
+contract in `_auth/recovery_rungs.py`.
 
 **Amended during PR 1.2 (2026-08-08):** decision 1 gains a **third** sanctioned class, *template
 adoption*. The effort's plan assumed PR 1.2 would shrink `storage.py`; it does not — converting a

@@ -87,6 +87,14 @@ jobs:
       # matrix instead — `server` is not wired into the CLI command tree.
       run: uv run python -c "import notebooklm, notebooklm.notebooklm_cli, notebooklm.client, notebooklm.artifacts"
 
+    - name: Verify built base wheel without browser extra
+      shell: bash
+      run: |
+        uv build --wheel --out-dir dist
+        wheels=(dist/notebooklm_py-*.whl)
+        test "${#wheels[@]}" -eq 1
+        uv run python scripts/check_base_wheel.py --wheel "${wheels[0]}"
+
     - name: Run pre-commit checks
       run: uv run pre-commit run --all-files
 
@@ -98,7 +106,14 @@ jobs:
       # checker is the only thing standing between a typo and a maintainer's
       # release run. `--ignore-missing-imports` keeps this green on the lean
       # install this job uses (no `mcp`/`server` extras).
-      run: uv run mypy src/notebooklm scripts/_live_auth_scenarios --ignore-missing-imports
+      run: >-
+        uv run mypy src/notebooklm scripts/_live_auth_scenarios
+        scripts/audit_auth_patch_sites.py
+        scripts/audit_auth_shared_mutations.py
+        scripts/check_auth_behavior_scenario_policy.py
+        scripts/check_auth_coverage_delta.py
+        scripts/check_auth_lifecycle_cleanup_policy.py
+        --ignore-missing-imports
 
     - name: Assert workflow permissions are scoped
       run: uv run python scripts/check_workflow_permissions.py
@@ -179,8 +194,10 @@ jobs:
       matrix:
         # Linux carries the full supported Python range. One 3.12 cell on each
         # secondary OS preserves platform compatibility without multiplying the
-        # entire suite into a 3-by-5 bottleneck. Canonical Ubuntu 3.12 owns
-        # Chromium, external-reality work, and the critical contract guards.
+        # entire suite into a 3-by-5 bottleneck on every PR; the complete
+        # 15-cell product runs nightly (`nightly.yml` → `compatibility`) and on
+        # manual nightly dispatches. Canonical Ubuntu 3.12 owns Chromium,
+        # external-reality work, and the critical contract guards.
         include:
         - os: ubuntu-latest
           python-version: "3.10"
@@ -257,7 +274,8 @@ jobs:
         # coverage in nightly's coverage.json (no 0% blind spot). Installing
         # them in every compatibility cell also proves curl_cffi's native wheels
         # resolve across every supported Python version on Linux and on the
-        # representative Python 3.12 macOS/Windows cells.
+        # representative Python 3.12 macOS/Windows cells (nightly proves the
+        # full 3-OS by 5-Python product).
         # `cookies` is now included since rookie-cookies supports all Python versions.
         #
         # Tradeoff: the deleted MCP/server jobs each enforced a scoped 90% floor.
@@ -352,7 +370,7 @@ jobs:
       # while their expensive mutation variants live in the bounded manual
       # repo-lint lane.
       # This is one no-coverage lane, so it can use the runner's full worker set
-      # without recreating the old 15 simultaneous coverage jobs.
+      # without adding coverage collection to every compatibility cell.
       run: >-
         uv run pytest -n auto --dist worksteal --timeout=180 --no-cov
         tests/unit/test_ci_test_matrix.py

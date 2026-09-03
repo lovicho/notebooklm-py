@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP server: `CONNECT_TIMEOUT` on connect.** The FastMCP lifespan opened the
+  `NotebookLMClient` — cookie rotation, the CSRF fetch, and the cold-recovery
+  ladder when those fail — *before* answering the MCP `initialize` handshake.
+  That auth work's budget (a 15 s `RotateCookies` poke plus a 30 s CSRF fetch,
+  more on the recovery rungs) exceeds the 30 s deadline hosts give the handshake,
+  so a slow or rate-limited Google surfaced to the host as a dead server
+  (`MCP server notebooklm connection timed out after 30000ms`) rather than an
+  auth error, and every retry spawned a fresh process that redid the same work.
+  The client is now opened lazily behind a `ClientProvider` that the lifespan
+  warms in the background: the handshake answers immediately, the first tool call
+  awaits the open, an auth failure arrives as a normal categorized tool error,
+  and a failed open is retried by the next call — so a mid-session
+  `notebooklm login` recovers a running server without a restart ([#2330]).
+
+### Changed
+
+- Pull requests run a reduced 7-cell compatibility matrix again (Python
+  3.10–3.14 on Ubuntu plus Python 3.12 on macOS and Windows). The full 15-cell
+  Ubuntu/macOS/Windows × Python 3.10–3.14 matrix now runs only in the nightly
+  workflow, and manual nightly dispatches include it by default.
+
+### Removed
+
+- Removed six deprecated private `_auth` compatibility modules earlier than their documented
+  next-major removal window. Private importers must use `_auth.cookie_filter` instead of
+  `_auth._browser_cookie_filter`, `_auth.psidts_recovery` instead of
+  `_auth.browser_cookie_recovery`, `_browser.browser_capture` instead of
+  `_auth.browser_state_validation` or `_auth.login_wait_trace`, `_auth.profile_store` for
+  transaction primitives instead of `_auth.storage_transaction`, and `_auth.storage` instead of
+  `_auth.storage_writer`.
+
+## [0.8.2] - 2026-09-02
+
 The headline of this release is the new **Android backend**. The Python SDK, CLI,
 MCP server, and REST server can now use NotebookLM's native mobile API as an
 alternative to the Web backend. Install the `android` extra and select it with
@@ -66,15 +101,30 @@ change without notice.
 
 ### Changed
 
+- Release and nightly compatibility testing now runs the complete 15-cell
+  matrix: Ubuntu, macOS, and Windows across Python 3.10 through 3.14. Browser,
+  coverage, repository-lint, and live-E2E work remains in dedicated lanes.
 - **Compatibility note:** backend source type code `14` now reports
   `SourceType.GOOGLE_DRIVE` instead of `GOOGLE_SPREADSHEET`. Native Google
   Sheets continue to report `SourceType.GOOGLE_SPREADSHEET` through code `7`
   ([#2281]).
-- The `cookies` extra now uses the maintained `rookie-cookies` package,
-  restoring browser-cookie import support on Python 3.13 and newer ([#2162]).
+- The `cookies` extra now uses the maintained `rookie-cookies` package instead
+  of `rookiepy`. This supports Python 3.13+ as well as extracting cookies on
+  Windows for Chrome, Edge, Brave, and other Chromium-based browsers ([#2162]).
 
 ### Fixed
 
+- Android gRPC `PERMISSION_DENIED` responses now surface as client request
+  failures rather than authentication failures, matching the Web backend and
+  avoiding misleading re-authentication guidance for operation-level refusals.
+- Web chat now identifies payload-free terminal streams as quota exhaustion,
+  matching the Android backend's explicit `RESOURCE_EXHAUSTED` result for the
+  same account state. CLI, MCP, and REST callers now receive a retriable
+  rate-limit error instead of a non-retriable generic chat failure.
+- The public API compatibility audit now treats a previously uninspectable
+  baseline signature as unknown rather than a breaking change. This prevents
+  false release failures on Python 3.14 while still rejecting regressions that
+  make a previously inspectable signature unavailable.
 - Credential redaction now recognizes current `AQ.`-prefixed Google
   authorization keys in runtime logs, exception previews, and cassette
   fixtures, alongside legacy `AIza` keys ([#2254]).
@@ -122,6 +172,7 @@ change without notice.
 [#2307]: https://github.com/teng-lin/notebooklm-py/pull/2307
 [#2308]: https://github.com/teng-lin/notebooklm-py/pull/2308
 [#2313]: https://github.com/teng-lin/notebooklm-py/issues/2313
+[#2330]: https://github.com/teng-lin/notebooklm-py/issues/2330
 
 ## [0.8.1] - 2026-08-14
 
@@ -2553,7 +2604,8 @@ This is the initial public release of `notebooklm-py`. While core functionality 
 - **Authentication expiry**: CSRF tokens expire after some time. Re-run `notebooklm login` if you encounter auth errors.
 - **Large file uploads**: Files over 50MB may fail or timeout. Split large documents if needed.
 
-[Unreleased]: https://github.com/teng-lin/notebooklm-py/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/teng-lin/notebooklm-py/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/teng-lin/notebooklm-py/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/teng-lin/notebooklm-py/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/teng-lin/notebooklm-py/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/teng-lin/notebooklm-py/compare/v0.7.2...v0.7.3

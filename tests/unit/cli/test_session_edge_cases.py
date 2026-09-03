@@ -14,8 +14,8 @@ from unittest.mock import AsyncMock, patch
 import click
 import pytest
 
+import notebooklm._app.login_browser as login_browser
 import notebooklm.auth as auth_module
-import notebooklm.cli.services.playwright_login as _pl
 import notebooklm.cli.services.session_context as session_context_module
 import notebooklm.cli.session_cmd as session_cmd_module
 from notebooklm.notebooklm_cli import cli
@@ -337,11 +337,11 @@ class TestLoginWindowsPermissions:
         ``patch(...)`` context managers which raise ``AttributeError`` if
         the target is missing, surfacing relocations immediately.
 
-        #1367: ``get_storage_path`` / ``get_browser_profile_dir`` are the
-        service-path (login) bindings, so the patch target is the consumer
-        module ``services.playwright_login`` whose ``prepare_login_paths``
-        resolves both names directly (``session_cmd.login`` ->
-        ``_prepare_login_paths`` -> ``playwright_login.prepare_login_paths``).
+        ``get_storage_path`` / ``get_browser_profile_dir`` are app-path
+        bindings, so patch the consumer module ``_app.login_browser``, whose
+        ``prepare_login_paths`` resolves both names directly
+        (``session_cmd.login`` -> ``_prepare_login_paths`` ->
+        ``_app.login_browser.prepare_login_paths``).
         The ``_resolve_paths_helper`` precedence shim was removed in #1367; the
         consumer-module bindings are now the only lookup site.
         """
@@ -349,8 +349,12 @@ class TestLoginWindowsPermissions:
         browser_profile = tmp_path / "profile"
 
         with (
-            patch.object(_pl, "get_storage_path", return_value=storage_path),
-            patch.object(_pl, "get_browser_profile_dir", return_value=browser_profile),
+            patch.object(login_browser, "get_storage_path", return_value=storage_path),
+            patch.object(
+                login_browser,
+                "get_browser_profile_dir",
+                return_value=browser_profile,
+            ),
         ):
             self.storage_parent = storage_path.parent
             self.browser_profile = browser_profile
@@ -358,11 +362,11 @@ class TestLoginWindowsPermissions:
 
     def test_windows_login_skips_mode_and_chmod(self, monkeypatch, _patch_login_deps, runner):
         """On Windows, login mkdir calls omit mode= and chmod is never called."""
-        # ``prepare_login_paths`` (in ``services.playwright_login``) reads
+        # ``prepare_login_paths`` (in ``_app.login_browser``) reads
         # ``sys.platform`` to pick the mkdir/chmod hardening path; patch the
         # consumer module's ``sys`` binding (#1367 removed the ``session_cmd``
         # stdlib re-export — ``sys`` is the same singleton either way).
-        monkeypatch.setattr(_pl.sys, "platform", "win32")
+        monkeypatch.setattr(login_browser.sys, "platform", "win32")
 
         mkdir_calls = []
         chmod_calls = []
@@ -401,7 +405,7 @@ class TestLoginWindowsPermissions:
     def test_unix_login_sets_mode_and_chmod(self, monkeypatch, _patch_login_deps, runner):
         """On Unix, login mkdir calls include mode=0o700 and chmod is called."""
         # See the Windows variant above: patch the consumer module's ``sys``.
-        monkeypatch.setattr(_pl.sys, "platform", "linux")
+        monkeypatch.setattr(login_browser.sys, "platform", "linux")
 
         mkdir_calls = []
         chmod_calls = []
@@ -432,10 +436,10 @@ class TestLoginWindowsPermissions:
         assert len(chmod_700) >= 2, f"Expected ≥2 chmod(0o700) calls on Unix, got {len(chmod_700)}"
 
     def test_windows_storage_chmod_skipped(self, tmp_path, monkeypatch):
-        """On Windows the canonical writer skips all POSIX permission mutation.
+        """On Windows the profile-store owner skips all POSIX permission mutation.
 
         Behavior test (not a source grep): since b-PR3 the ``storage_state.json``
-        save path funnels through ``_auth.storage``, whose parent-dir
+        save path funnels through ``ProfileStore``, whose parent-dir
         ``0700`` and backup ``0600`` chmods (and the file-mode ``fchmod``) are
         POSIX-only and guarded on ``sys.platform``. With the platform forced to
         ``win32`` a real ``storage_state.json`` write through the canonical
@@ -446,9 +450,11 @@ class TestLoginWindowsPermissions:
         import os
 
         from notebooklm._atomic_io import _atomic_write_json_unchecked
-        from notebooklm._auth import profile_store
         from notebooklm._auth import storage as storage_mod
-        from notebooklm._auth.storage_lock import LockState
+        from notebooklm._auth.profile_account import DomainSelection, KeepAccount
+        from notebooklm._auth.profile_document import ProfileDocument
+        from notebooklm._auth.profile_store import LoginWriteRequest, ProfileStore, ReplaceStatus
+        from notebooklm._auth.storage_lock import LockState, StorageLockManager
 
         chmod_calls: list[tuple] = []
         real_chmod = os.chmod
@@ -466,13 +472,12 @@ class TestLoginWindowsPermissions:
 
         # ``sys`` is process-global, so use an always-held manager stub while
         # the permission branches are forced through their win32 paths.
-        class HeldLocks:
+        class HeldLocks(StorageLockManager):
             def acquire(self, request):
                 import contextlib
 
                 return contextlib.nullcontext(LockState.HELD)
 
-        monkeypatch.setattr(profile_store, "_STORAGE_LOCKS", HeldLocks())
         monkeypatch.setattr(os, "chmod", _spy_chmod)
         if real_fchmod is not None:
             monkeypatch.setattr(os, "fchmod", _spy_fchmod)
@@ -495,10 +500,16 @@ class TestLoginWindowsPermissions:
         # ``backup`` deliberately omitted: shutil.copy2 replicates the source mode
         # via its OWN os.chmod (unrelated to the writer's win32-guarded chmod),
         # which would be noise here. The parent-dir 0700 chmod and the file-mode
-        # fchmod are the writer/_atomic_io permission bits under test.
-        outcome = storage_mod.replace_from_login(path, state, include_domains=None)
+        # fchmod are the profile-store/_atomic_io permission bits under test.
+        outcome = ProfileStore(path, locks=HeldLocks()).replace_from_login(
+            LoginWriteRequest(
+                source=ProfileDocument.decode(state),
+                domain_selection=DomainSelection(),
+                account=KeepAccount(),
+            )
+        )
 
-        assert outcome.ok, outcome
+        assert outcome.status is ReplaceStatus.APPLIED, outcome
         assert path.exists()  # the write still succeeded under the win32 guard
         assert chmod_calls == [], (
             f"os.chmod (parent-dir 0700) must be skipped on win32, got {chmod_calls}"
