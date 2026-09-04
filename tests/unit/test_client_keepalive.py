@@ -48,11 +48,15 @@ def _storage_auth(tmp_path) -> tuple[AuthTokens, "object"]:
             }
         )
     )
+    jar = httpx.Cookies()
+    jar.set("SID", "initial_sid", domain=".google.com", path="/")
+    jar.set("__Secure-1PSIDTS", "test_1psidts", domain=".google.com", path="/")
     auth = AuthTokens(
         cookies={"SID": "initial_sid", "__Secure-1PSIDTS": "test_1psidts"},
         csrf_token="test_csrf",
         session_id="test_session",
         storage_path=storage_path,
+        cookie_jar=jar,
     )
     return auth, storage_path
 
@@ -104,7 +108,7 @@ class TestKeepaliveDisabledByDefault:
         """No keepalive task is spawned and no extra HTTP calls fire by default."""
         client = NotebookLMClient(mock_auth)
         async with client:
-            assert client._collaborators.web_transport._keepalive_task is None
+            assert client._web_runtime.web_transport._keepalive_task is None
             # Give the loop a chance to run; nothing should happen
             await asyncio.sleep(0.1)
 
@@ -132,12 +136,12 @@ class TestKeepaliveLifecycle:
         )
 
         async with client:
-            task = client._collaborators.web_transport._keepalive_task
+            task = client._web_runtime.web_transport._keepalive_task
             assert task is not None
             assert not task.done()
 
         # Task should be cleaned up; no warnings should be raised.
-        assert client._collaborators.web_transport._keepalive_task is None
+        assert client._web_runtime.web_transport._keepalive_task is None
         # Either cancelled or finished; never left dangling.
         assert task.done()
 
@@ -151,7 +155,7 @@ class TestKeepaliveFloor:
             keepalive=10.0,
             keepalive_min_interval=60.0,
         )
-        assert client._collaborators.web_transport._keepalive_interval == 60.0
+        assert client._web_runtime.web_transport._keepalive_interval == 60.0
 
     @pytest.mark.asyncio
     async def test_floor_does_not_lower_higher_interval(self, mock_auth):
@@ -161,7 +165,7 @@ class TestKeepaliveFloor:
             keepalive=600.0,
             keepalive_min_interval=60.0,
         )
-        assert client._collaborators.web_transport._keepalive_interval == 600.0
+        assert client._web_runtime.web_transport._keepalive_interval == 600.0
 
     @pytest.mark.asyncio
     async def test_none_keeps_disabled(self, mock_auth):
@@ -171,7 +175,7 @@ class TestKeepaliveFloor:
             keepalive=None,
             keepalive_min_interval=60.0,
         )
-        assert client._collaborators.web_transport._keepalive_interval is None
+        assert client._web_runtime.web_transport._keepalive_interval is None
 
 
 class TestKeepaliveValidation:
@@ -238,8 +242,8 @@ class TestKeepalivePokes:
         async with client:
             await asyncio.wait_for(retried.wait(), timeout=2.0)
             # Task is still running after the failure
-            assert client._collaborators.web_transport._keepalive_task is not None
-            assert not client._collaborators.web_transport._keepalive_task.done()
+            assert client._web_runtime.web_transport._keepalive_task is not None
+            assert not client._web_runtime.web_transport._keepalive_task.done()
         assert calls >= 2
 
 
@@ -470,11 +474,15 @@ class TestSaveCookiesUnification:
         within the same process."""
         from notebooklm.client import NotebookLMClient
 
+        jar = httpx.Cookies()
+        jar.set("SID", "x", domain=".google.com", path="/")
+        jar.set("__Secure-1PSIDTS", "test_1psidts", domain=".google.com", path="/")
         auth = AuthTokens(
             cookies={"SID": "x", "__Secure-1PSIDTS": "test_1psidts"},
             csrf_token="t",
             session_id="s",
             storage_path=tmp_path / "storage_state.json",
+            cookie_jar=jar,
         )
         (tmp_path / "storage_state.json").write_text('{"cookies": []}')
 
@@ -491,7 +499,7 @@ class TestSaveCookiesUnification:
             before production silently reverts to legacy merge.
             """
             lock_held_during_save.append(
-                core_ref["core"]._collaborators.cookie_persistence.save_lock.locked()
+                core_ref["core"]._web_runtime.cookie_persistence.save_lock.locked()
             )
             call_kwargs.append(kwargs)
             return True
@@ -500,7 +508,7 @@ class TestSaveCookiesUnification:
         core = build_client_shell_for_tests(auth, cookie_saver=spy)
         core_ref["core"] = core
 
-        await core._collaborators.web_transport.save_cookies(httpx.Cookies())
+        await core._web_runtime.web_transport.save_cookies(httpx.Cookies())
 
         assert lock_held_during_save == [True], (
             "save_cookies must hold _save_lock for the duration of "
@@ -540,11 +548,16 @@ class TestSaveCookiesUnification:
                 }
             )
         )
+        jar = httpx.Cookies()
+        jar.set("SID", "x", domain=".google.com", path="/")
+        jar.set("__Secure-1PSIDTS", "test_1psidts", domain=".google.com", path="/")
+        jar.set("HSID", "y", domain=".google.com", path="/")
         auth = AuthTokens(
             cookies={"SID": "x", "__Secure-1PSIDTS": "test_1psidts", "HSID": "y"},
             csrf_token="old_csrf",
             session_id="old_session",
             storage_path=storage_path,
+            cookie_jar=jar,
         )
 
         # NotebookLM homepage with new tokens (refresh_auth scrapes these)
@@ -566,7 +579,7 @@ class TestSaveCookiesUnification:
             full-merge path.
             """
             save_calls.append(
-                client_ref["client"]._collaborators.cookie_persistence.save_lock.locked()
+                client_ref["client"]._web_runtime.cookie_persistence.save_lock.locked()
             )
             snapshot_kwarg_present.append("original_snapshot" in kwargs)
             return True

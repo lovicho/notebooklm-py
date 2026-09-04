@@ -462,15 +462,16 @@ class TestRefreshAuthOnBoundSessionIsNoOp:
         # The client is opened with a stale in-memory copy: *PSIDTS=STALE,
         # mirroring the §3.4.1 timeline where another process has already
         # rotated to ONDISK on disk.
-        auth = AuthTokens(
-            cookies={
-                ("__Secure-1PSIDTS", ".google.com"): "STALE",
-                ("SID", ".google.com"): "sid-bound",
-            },
-            csrf_token="csrf-old",
-            session_id="sid-old",
-            storage_path=storage,
-        )
+        with pytest.warns(DeprecationWarning, match="synchronous storage/recovery I/O"):
+            auth = AuthTokens(
+                cookies={
+                    ("__Secure-1PSIDTS", ".google.com"): "STALE",
+                    ("SID", ".google.com"): "sid-bound",
+                },
+                csrf_token="csrf-old",
+                session_id="sid-old",
+                storage_path=storage,
+            )
 
         # Bound-session homepage GET: no Set-Cookie header, so no rotation.
         httpx_mock.add_response(
@@ -582,15 +583,16 @@ class TestSnapshotRefreshedAfterSave:
             ],
         )
 
-        auth = AuthTokens(
-            cookies={
-                ("__Secure-1PSIDTS", ".google.com"): "OPEN",
-                ("SID", ".google.com"): "sid",
-            },
-            csrf_token="csrf",
-            session_id="sid",
-            storage_path=storage,
-        )
+        with pytest.warns(DeprecationWarning, match="synchronous storage/recovery I/O"):
+            auth = AuthTokens(
+                cookies={
+                    ("__Secure-1PSIDTS", ".google.com"): "OPEN",
+                    ("SID", ".google.com"): "sid",
+                },
+                csrf_token="csrf",
+                session_id="sid",
+                storage_path=storage,
+            )
 
         # Two homepage responses — refresh_auth is called twice.
         for _ in range(2):
@@ -606,7 +608,7 @@ class TestSnapshotRefreshedAfterSave:
         async with client:
             # First save: rotates *PSIDTS in-process to A1, then save propagates.
             _set_cookie_value(
-                client._collaborators.kernel.get_http_client().cookies, "__Secure-1PSIDTS", "A1"
+                client._web_runtime.kernel.get_http_client().cookies, "__Secure-1PSIDTS", "A1"
             )
             await client.refresh_auth()
             assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") == "A1"
@@ -1021,7 +1023,8 @@ class TestRefreshCmdReplacementBaseline:
             content=b'"SNlM0e":"csrf" "FdrFJe":"sid"',
         )
 
-        auth = await auth_mod.AuthTokens.from_storage(path=storage)
+        with pytest.warns(DeprecationWarning, match="AuthTokens.from_storage"):
+            auth = await auth_mod.AuthTokens.from_storage(path=storage)
 
         assert auth.cookie_snapshot is not None
         snapshot = auth.cookie_snapshot
@@ -1179,15 +1182,16 @@ class TestBaselineNotAdvancedOnSaveFailure:
             ],
         )
 
-        auth = AuthTokens(
-            cookies={
-                ("SID", ".google.com"): "sid",
-                ("__Secure-1PSIDTS", ".google.com"): "psidts",
-            },
-            csrf_token="csrf",
-            session_id="sid",
-            storage_path=storage,
-        )
+        with pytest.warns(DeprecationWarning, match="synchronous storage/recovery I/O"):
+            auth = AuthTokens(
+                cookies={
+                    ("SID", ".google.com"): "sid",
+                    ("__Secure-1PSIDTS", ".google.com"): "psidts",
+                },
+                csrf_token="csrf",
+                session_id="sid",
+                storage_path=storage,
+            )
 
         # Make every save_cookies_to_storage call return False (silent failure).
         # Phase 2 PR 4: inject the cookie-saver seam directly via
@@ -1199,12 +1203,12 @@ class TestBaselineNotAdvancedOnSaveFailure:
         client = NotebookLMClient(auth, cookie_saver=silent_fail)
 
         async with client:
-            baseline_before = client._collaborators.cookie_persistence.loaded_cookie_snapshot
-            assert client._collaborators.kernel.http_client is not None
-            await client._collaborators.web_transport.save_cookies(
-                client._collaborators.kernel.get_http_client().cookies
+            baseline_before = client._web_runtime.cookie_persistence.loaded_cookie_snapshot
+            assert client._web_runtime.kernel.http_client is not None
+            await client._web_runtime.web_transport.save_cookies(
+                client._web_runtime.kernel.get_http_client().cookies
             )
-            baseline_after = client._collaborators.cookie_persistence.loaded_cookie_snapshot
+            baseline_after = client._web_runtime.cookie_persistence.loaded_cookie_snapshot
 
         assert baseline_after is baseline_before, (
             "save_cookies must NOT advance _loaded_cookie_snapshot when the "
@@ -1242,16 +1246,17 @@ class TestBaselineNotAdvancedOnSaveFailure:
         )
         monkeypatch.setattr(ProfileStore, "merge_cookie_observation", failed_merge)
 
-        auth = await auth_mod.AuthTokens.from_storage(path=storage)
+        with pytest.warns(DeprecationWarning, match="AuthTokens.from_storage"):
+            auth = await auth_mod.AuthTokens.from_storage(path=storage)
         core = build_client_shell_for_tests(auth)
         await core.__aenter__()
         try:
             key = CookieSnapshotKey("__Secure-1PSIDTS", ".google.com", "/")
             assert auth.cookie_snapshot is not None
             assert auth.cookie_snapshot[key].value == "old"
-            assert core._collaborators.cookie_persistence.loaded_cookie_snapshot is not None
+            assert core._web_runtime.cookie_persistence.loaded_cookie_snapshot is not None
             assert (
-                core._collaborators.cookie_persistence.loaded_cookie_snapshot[key].value == "old"
+                core._web_runtime.cookie_persistence.loaded_cookie_snapshot[key].value == "old"
             ), (
                 "Client runtime must inherit the pre-fetch baseline so the mutated "
                 "cookie remains a delta after the failed pre-client save"
@@ -1400,15 +1405,16 @@ class TestCASRejectReturnsFalse:
                 _stored_cookie("__Secure-1PSIDTS", "psidts0"),
             ],
         )
-        auth = AuthTokens(
-            cookies={
-                ("SID", ".google.com"): "sid0",
-                ("__Secure-1PSIDTS", ".google.com"): "psidts0",
-            },
-            csrf_token="t",
-            session_id="s",
-            storage_path=storage,
-        )
+        with pytest.warns(DeprecationWarning, match="synchronous storage/recovery I/O"):
+            auth = AuthTokens(
+                cookies={
+                    ("SID", ".google.com"): "sid0",
+                    ("__Secure-1PSIDTS", ".google.com"): "psidts0",
+                },
+                csrf_token="t",
+                session_id="s",
+                storage_path=storage,
+            )
         core = build_client_shell_for_tests(auth)
         await core.__aenter__()
 
@@ -1425,11 +1431,11 @@ class TestCASRejectReturnsFalse:
                     cookie["value"] = "sibling"
             _write_storage(storage, cookies)
 
-            await core._collaborators.web_transport.save_cookies(jar_with("sid1"))
+            await core._web_runtime.web_transport.save_cookies(jar_with("sid1"))
             assert _cookie_value(storage, "SID", ".google.com") == "sid1"
             assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") == "sibling"
 
-            await core._collaborators.web_transport.save_cookies(jar_with("sid2"))
+            await core._web_runtime.web_transport.save_cookies(jar_with("sid2"))
             assert _cookie_value(storage, "SID", ".google.com") == "sid2", (
                 "The successful SID delta from the partial save must advance "
                 "baseline; otherwise the next SID rotation CAS-rejects against "
@@ -1597,7 +1603,8 @@ class TestCASVariantAware:
         # Pre-client save runs through the real save_cookies_to_storage; the
         # CAS rejection must keep SIBLING on disk and the variant-aware
         # baseline-preservation must end up with the bare-host snapshot.
-        auth = await auth_mod.AuthTokens.from_storage(path=storage)
+        with pytest.warns(DeprecationWarning, match="AuthTokens.from_storage"):
+            auth = await auth_mod.AuthTokens.from_storage(path=storage)
 
         assert _cookie_value(storage, "OSID", "accounts.google.com") == "SIBLING", (
             "First save must CAS-reject via the variant-aware lookup so the "
@@ -1625,52 +1632,51 @@ class TestCASVariantAware:
         core = build_client_shell_for_tests(auth)
         await core.__aenter__()
         try:
-            assert core._collaborators.cookie_persistence.loaded_cookie_snapshot is not None
+            assert core._web_runtime.cookie_persistence.loaded_cookie_snapshot is not None
             assert (
-                core._collaborators.cookie_persistence.loaded_cookie_snapshot[bare_key].value
-                == "OLD"
+                core._web_runtime.cookie_persistence.loaded_cookie_snapshot[bare_key].value == "OLD"
             ), (
                 "Direct client open must preserve the load-time baseline from "
                 "which its live jar was derived"
             )
-            assert dotted_key not in (core._collaborators.cookie_persistence.loaded_cookie_snapshot)
+            assert dotted_key not in (core._web_runtime.cookie_persistence.loaded_cookie_snapshot)
 
             # Set-Cookie aligns the in-memory dotted OSID with what disk now
             # holds. Run the second save through the real lifecycle plumbing.
-            assert core._collaborators.kernel.http_client is not None
-            live = core._collaborators.kernel.get_http_client().cookies
+            assert core._web_runtime.kernel.http_client is not None
+            live = core._web_runtime.kernel.get_http_client().cookies
             live.delete("OSID", domain="accounts.google.com", path="/")
             _set_cookie_value(live, "OSID", "SIBLING")
-            await core._collaborators.web_transport.save_cookies(live)
+            await core._web_runtime.web_transport.save_cookies(live)
 
             assert _cookie_value(storage, "OSID", "accounts.google.com") == "SIBLING", (
                 "Second save must not re-clobber the sibling write — the "
                 "variant-aware CAS lookup must still see the disk/baseline "
                 "divergence through the leading-dot variant"
             )
-            assert core._collaborators.cookie_persistence.loaded_cookie_snapshot is not None
+            assert core._web_runtime.cookie_persistence.loaded_cookie_snapshot is not None
             assert (
-                core._collaborators.cookie_persistence.loaded_cookie_snapshot[dotted_key].value
+                core._web_runtime.cookie_persistence.loaded_cookie_snapshot[dotted_key].value
                 == "SIBLING"
             ), (
                 "After the second save, disk already matches the current "
                 "dotted-variant jar value, so the accepted final live row "
                 "must become the next typed baseline"
             )
-            assert bare_key not in core._collaborators.cookie_persistence.loaded_cookie_snapshot
+            assert bare_key not in core._web_runtime.cookie_persistence.loaded_cookie_snapshot
 
-            _set_cookie_value(core._collaborators.kernel.get_http_client().cookies, "OSID", "NEXT")
-            await core._collaborators.web_transport.save_cookies(
-                core._collaborators.kernel.get_http_client().cookies
+            _set_cookie_value(core._web_runtime.kernel.get_http_client().cookies, "OSID", "NEXT")
+            await core._web_runtime.web_transport.save_cookies(
+                core._web_runtime.kernel.get_http_client().cookies
             )
 
             assert _cookie_value(storage, "OSID", "accounts.google.com") == "NEXT", (
                 "After convergence advances the baseline, a later OSID "
                 "rotation must persist through the variant-aware lookup"
             )
-            assert core._collaborators.cookie_persistence.loaded_cookie_snapshot is not None
+            assert core._web_runtime.cookie_persistence.loaded_cookie_snapshot is not None
             assert (
-                core._collaborators.cookie_persistence.loaded_cookie_snapshot[dotted_key].value
+                core._web_runtime.cookie_persistence.loaded_cookie_snapshot[dotted_key].value
                 == "NEXT"
             ), (
                 "The successful follow-up rotation should advance the "
@@ -1717,15 +1723,16 @@ class TestSaveCookiesSeesLatestBaselineUnderContention:
             ],
         )
 
-        auth = AuthTokens(
-            cookies={
-                ("SID", ".google.com"): "sid",
-                ("__Secure-1PSIDTS", ".google.com"): "v0",
-            },
-            csrf_token="t",
-            session_id="s",
-            storage_path=storage,
-        )
+        with pytest.warns(DeprecationWarning, match="synchronous storage/recovery I/O"):
+            auth = AuthTokens(
+                cookies={
+                    ("SID", ".google.com"): "sid",
+                    ("__Secure-1PSIDTS", ".google.com"): "v0",
+                },
+                csrf_token="t",
+                session_id="s",
+                storage_path=storage,
+            )
 
         captured_calls: list[tuple[str, dict | None]] = []
         real_save = auth_mod.save_cookies_to_storage
@@ -1789,7 +1796,7 @@ class TestSaveCookiesSeesLatestBaselineUnderContention:
         # test to depend on. The assertion below uses positional names
         # (first/second by worker execution order, not by gather argument
         # order) to stay robust across schedulers.
-        assert core._collaborators.kernel.http_client is not None
+        assert core._web_runtime.kernel.http_client is not None
 
         def _fresh_jar(psidts_value: str) -> httpx.Cookies:
             j = httpx.Cookies()
@@ -1802,8 +1809,8 @@ class TestSaveCookiesSeesLatestBaselineUnderContention:
 
         try:
             await asyncio.gather(
-                core._collaborators.web_transport.save_cookies(jar_a),
-                core._collaborators.web_transport.save_cookies(jar_b),
+                core._web_runtime.web_transport.save_cookies(jar_a),
+                core._web_runtime.web_transport.save_cookies(jar_b),
             )
         finally:
             await core.close()

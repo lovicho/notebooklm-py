@@ -240,6 +240,8 @@ def test_closed_values_validate_carriers_copy_baselines_and_redact_secrets(tmp_p
         SessionSeed(object(), baseline)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="allow_headless"):
         LoadPolicy(allow_headless=1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="heal_psidts"):
+        LoadPolicy(heal_psidts=1)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="token acquisition fields"):
         TokenAcquisition("csrf", "session", _live(), baseline, object())  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="file loaded auth fields"):
@@ -269,7 +271,8 @@ async def test_inherited_from_storage_constructs_runtime_subclass_exactly_once(m
 
     monkeypatch.setattr(_auth_tokens, "_load_stored_auth", fake_load)
 
-    result = await DerivedAuth.from_storage()
+    with pytest.warns(DeprecationWarning, match="AuthTokens.from_storage"):
+        result = await DerivedAuth.from_storage()
 
     assert type(result) is DerivedAuth
     assert calls == 1
