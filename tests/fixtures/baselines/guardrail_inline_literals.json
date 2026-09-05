@@ -5,12 +5,12 @@
   "tests/_guardrails/_wire_contract.py": {
     "ENUM_BINDINGS": 156,
     "ENUM_GAPS": 34,
-    "MAPPINGS": 751,
+    "MAPPINGS": 811,
     "PINNED": 174,
-    "UNMAPPED": 340
+    "UNMAPPED": 359
   },
   "tests/_guardrails/test_android_retry_manifest.py": {
-    "_WEB_CLASS_BY_ANDROID_NAME": 97
+    "_WEB_CLASS_BY_ANDROID_NAME": 99
   },
   "tests/_guardrails/test_asyncio_loop_affinity_guard.py": {
     "ALLOWLIST": 21
@@ -49,12 +49,12 @@
     "_ALLOWED_IMPORTS": 52
   },
   "tests/_guardrails/test_auth_profile_store_boundary.py": {
-    "_EXPECTED_IMPORTS": 225,
+    "_EXPECTED_IMPORTS": 245,
     "_NATIVE_REPLACE_CALLER_TESTS": 33
   },
   "tests/_guardrails/test_auth_storage_compatibility.py": {
     "EXPECTED_ALIAS_CALLERS": 61,
-    "EXPECTED_DIRECT_CALLERS": 62,
+    "EXPECTED_DIRECT_CALLERS": 64,
     "EXPECTED_SIGNATURES": 561,
     "FACADE_INVENTORY_IDENTITIES": 23,
     "LIVE_SIGNATURES": 61
@@ -67,13 +67,13 @@
     "_VALUE_FIELDS": 23
   },
   "tests/_guardrails/test_authtokens_jar_sync.py": {
-    "_COOKIE_SHADOW_INVENTORY": 96,
+    "_COOKIE_SHADOW_INVENTORY": 102,
     "_NON_AUTHTOKENS_CANDIDATES": 30
   },
   "tests/_guardrails/test_backend_abstract_contracts.py": {
-    "BASE_ABSTRACT_CONTRACTS": 171,
+    "BASE_ABSTRACT_CONTRACTS": 173,
     "_ANDROID_IMPLEMENTATIONS": 33,
-    "_ANDROID_INHERITED_WORKFLOWS": 102
+    "_ANDROID_INHERITED_WORKFLOWS": 103
   },
   "tests/_guardrails/test_backend_boundaries.py": {
     "LAZY_WEB_IMPORT_ALLOWLIST": 34
@@ -87,6 +87,10 @@
   "tests/_guardrails/test_cli_vcr_coverage.py": {
     "GROUP_COVERAGE": 24
   },
+  "tests/_guardrails/test_client_composition.py": {
+    "FEATURE_API_NAMES": 26,
+    "WEB_ONLY_NAMESPACE_IMPORTS": 26
+  },
   "tests/_guardrails/test_error_contract_catch_ordering.py": {
     "EXCLUDED_FROM_REQUIRED": 28
   },
@@ -97,7 +101,7 @@
     "_EXECUTOR_RAW_ARGS": 32
   },
   "tests/_guardrails/test_golden_decode_coverage.py": {
-    "GOLDEN_COVERAGE": 50
+    "GOLDEN_COVERAGE": 54
   },
   "tests/_guardrails/test_login_package_dag.py": {
     "ALLOWED_EDGES": 43

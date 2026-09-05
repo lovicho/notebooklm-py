@@ -587,6 +587,296 @@ async def test_unmatched_started_requires_matching_public_backing(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_unconfirmed_quota_may_have_no_committed_artifact(tmp_path) -> None:
+    journal = tmp_path / "journal.jsonl"
+    quota_operation, accepted_operation = str(uuid.uuid4()), str(uuid.uuid4())
+    write_journal(
+        journal,
+        [
+            row(quota_operation, "started", family="video"),
+            row(
+                quota_operation,
+                "quota_response_unconfirmed",
+                family="video",
+                reason="server_commit_unknown",
+            ),
+            row(accepted_operation, "started"),
+            row(accepted_operation, "accepted", resource_id="tracked"),
+        ],
+    )
+    tracked = Artifact("tracked", "audio")
+    result = await verify.verify_journal(
+        Client([[tracked], [tracked]]),
+        notebook_id="generation-role",
+        journal_path=journal,
+        timeout=240,
+        minimum_discovery_window=0,
+        quiet_polls=1,
+        poll_interval=0,
+    )
+    assert result["accepted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_quota_may_match_one_committed_artifact(tmp_path) -> None:
+    journal = tmp_path / "journal.jsonl"
+    operation_id = str(uuid.uuid4())
+    write_journal(
+        journal,
+        [
+            row(operation_id, "started"),
+            row(
+                operation_id,
+                "quota_response_unconfirmed",
+                reason="server_commit_unknown",
+            ),
+        ],
+    )
+    artifact = Artifact("committed-after-quota", "audio")
+    with pytest.raises(verify.EmptyArtifactsError, match="no accepted producer operations"):
+        await verify.verify_journal(
+            Client([[artifact], [artifact]]),
+            notebook_id="generation-role",
+            journal_path=journal,
+            timeout=240,
+            minimum_discovery_window=0,
+            quiet_polls=1,
+            poll_interval=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_quota_authorizes_matching_artifact_during_settlement(tmp_path) -> None:
+    journal = tmp_path / "journal.jsonl"
+    quota_operation, accepted_operation = str(uuid.uuid4()), str(uuid.uuid4())
+    write_journal(
+        journal,
+        [
+            row(quota_operation, "started"),
+            row(
+                quota_operation,
+                "quota_response_unconfirmed",
+                reason="server_commit_unknown",
+            ),
+            row(accepted_operation, "started", family="report"),
+            row(
+                accepted_operation,
+                "accepted",
+                resource_id="tracked",
+                family="report",
+            ),
+        ],
+    )
+    tracked_pending = Artifact("tracked", "report", "pending")
+    tracked_done = Artifact("tracked", "report")
+    late = Artifact("late-after-quota", "audio", "pending")
+    result = await verify.verify_journal(
+        Client([[tracked_pending], [tracked_pending, late], [tracked_done, late]]),
+        notebook_id="generation-role",
+        journal_path=journal,
+        timeout=240,
+        minimum_discovery_window=0,
+        quiet_polls=1,
+        poll_interval=0,
+    )
+    assert result["accepted"] == 1
+    assert result["quota_committed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_quota_does_not_authorize_unrelated_inventory(tmp_path) -> None:
+    journal = tmp_path / "journal.jsonl"
+    operation_id = str(uuid.uuid4())
+    write_journal(
+        journal,
+        [
+            row(operation_id, "started"),
+            row(
+                operation_id,
+                "quota_response_unconfirmed",
+                reason="server_commit_unknown",
+            ),
+        ],
+    )
+    with pytest.raises(verify.JournalError, match="no matching journal start"):
+        await verify.verify_journal(
+            Client([[Artifact("wrong-family", "video")]]),
+            notebook_id="generation-role",
+            journal_path=journal,
+            timeout=240,
+            minimum_discovery_window=0,
+            quiet_polls=1,
+            poll_interval=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_quota_authorizes_at_most_one_matching_artifact(tmp_path) -> None:
+    journal = tmp_path / "journal.jsonl"
+    operation_id = str(uuid.uuid4())
+    write_journal(
+        journal,
+        [
+            row(operation_id, "started"),
+            row(
+                operation_id,
+                "quota_response_unconfirmed",
+                reason="server_commit_unknown",
+            ),
+        ],
+    )
+    artifacts = [Artifact("first", "audio"), Artifact("second", "audio", "pending")]
+    with pytest.raises(verify.JournalError, match="no matching journal start"):
+        await verify.verify_journal(
+            Client([artifacts]),
+            notebook_id="generation-role",
+            journal_path=journal,
+            timeout=240,
+            minimum_discovery_window=0,
+            quiet_polls=1,
+            poll_interval=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_started_and_unconfirmed_quota_reconcile_same_family_as_a_group(tmp_path) -> None:
+    journal = tmp_path / "journal.jsonl"
+    started_operation, quota_operation = str(uuid.uuid4()), str(uuid.uuid4())
+    write_journal(
+        journal,
+        [
+            row(started_operation, "started"),
+            row(quota_operation, "started"),
+            row(
+                quota_operation,
+                "quota_response_unconfirmed",
+                reason="server_commit_unknown",
+            ),
+        ],
+    )
+    artifacts = [Artifact("first", "audio"), Artifact("second", "audio", "pending")]
+    result = await verify.verify_journal(
+        Client([artifacts, artifacts]),
+        notebook_id="generation-role",
+        journal_path=journal,
+        timeout=240,
+        minimum_discovery_window=0,
+        quiet_polls=1,
+        poll_interval=0,
+    )
+    assert result["accepted"] == 1
+    assert result["quota_committed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_crash_reconciled_candidate_still_requires_settlement(tmp_path) -> None:
+    journal = tmp_path / "journal.jsonl"
+    operation_id = str(uuid.uuid4())
+    write_journal(journal, [row(operation_id, "started")])
+    pending = Artifact("crash-reconciled", "audio", "pending")
+    clock = Clock()
+
+    with pytest.raises(verify.SettlementTimeoutError):
+        await verify.verify_journal(
+            Client([[pending]] * 10),
+            notebook_id="generation-role",
+            journal_path=journal,
+            timeout=240,
+            clock=clock,
+            sleep=clock.sleep,
+            minimum_discovery_window=0,
+            quiet_polls=1,
+            poll_interval=30,
+        )
+
+
+@pytest.mark.asyncio
+async def test_quota_shadow_placeholders_do_not_block_accepted_settlement(tmp_path) -> None:
+    journal = tmp_path / "journal.jsonl"
+    rows = []
+    accepted = []
+    quota_shadows = []
+    for index, family in enumerate(("audio", "quiz", "flashcards", "infographic", "mind_map")):
+        operation_id = str(uuid.uuid4())
+        resource_id = f"accepted-{index}"
+        id_kind = "note_mind_map" if family == "mind_map" else "studio_task"
+        rows.extend(
+            [
+                row(operation_id, "started", family=family, id_kind=id_kind),
+                row(
+                    operation_id,
+                    "persisted" if family == "mind_map" else "accepted",
+                    resource_id=resource_id,
+                    family=family,
+                    id_kind=id_kind,
+                ),
+            ]
+        )
+        accepted.append(Artifact(resource_id, family))
+    for index, family in enumerate(
+        (
+            "audio",
+            "video",
+            "slide_deck",
+            "data_table",
+            "report",
+            "report",
+            "report",
+            "report",
+            "mind_map",
+        )
+    ):
+        operation_id = str(uuid.uuid4())
+        resource_id = f"quota-shadow-{index}"
+        rows.extend(
+            [
+                row(operation_id, "started", family=family),
+                row(
+                    operation_id,
+                    "quota_response_unconfirmed",
+                    family=family,
+                    reason="server_commit_unknown",
+                ),
+            ]
+        )
+        quota_shadows.append(
+            Artifact(resource_id, family, "pending", interactive=family == "mind_map")
+        )
+    write_journal(journal, rows)
+    inventory = accepted + quota_shadows
+
+    result = await verify.verify_journal(
+        Client([inventory, inventory]),
+        notebook_id="generation-role",
+        journal_path=journal,
+        timeout=240,
+        minimum_discovery_window=0,
+        quiet_polls=1,
+        poll_interval=0,
+    )
+
+    assert result == {
+        "accepted": 5,
+        "completed": 5,
+        "failed": 0,
+        "pending": 0,
+        "removed": 0,
+        "quota_committed": 9,
+        "families": [
+            "audio",
+            "data_table",
+            "flashcards",
+            "infographic",
+            "mind_map",
+            "quiz",
+            "report",
+            "slide_deck",
+            "video",
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_inventory_artifact_requires_a_matching_journal_start(tmp_path) -> None:
     journal = tmp_path / "journal.jsonl"
     operation_id = str(uuid.uuid4())

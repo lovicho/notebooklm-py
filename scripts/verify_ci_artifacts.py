@@ -40,6 +40,7 @@ EVENTS = {
     "completed",
     "discovered_accepted",
     "rate_limited_rejected",
+    "quota_response_unconfirmed",
     "quota_no_commit_observed",
     "delete_confirmed",
 }
@@ -219,6 +220,11 @@ def _matches_operation_target(operation: JournalOperation, artifact: Any) -> boo
     return _family(artifact) == expected_family and _public_id_kind(artifact) == operation.id_kind
 
 
+def _operation_target(operation: JournalOperation) -> DiscoveredTarget:
+    family = "report" if operation.family == "study_guide" else operation.family
+    return DiscoveredTarget(family=family, id_kind=operation.id_kind)
+
+
 def _has_untracked_operation_target(
     operation: JournalOperation,
     inventory: dict[str, Any],
@@ -245,6 +251,7 @@ def _validate_transition(
             "persisted",
             "discovered_accepted",
             "rate_limited_rejected",
+            "quota_response_unconfirmed",
             "quota_no_commit_observed",
         },
         "accepted": {"completed", "delete_confirmed"},
@@ -252,6 +259,7 @@ def _validate_transition(
         "completed": {"delete_confirmed"},
         "discovered_accepted": {"delete_confirmed"},
         "rate_limited_rejected": set(),
+        "quota_response_unconfirmed": set(),
         "quota_no_commit_observed": set(),
         "delete_confirmed": set(),
     }
@@ -274,6 +282,8 @@ def _validate_transition(
         raise JournalError("discovered acceptance has no started event")
     if event == "discovered_accepted" and operation.lifecycle != "test_owned":
         raise JournalError("discovered acceptance is not test-owned")
+    if event == "quota_response_unconfirmed" and operation.lifecycle != "settle":
+        raise JournalError("unconfirmed quota response does not use settle lifecycle")
     if event == "delete_confirmed" and not (
         previous & {"accepted", "persisted", "discovered_accepted", "completed"}
     ):
@@ -338,6 +348,7 @@ def parse_journal(path: Path, *, notebook_id: str) -> dict[str, JournalOperation
         expected_reasons = {
             "discovered_accepted": {"post_create_quota", "retry_preclean"},
             "rate_limited_rejected": {"typed_pre_acceptance"},
+            "quota_response_unconfirmed": {"server_commit_unknown"},
             "quota_no_commit_observed": {"post_create_reconciliation"},
             "delete_confirmed": {"test_teardown", "post_create_quota", "retry_preclean"},
         }
@@ -538,25 +549,45 @@ async def verify_journal(
     unmatched_started = [
         operation for operation in operations.values() if operation.event_names == {"started"}
     ]
-    unmatched_candidates = set(unjournaled_ids)
-    for operation in unmatched_started:
-        expected = "report" if operation.family == "study_guide" else operation.family
-        candidates = {
-            resource_id
-            for resource_id in unmatched_candidates
-            if unjournaled[resource_id].family == expected
-            and unjournaled[resource_id].id_kind == operation.id_kind
-        }
-        if len(candidates) != 1:
-            raise JournalError("unmatched started operation could not be uniquely reconciled")
-        unmatched_candidates.remove(candidates.pop())
-    if unmatched_candidates:
+    unconfirmed_quota = [
+        operation
+        for operation in operations.values()
+        if operation.event_names == {"started", "quota_response_unconfirmed"}
+    ]
+    discovered_targets = Counter(unjournaled.values())
+    required_targets = Counter(_operation_target(operation) for operation in unmatched_started)
+    quota_allowances = Counter(_operation_target(operation) for operation in unconfirmed_quota)
+    if any(discovered_targets[target] < count for target, count in required_targets.items()):
+        raise JournalError("unmatched started operation could not be uniquely reconciled")
+    if any(
+        count > required_targets[target] + quota_allowances[target]
+        for target, count in discovered_targets.items()
+    ):
         raise JournalError("inventory artifact has no matching journal start")
-    accepted_count = len(accepted_operations) + len(unjournaled_ids)
+    quota_allowances.subtract(
+        {
+            target: max(0, count - required_targets[target])
+            for target, count in discovered_targets.items()
+        }
+    )
+    quota_allowances = +quota_allowances
+    # A quota response can leave a matching placeholder in the public inventory,
+    # but the caller never received an accepted task ID for that row.  Keep those
+    # rows in the reconciliation candidate groups so they remain bounded by the
+    # journal, without promoting them into work that must settle.  An unmatched
+    # ``started`` operation is different: it represents a crash before the
+    # accepted ID could be appended and therefore still requires one terminal row
+    # of the matching target.  Grouping candidates by target is necessary because
+    # the public inventory cannot identify which same-family row belongs to which
+    # of those two operation shapes.
+    discovered_ids_by_target: dict[DiscoveredTarget, set[str]] = {}
+    for resource_id, target in unjournaled.items():
+        discovered_ids_by_target.setdefault(target, set()).add(resource_id)
+    accepted_count = len(accepted_operations) + sum(required_targets.values())
     if accepted_count == 0:
         raise EmptyArtifactsError("journal/inventory has no accepted producer operations")
     ever_visible_ids = set(by_id)
-    monitored_ids = (set(tracked) - authorized_deleted) | unjournaled_ids
+    monitored_ids = set(tracked) - authorized_deleted
     statuses: dict[str, str] = {}
     missing_counts: Counter[str] = Counter()
     while True:
@@ -570,8 +601,27 @@ async def verify_journal(
             raise JournalError("test-owned operation has no verified deletion")
         if authorized_deleted & current_ids:
             raise JournalError("delete-confirmed resource is still present")
-        if current_ids - tracked_ids - unjournaled_ids:
+        newly_visible = {
+            resource_id: artifact
+            for resource_id, artifact in current_by_id.items()
+            if resource_id not in tracked_ids and resource_id not in unjournaled_ids
+        }
+        newly_visible_targets = Counter(
+            DiscoveredTarget(family=_family(artifact), id_kind=_public_id_kind(artifact))
+            for artifact in newly_visible.values()
+        )
+        if any(count > quota_allowances[target] for target, count in newly_visible_targets.items()):
             raise JournalError("inventory artifact has no matching journal start")
+        if newly_visible:
+            quota_allowances.subtract(newly_visible_targets)
+            quota_allowances = +quota_allowances
+            for resource_id, artifact in newly_visible.items():
+                target = DiscoveredTarget(
+                    family=_family(artifact),
+                    id_kind=_public_id_kind(artifact),
+                )
+                discovered_ids_by_target.setdefault(target, set()).add(resource_id)
+                unjournaled_ids.add(resource_id)
         for resource_id, operation in tracked.items():
             artifact = current_by_id.get(resource_id)
             if artifact is None or resource_id in authorized_deleted:
@@ -605,12 +655,44 @@ async def verify_journal(
             if removed_ids & ever_visible_ids:
                 raise RemovedArtifactError("one or more accepted artifacts were delisted")
             raise RemovedArtifactError("one or more accepted artifacts were removed")
+
+        # Candidate IDs discovered without an ID-bearing journal event are
+        # indistinguishable within one family/backing target.  Require enough
+        # terminal candidates to cover only the unmatched ``started`` operations;
+        # any surplus is an authorized quota-shadow row.  Prefer failed outcomes
+        # when the assignment is ambiguous so quota reconciliation cannot hide a
+        # real failed producer operation.
+        for target, required in required_targets.items():
+            candidate_ids = discovered_ids_by_target.get(target, set())
+            candidate_statuses: list[str] = []
+            for resource_id in candidate_ids:
+                artifact = current_by_id.get(resource_id)
+                if artifact is None:
+                    missing_counts[resource_id] += 1
+                    status = (
+                        "removed" if missing_counts[resource_id] >= not_found_grace else "not_found"
+                    )
+                else:
+                    missing_counts[resource_id] = 0
+                    status = _snapshot_status(artifact)
+                candidate_statuses.append(status)
+            remaining = sum(status != "removed" for status in candidate_statuses)
+            if remaining < required:
+                raise RemovedArtifactError("one or more crash-reconciled artifacts were delisted")
+            candidate_failed = sum(status == "failed" for status in candidate_statuses)
+            candidate_completed = sum(status == "completed" for status in candidate_statuses)
+            terminal = min(required, candidate_failed + candidate_completed)
+            selected_failed = min(candidate_failed, terminal)
+            failed += selected_failed
+            completed += terminal - selected_failed
+            pending += required - terminal
+
         ever_visible_ids.update(current_ids)
         if pending == 0:
             never_visible = (set(tracked) - authorized_deleted) - ever_visible_ids
             if never_visible:
                 raise RemovedArtifactError("one or more accepted artifacts never became listable")
-            if not (monitored_ids & ever_visible_ids):
+            if not (monitored_ids & ever_visible_ids) and not required_targets:
                 raise EmptyArtifactsError("generation copy has no discovered persistent artifacts")
             denominator = completed + failed
             if denominator == 0:
@@ -625,7 +707,8 @@ async def verify_journal(
                 print("WARNING: missing artifact families: " + ", ".join(sorted(missing)))
             print(
                 f"Journal verification: accepted={accepted_count} "
-                f"completed={completed} failed={failed} pending=0 removed=0"
+                f"completed={completed} failed={failed} pending=0 removed=0 "
+                f"quota_committed={len(unjournaled_ids) - sum(required_targets.values())}"
             )
             print("Families: " + ", ".join(sorted(families)))
             return {
@@ -634,6 +717,7 @@ async def verify_journal(
                 "failed": failed,
                 "pending": 0,
                 "removed": 0,
+                "quota_committed": len(unjournaled_ids) - sum(required_targets.values()),
                 "families": sorted(families),
             }
         if clock() + poll_interval > deadline:

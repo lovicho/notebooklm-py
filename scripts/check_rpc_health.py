@@ -2,7 +2,7 @@
 """RPC Health Check - Verify NotebookLM RPC method IDs are still valid.
 
 This script makes minimal API calls to exercise RPC methods and verify
-that the method IDs in rpc/types.py still match what the API returns.
+that the method IDs in rpc/_identifiers.py still match what the API returns.
 
 Exit codes:
     0 - All RPC methods OK (or only transient errors: rate-limits / ReadTimeouts)
@@ -672,6 +672,12 @@ def get_test_params(method: RPCMethod, notebook_id: str | None) -> list[Any] | N
     # Methods that work without a notebook
     if method == RPCMethod.LIST_NOTEBOOKS:
         return []
+
+    if method == RPCMethod.GET_ACCOUNT:
+        return []
+
+    if method == RPCMethod.LIST_QUOTA_SUMMARY:
+        return [None]
 
     # Global settings (no notebook required)
     if method == RPCMethod.GET_USER_SETTINGS:
@@ -2450,7 +2456,10 @@ def print_summary(
             print(f"  {r.method.name}:")
             print(f"    Expected: '{r.expected_id}'")
             print(f"    Found:    {r.found_ids}")
-            print(f"    Action:   Update RPCMethod.{r.method.name} in src/notebooklm/rpc/types.py")
+            print(
+                f"    Action:   Update RPCMethod.{r.method.name} in "
+                "src/notebooklm/rpc/_identifiers.py"
+            )
             print()
 
     # Print details for errors, split into non-transient (real failures)

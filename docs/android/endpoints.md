@@ -11,7 +11,7 @@ and cross-referenced to the 48-method Web registry used for that audit. The newe
 The original traffic capture exercised 21 methods and decoded their wire shapes here; later direct
 bearer/gRPC probes also exercised APK-unwired methods and destructive APK-present methods on
 disposable copies. The
-**complete protobuf schema** — 323 messages / 868 fields with real field names, tags, types, and
+**complete protobuf schema** — 326 messages / 879 fields with real field names, tags, types, and
 cardinality — was recovered by decompiling the Flutter binary with a Dart-ported blutter (3.13 for the
 `1.46.7` snapshot, 3.14 for the current `1.55.10` regeneration), and
 is checked in at **[android/schema.proto](schema.proto)**. The inline shapes below keep their
@@ -801,8 +801,9 @@ response (streamed, each frame a fuller snapshot):
 
 Each streamed frame re-sends the whole answer-so-far, so the **final frame is the complete
 answer**; earlier frames are partial. chat uses one whole-stream deadline with no retry, accepts only
-a frame whose response field `#5` declares finality, and raises `ChatResponseParseError` if EOF
-arrives first. It never concatenates frames. Citations are exposed only through proven
+a frame whose response field `#5` declares finality, stops without waiting for a later transport
+EOF, and raises `ChatResponseParseError` if EOF arrives first. It never concatenates frames.
+Citations are exposed only through proven
 `AnswerResponse.responseDoc` fields: `TailwindDoc.objects → DocumentObject.citation →
 sourceAttribution.ingestedSource.source`, with cited paragraph text from `Citation.fragment` and
 answer anchors from `TailwindDoc.body.inlineObjectLocations`. Speculative flattened citation slots
@@ -937,7 +938,7 @@ probes, and one routed-but-rejected `RefreshSource` result. A later stale-Google
 also live-verified on a rich disposable copy. These later results supplement the 21 captured
 shapes; they do not change the capture count.
 
-**Field names/tags/types — recovered:** the full protobuf schema (323 messages, 868 fields) is in
+**Field names/tags/types — recovered:** the full protobuf schema (326 messages, 879 fields) is in
 [android/schema.proto](schema.proto), decompiled from the binary. This supersedes the
 `(inferred)` names in the inline shapes — including every message not reachable from the mobile UI
 (`CreateNote`/`MutateNote`/`DeleteNotes`, `ActOnSources`, artifact ops, the WebRTC Live messages).

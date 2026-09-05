@@ -25,7 +25,7 @@ asserts each one is EITHER:
    ``None`` so there is no decoded payload to pin.
 
 Keying by ``RPCMethod`` (not by obfuscated string literals) keeps
-``rpc/types.py`` the single source of truth: when Google rotates an ID and the
+``rpc/_identifiers.py`` the single source of truth: when Google rotates an ID and the
 cassettes are re-recorded, this gate follows automatically. A cassette
 recording an rpcid that no current ``RPCMethod`` knows fails loudly — that is
 either a stale cassette or an un-modelled RPC, both worth a human look.
@@ -96,6 +96,7 @@ _DISCOVER_VCR = "tests/integration/test_research_discover_vcr.py"
 _PLAY_BOOKS_VCR = "tests/integration/test_play_books_vcr.py"
 _CHAT_SESSION_CONTROL_VCR = "tests/integration/test_chat_session_control_vcr.py"
 _SOURCE_SEARCH_VCR = "tests/integration/test_source_search_vcr.py"
+_USAGE_VCR = "tests/integration/test_usage_vcr.py"
 
 GoldenPointer = tuple[str, str]
 
@@ -219,6 +220,17 @@ GOLDEN_COVERAGE: dict[RPCMethod, tuple[GoldenPointer, ...]] = {
     ),
     RPCMethod.SET_USER_SETTINGS: (
         (_GOLDEN_EXPANSION, "TestSettingsGoldenDecoded::test_set_output_language_decoded_golden"),
+    ),
+    # Usage is recorded separately per account tier because reset timestamps
+    # and numeric meter values are profile-specific. The replay tests pin the
+    # stable status/window/action kinds while tolerating sanitized numbers.
+    RPCMethod.GET_ACCOUNT: (
+        (_USAGE_VCR, "TestUsageVCR::test_standard_usage"),
+        (_USAGE_VCR, "TestUsageVCR::test_pro_usage"),
+    ),
+    RPCMethod.LIST_QUOTA_SUMMARY: (
+        (_USAGE_VCR, "TestUsageVCR::test_standard_usage"),
+        (_USAGE_VCR, "TestUsageVCR::test_pro_usage"),
     ),
     # --- artifacts ---
     RPCMethod.CREATE_ARTIFACT: (
@@ -420,7 +432,7 @@ def test_every_cassette_rpcid_is_classified() -> None:
     unknown = {rpcid: sorted(files) for rpcid, files in corpus.items() if rpcid not in known_values}
     assert unknown == {}, (
         "Cassette(s) record rpcid(s) that no current RPCMethod constant knows — "
-        "either Google rotated an ID (update rpc/types.py and re-record) or a "
+        "either Google rotated an ID (update rpc/_identifiers.py and re-record) or a "
         f"stale cassette slipped in: {unknown}"
     )
 

@@ -37,8 +37,9 @@ from notebooklm import NotebookLMClient
 # these e2e fixtures — imports it from its canonical ``_auth.tokens`` home.
 from notebooklm._auth.tokens import load_auth_from_storage
 from notebooklm.auth import AuthTokens
-from notebooklm.exceptions import ChatError, RateLimitError
+from notebooklm.exceptions import ChatError, RateLimitError, RPCError
 from notebooklm.paths import get_profile_dir
+from notebooklm.types import GrpcStatusCode, normalize_grpc_status
 from tests.e2e._generation_helpers import _TYPED_RATE_LIMIT_ATTR
 from tests.e2e._generation_journal import (
     JournalConfigurationError,
@@ -102,8 +103,15 @@ _GENERATION_SKIP_TARGETS = {
 _RATE_LIMIT_METHOD_ATTR = "_notebooklm_rate_limit_method_id"
 
 
-def _typed_rate_limit_cause(error: BaseException) -> RateLimitError | None:
-    """Find typed quota evidence through explicit exception chaining only."""
+def _typed_rate_limit_cause(error: BaseException) -> RPCError | None:
+    """Find exact quota evidence through explicit exception chaining only.
+
+    Android ``CreateArtifact`` is not replay-safe. Its adapter therefore replaces
+    transport-class failures with an unconfirmed generic ``RPCError`` so app
+    surfaces never advise callers to retry an ambiguous create. Preserve that
+    production contract while recognizing the one fully typed quota shape here:
+    a marked CreateArtifact error carrying gRPC ``RESOURCE_EXHAUSTED``.
+    """
     pending: list[BaseException] = [error]
     seen: set[int] = set()
     while pending:
@@ -113,12 +121,19 @@ def _typed_rate_limit_cause(error: BaseException) -> RateLimitError | None:
         seen.add(id(current))
         if isinstance(current, RateLimitError):
             return current
+        if (
+            isinstance(current, RPCError)
+            and getattr(current, "unconfirmed", False) is True
+            and str(current.method_id).endswith("/CreateArtifact")
+            and normalize_grpc_status(current.rpc_code) is GrpcStatusCode.RESOURCE_EXHAUSTED
+        ):
+            return current
         if current.__cause__ is not None:
             pending.append(current.__cause__)
     return None
 
 
-def _raise_typed_rate_limit_skip(rate_limit: RateLimitError) -> None:
+def _raise_typed_rate_limit_skip(rate_limit: RPCError) -> None:
     """Raise pytest's skip signal while retaining machine-readable quota metadata."""
     skipped = pytest.skip.Exception(f"Rate limit: {rate_limit}")
     setattr(skipped, _TYPED_RATE_LIMIT_ATTR, True)
@@ -165,9 +180,10 @@ def _install_generation_rate_limit_skip(client: NotebookLMClient) -> None:
     CREATE_ARTIFACT with a quota error (e.g. upstream status 8, Resource
     exhausted) — before any ``GenerationStatus`` exists, so the
     ``is_rate_limited`` skip in ``assert_generation_started`` never runs.
-    That is server-side throttling, not a client defect. Only the precise
-    typed ``RateLimitError`` skips; every other exception still raises so
-    real defects stay visible.
+    Android's non-replay-safe create path instead preserves that status on an
+    unconfirmed generic ``RPCError``. That is server-side throttling, not a
+    client defect. Only those exact typed shapes skip; every other exception
+    still raises so real defects stay visible.
 
     Covers every namespace in ``_GENERATION_SKIP_TARGETS`` — not just
     ``client.artifacts`` — so paths like ``client.mind_maps.generate`` (the
@@ -247,12 +263,12 @@ def _install_generation_journal(client: NotebookLMClient, journal) -> None:
                     result = await __original(*args, **kwargs)
                 except BaseException as exc:
                     if _typed_rate_limit_cause(exc) is not None:
-                        operation.rate_limited_rejected()
+                        operation.quota_response_unconfirmed()
                     raise
                 if result is not None and getattr(result, "task_id", None):
                     operation.accepted(result.task_id)
                 elif result is not None and bool(getattr(result, "is_rate_limited", False)):
-                    operation.rate_limited_rejected()
+                    operation.quota_response_unconfirmed()
                 return result
             finally:
                 journal_call_active.reset(journal_token)
@@ -401,8 +417,15 @@ def _managed_bindings() -> dict[str, str] | None:
     missing = [name for name, value in bindings.items() if not value]
     if missing:
         raise ValueError(f"managed {mode} mode is missing role bindings: " + ", ".join(missing))
-    if len(set(bindings.values())) != len(bindings):
-        raise ValueError(f"managed {mode}-mode role bindings must be distinct")
+    if mode == "full":
+        reference = bindings["NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID"]
+        generation = bindings["NOTEBOOKLM_GENERATION_NOTEBOOK_ID"]
+        multi_source = bindings["NOTEBOOKLM_MULTI_SOURCE_NOTEBOOK_ID"]
+        if reference == generation or multi_source != generation:
+            raise ValueError(
+                "managed full-mode bindings require one distinct reference and one shared "
+                "generation/multi-source workspace"
+            )
     if os.environ.get(_MANAGED_REFERENCE_READY_ENV) != "1":
         raise ValueError("managed reference preparation marker is missing")
     return bindings
@@ -446,7 +469,7 @@ def journal_generation_started(result, operation, artifact_type: str = "Artifact
     if result.task_id:
         operation.accepted(result.task_id)
     elif result.is_rate_limited:
-        operation.rate_limited_rejected()
+        operation.quota_response_unconfirmed()
         pytest.skip("Rate limited by API")
     assert_generation_started(result, artifact_type)
 
@@ -470,11 +493,10 @@ async def journal_studio_generation(
     try:
         result = await awaitable
     except BaseException as exc:
-        # Direct Studio generate methods only raise the typed quota skip before
-        # returning an accepted ID. Interactive generation, which has post-
-        # create reads, owns a stronger reconciliation fixture separately.
+        # A typed quota response can race with an asynchronous server-side
+        # commit, so the verifier must reconcile it against the quiet inventory.
         if _typed_rate_limit_cause(exc) is not None:
-            operation.rate_limited_rejected()
+            operation.quota_response_unconfirmed()
         raise
     journal_generation_started(result, operation)
     return result
@@ -917,9 +939,12 @@ def pytest_runtest_teardown(item, nextitem):
 @pytest.fixture(scope="session")
 def auth_tokens() -> AuthTokens:
     """Load domain-preserving auth tokens from storage (session-scoped)."""
-    import asyncio
 
-    tokens = asyncio.run(AuthTokens.from_storage())
+    async def load() -> AuthTokens:
+        async with NotebookLMClient.from_storage() as loaded_client:
+            return loaded_client.auth
+
+    tokens = asyncio.run(load())
     _emit_auth_route_diagnostic(tokens)
     return tokens
 
