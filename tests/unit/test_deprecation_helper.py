@@ -59,6 +59,7 @@ def _auth_tokens() -> AuthTokens:
 
 def test_registered_deprecation_registry_is_exact_frozen_and_immutable() -> None:
     assert tuple(DEPRECATION_SPECS) == (
+        "mind_map_legacy_terminal_hydration",
         "auth_tokens_from_storage",
         "auth_tokens_sync_storage_construction",
         "auth_tokens_flat_cookies",
@@ -74,6 +75,13 @@ def test_registered_deprecation_registry_is_exact_frozen_and_immutable() -> None
         "source_from_row",
         "client_rpc_call_web",
         "client_rpc_call_android",
+        "client_legacy_constructor_options",
+        "client_legacy_from_storage_options",
+        "mcp_confirmed_name_references",
+        "artifact_poll_follower_options",
+        "artifact_poll_follower_callback",
+        "artifact_raw_download_prefetch",
+        "artifact_ambiguous_absence",
     )
     assert [field.name for field in fields(DeprecationSpec)] == [
         "key",
@@ -180,6 +188,14 @@ def test_registered_deprecation_registry_is_exact_frozen_and_immutable() -> None
             "0.9.0",
             3,
         ),
+        "mcp_confirmed_name_references": (
+            "Using a name or partial id on a confirmed MCP mutation is deprecated; pass the "
+            "canonical notebook and target ids returned by the confirmation preview. Confirmed "
+            "calls using names or partial ids will be rejected in v1.0.",
+            "notebooklm.NotebookLMClient",
+            "0.9.0",
+            4,
+        ),
         "client_rpc_call_web": (
             _RPC_CALL_WEB_MESSAGE,
             "notebooklm.raw.WebRawAPI.call",
@@ -192,7 +208,66 @@ def test_registered_deprecation_registry_is_exact_frozen_and_immutable() -> None
             "0.9.0",
             3,
         ),
+        "client_legacy_constructor_options": (
+            "Non-default legacy NotebookLMClient tuning arguments are deprecated; group them "
+            "under config=ClientConfig(...). They will be removed in v1.0.",
+            "notebooklm.options.ClientConfig",
+            "0.9.0",
+            3,
+        ),
+        "client_legacy_from_storage_options": (
+            "Non-default legacy NotebookLMClient.from_storage tuning arguments are deprecated; "
+            "group them under config=ClientConfig(...). They will be removed in v1.0.",
+            "notebooklm.options.ClientConfig",
+            "0.9.0",
+            3,
+        ),
+        "artifact_poll_follower_options": (
+            "ArtifactsAPI.wait_for_completion follower polling options are leader-only today "
+            "and ignored while another waiter leads; they become per-waiter in v1.0.",
+            "notebooklm.NotebookLMClient",
+            "0.9.0",
+            5,
+        ),
+        "artifact_poll_follower_callback": (
+            "ArtifactsAPI.wait_for_completion follower on_status_change currently receives "
+            "only the final status; in v1.0 it will receive every observed status.",
+            "notebooklm.NotebookLMClient",
+            "0.9.0",
+            5,
+        ),
+        "artifact_raw_download_prefetch": (
+            "Raw artifact download prefetch parameters are deprecated. Use "
+            "artifacts.prepare_downloads(...) and artifacts.download(selection, path). "
+            "Removal in v1.0 requires this warning's own shipped compatibility interval; "
+            "otherwise they remain supported until a later breaking release.",
+            "notebooklm.NotebookLMClient",
+            "0.9.0",
+            4,
+        ),
+        "artifact_ambiguous_absence": (
+            "Artifact get()/get_or_none() and Android get_prompt(..., "
+            "require_complete=False) encountered an unavailable aggregate backing and "
+            "are preserving the legacy absence result. Use artifacts.lookup(...) or "
+            "get_prompt(..., require_complete=True) to distinguish MISSING from UNKNOWN. "
+            "The legacy ambiguous-absence projection is scheduled to change in v1.0 only "
+            "after this warning has shipped for the required interval; otherwise it will "
+            "remain until a later breaking release.",
+            "notebooklm.NotebookLMClient",
+            "0.9.0",
+            4,
+        ),
     }
+    expected["mind_map_legacy_terminal_hydration"] = (
+        "Continuing Web interactive mind-map hydration after failed/removed completion "
+        "is deprecated; pass failure_policy='raise' to reject before hydration. "
+        "The legacy default will change only after this warning's own stable release "
+        "and migration interval. The earliest target is v1.0, conditional on that "
+        "interval having elapsed; v1.0 alone does not authorize the change.",
+        "notebooklm.NotebookLMClient.mind_maps",
+        "0.9.0",
+        3,
+    )
     for key, spec in DEPRECATION_SPECS.items():
         message, replacement, since, stacklevel = expected[key]
         assert spec == DeprecationSpec(
@@ -284,6 +359,16 @@ def test_registered_emitter_rejects_unknown_key_without_warning() -> None:
         with pytest.raises(KeyError, match="not_registered"):
             warn_registered_deprecation("not_registered")
     assert caught == []
+
+
+def test_registered_emitter_appends_neutral_bounded_detail() -> None:
+    detail = "  follower timeout differs\n" + ("x" * 400)
+    with pytest.warns(DeprecationWarning) as caught:
+        warn_registered_deprecation("auth_tokens_from_storage", detail=detail)
+    message = str(caught[0].message)
+    assert "follower timeout differs " in message
+    assert "Offending arguments" not in message
+    assert len(message) <= len(DEPRECATION_SPECS["auth_tokens_from_storage"].message) + 301
 
 
 class TestWarnDeprecated:

@@ -6,7 +6,7 @@ import asyncio
 import builtins
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
-from typing import Any
+from typing import Any, Protocol, TypeVar
 
 from .._deadline import RuntimeDeadline
 from .._types.enums import SourceStatus
@@ -93,6 +93,17 @@ def _expiry_error(
 GetSource = Callable[[str, str], Awaitable[Source | None]]
 ListSources = Callable[[str], Awaitable[builtins.list[Source]]]
 WaitUntilReady = Callable[..., Coroutine[Any, Any, Source]]
+_ChildResult = TypeVar("_ChildResult")
+
+
+class SpawnSourceChild(Protocol):
+    """Admit an exclusive child with the parent's deadline and evidence journal."""
+
+    async def __call__(
+        self, label: str, factory: Callable[[], Awaitable[_ChildResult]]
+    ) -> asyncio.Task[_ChildResult]: ...
+
+
 Sleep = Callable[[float], Awaitable[Any]]
 Monotonic = Callable[[], float]
 
@@ -377,6 +388,7 @@ class SourcePoller:
         *,
         timeout: float = 120.0,
         wait_until_ready: WaitUntilReady,
+        spawn_child: SpawnSourceChild,
         logger: logging.Logger,
         **kwargs: Any,
     ) -> builtins.list[Source]:
@@ -386,11 +398,27 @@ class SourcePoller:
         # cleanup, and it does not cancel still-running siblings for us.
         # Drive the fan-out as explicit tasks so any failure cancels and
         # drains every pending sibling before re-raising.
-        tasks: builtins.list[asyncio.Task[Source]] = [
-            asyncio.create_task(wait_until_ready(notebook_id, sid, timeout=timeout, **kwargs))
-            for sid in source_ids
-        ]
+        tasks: builtins.list[asyncio.Task[Source]] = []
+
+        def _wait_factory(source_id: str) -> Callable[[], Awaitable[Source]]:
+            async def _wait() -> Source:
+                return await wait_until_ready(
+                    notebook_id,
+                    source_id,
+                    timeout=timeout,
+                    **kwargs,
+                )
+
+            return _wait
+
         try:
+            for sid in source_ids:
+                tasks.append(
+                    await spawn_child(
+                        f"source-wait-{notebook_id}-{sid}",
+                        _wait_factory(sid),
+                    )
+                )
             return list(await asyncio.gather(*tasks))
         except BaseException:
             logger.debug("wait_for_sources: cancelling sibling source pollers", exc_info=True)
@@ -405,4 +433,4 @@ class SourcePoller:
             raise
 
 
-__all__ = ["SourcePoller", "SourceWaitResult"]
+__all__ = ["SourcePoller", "SourceWaitResult", "SpawnSourceChild"]

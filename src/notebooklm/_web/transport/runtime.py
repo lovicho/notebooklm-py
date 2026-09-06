@@ -56,12 +56,16 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from ..._idempotency import bound_operation_journal_entries
+from ..._request_policy import RequestPolicyOwner, request_scoped
+from ...outcomes import CommitState
 from .errors import raise_mapped_post_error
 from .middleware.context import (
     RPC_CONTEXT_AUTH_SNAPSHOT,
     RPC_CONTEXT_BUILD_REQUEST,
     RPC_CONTEXT_DISABLE_INTERNAL_RETRIES,
     RPC_CONTEXT_DISABLE_READ_TIMEOUT_RETRIES,
+    RPC_CONTEXT_JOURNAL,
     RPC_CONTEXT_LOG_LABEL,
     RPC_CONTEXT_MAX_RESPONSE_BYTES,
     RPC_CONTEXT_READ_TIMEOUT,
@@ -80,12 +84,13 @@ from .request_types import AuthSnapshot, BuildRequest
 
 if TYPE_CHECKING:
     from ..._deadline import RuntimeDeadline
+    from ..._idempotency import JournalEntry
     from ..._runtime.auth_refresh_retry import RefreshBudget
     from ..._runtime.call_supervisor import CallLease, CallSupervisor
     from .kernel import Kernel
 
 
-class RuntimeTransport:
+class RuntimeTransport(RequestPolicyOwner):
     """Authed POST chain leaf and entry-point collaborator.
 
     Owns the three authed-POST hot-path methods.
@@ -139,6 +144,7 @@ class RuntimeTransport:
         """Capture auth only through a generation-bearing resource proof."""
         return await self._snapshot_provider(expected_epoch)
 
+    @request_scoped
     async def refresh_request_for_current_auth(self, request: RpcRequest) -> RpcRequest:
         """Rebuild the envelope from the current auth snapshot before every POST.
 
@@ -236,8 +242,17 @@ class RuntimeTransport:
         if RPC_CONTEXT_MAX_RESPONSE_BYTES in context:
             post_kwargs["max_response_bytes"] = context[RPC_CONTEXT_MAX_RESPONSE_BYTES]
         start = time.perf_counter()
+        bound = context.get(RPC_CONTEXT_JOURNAL)
+        entries: tuple[JournalEntry, ...]
+        if bound is None:
+            entries = ()
+        elif isinstance(bound, tuple):
+            entries = bound
+        else:
+            entries = (bound,)
         try:
             expected_epoch = context.get(RPC_CONTEXT_RESOURCE_EPOCH)
+            attempts = tuple(entry.mark_dispatched() for entry in entries)
             response = await self._kernel.post(
                 request.url,
                 headers=request.headers,
@@ -247,6 +262,13 @@ class RuntimeTransport:
                 **post_kwargs,
             )
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+                for entry, attempt in zip(entries, attempts, strict=True):
+                    entry.record(
+                        CommitState.NOT_SENT,
+                        "verified transport failure before write",
+                        attempt=attempt,
+                    )
             raise_mapped_post_error(
                 log_label=log_label,
                 exc=exc,
@@ -255,6 +277,7 @@ class RuntimeTransport:
             )
         return RpcResponse(response=response, context=context)
 
+    @request_scoped
     async def perform_authed_post(
         self,
         *,
@@ -347,12 +370,17 @@ class RuntimeTransport:
         # fixture); it raises only when the currently-running loop differs
         # from the one captured at ``open()``-time.
         self._bound_loop_check()
+        journal_entries = bound_operation_journal_entries()
         context: dict[str, Any] = {
             RPC_CONTEXT_BUILD_REQUEST: build_request,
             RPC_CONTEXT_LOG_LABEL: log_label,
             RPC_CONTEXT_DISABLE_INTERNAL_RETRIES: disable_internal_retries,
             RPC_CONTEXT_RPC_METHOD: rpc_method,
         }
+        if journal_entries:
+            context[RPC_CONTEXT_JOURNAL] = (
+                next(iter(journal_entries)) if len(journal_entries) == 1 else journal_entries
+            )
         if read_timeout is not None:
             context[RPC_CONTEXT_READ_TIMEOUT] = read_timeout
         if max_response_bytes is not None:

@@ -23,11 +23,14 @@ from notebooklm._app.source_wait import (
 from notebooklm.cli import _source_render, source_cmd
 from notebooklm.cli.services import source_mutations, source_research
 from notebooklm.cli.services.source_mutations import (
+    CliSourceMutationError,
     SourceDeletePlan,
-    SourceMutationError,
+    SourceIdResolution,
     SourceRenamePlan,
     execute_source_delete,
     execute_source_rename,
+    run_source_delete,
+    run_source_delete_by_title,
 )
 from notebooklm.cli.services.source_research import (
     SourceAddResearchPlan,
@@ -45,6 +48,7 @@ from notebooklm.types import (
     SourceGuide,
     SourceTimeoutError,
 )
+from tests._helpers.operation import ClientStub
 
 
 def _wait_task(spec: dict) -> ResearchTask:
@@ -82,8 +86,8 @@ def _start(spec: dict) -> ResearchStart:
 
 
 @pytest.mark.asyncio
-async def test_source_delete_json_without_yes_uses_structured_confirmation_error() -> None:
-    client = SimpleNamespace(
+async def test_source_delete_executes_exact_prepared_target() -> None:
+    client = ClientStub(
         sources=SimpleNamespace(
             list=AsyncMock(return_value=[Source(id="src_abcdef", title="Paper")]),
             delete=AsyncMock(),
@@ -91,16 +95,33 @@ async def test_source_delete_json_without_yes_uses_structured_confirmation_error
     )
     plan = SourceDeletePlan(
         notebook_id="nb_1",
-        source_id="src_abc",
-        yes=False,
-        json_output=True,
+        target=SourceIdResolution("src_abcdef", matched_title="Paper"),
     )
 
-    with pytest.raises(SourceMutationError) as exc_info:
-        await execute_source_delete(
+    result = await execute_source_delete(client, plan)
+
+    assert result.source_id == "src_abcdef"
+    assert result.matched_title == "Paper"
+    client.sources.delete.assert_awaited_once_with("nb_1", "src_abcdef")
+
+
+@pytest.mark.asyncio
+async def test_source_delete_noninteractive_without_approval_uses_cli_confirmation_error() -> None:
+    client = ClientStub(
+        sources=SimpleNamespace(
+            list=AsyncMock(return_value=[Source(id="src_abcdef", title="Paper")]),
+            delete=AsyncMock(),
+        )
+    )
+
+    with pytest.raises(CliSourceMutationError) as exc_info:
+        await run_source_delete(
             client,
-            plan,
-            confirmer=lambda message: pytest.fail(f"unexpected confirmation: {message}"),
+            notebook_id="nb_1",
+            source_id="src_abc",
+            approved=False,
+            noninteractive=True,
+            confirm=lambda message: pytest.fail(f"unexpected confirmation: {message}"),
         )
 
     assert exc_info.value.message == "Pass --yes to confirm destructive operation in --json mode"
@@ -109,9 +130,58 @@ async def test_source_delete_json_without_yes_uses_structured_confirmation_error
         "action": "delete",
         "source_id": "src_abcdef",
         "notebook_id": "nb_1",
+        "status_message": "Matched: src_abcdef... (Paper)",
     }
-    assert exc_info.value.status_message == "[dim]Matched: src_abcdef... (Paper)[/dim]"
     client.sources.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_source_delete_declined_confirmation_preserves_resolved_target() -> None:
+    client = ClientStub(
+        sources=SimpleNamespace(
+            list=AsyncMock(return_value=[Source(id="src_abcdef", title="Paper")]),
+            delete=AsyncMock(),
+        )
+    )
+
+    result = await run_source_delete(
+        client,
+        notebook_id="nb_1",
+        source_id="src_abc",
+        approved=False,
+        noninteractive=False,
+        confirm=lambda message: message == "never accept",
+    )
+
+    assert result.status == "cancelled"
+    assert result.source_id == "src_abcdef"
+    assert result.matched_title == "Paper"
+    client.sources.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_source_delete_by_title_confirms_then_executes_same_resolved_target() -> None:
+    client = ClientStub(
+        sources=SimpleNamespace(
+            list=AsyncMock(return_value=[Source(id="src_1", title="Paper")]),
+            delete=AsyncMock(),
+        )
+    )
+    prompts: list[str] = []
+
+    result = await run_source_delete_by_title(
+        client,
+        notebook_id="nb_1",
+        title="Paper",
+        approved=False,
+        noninteractive=False,
+        confirm=lambda message: prompts.append(message) is None,
+    )
+
+    assert result.status == "completed"
+    assert prompts == ["Delete source 'Paper' (src_1)?"]
+    client.sources.list.assert_awaited_once_with("nb_1")
+    client.sources.delete.assert_awaited_once_with("nb_1", "src_1")
 
 
 @pytest.mark.asyncio
@@ -121,7 +191,7 @@ async def test_source_rename_returns_payload(monkeypatch: pytest.MonkeyPatch) ->
         "resolve_source_id",
         AsyncMock(return_value="src_full"),
     )
-    client = SimpleNamespace(
+    client = ClientStub(
         sources=SimpleNamespace(rename=AsyncMock(return_value=Source(id="src_full", title="New")))
     )
 
@@ -131,8 +201,8 @@ async def test_source_rename_returns_payload(monkeypatch: pytest.MonkeyPatch) ->
             notebook_id="nb_1",
             source_id="src",
             new_title="New",
-            json_output=True,
         ),
+        json_output=True,
     )
 
     client.sources.rename.assert_awaited_once_with("nb_1", "src_full", "New")
@@ -152,7 +222,7 @@ async def test_source_rename_returns_payload(monkeypatch: pytest.MonkeyPatch) ->
 
 @pytest.mark.asyncio
 async def test_source_fulltext_service_returns_fetched_content() -> None:
-    client = SimpleNamespace(
+    client = ClientStub(
         sources=SimpleNamespace(
             get_fulltext=AsyncMock(
                 return_value=SourceFulltext(
@@ -185,7 +255,7 @@ async def test_source_guide_service_normalizes_untrusted_backend_payload() -> No
     # The typed ``SourceGuide`` return carries the (still possibly untrusted)
     # backend values; the service strips/normalizes the keywords and blanks a
     # non-str summary.
-    client = SimpleNamespace(
+    client = ClientStub(
         sources=SimpleNamespace(
             get_guide=AsyncMock(
                 return_value=SourceGuide(
@@ -208,9 +278,7 @@ async def test_source_guide_service_normalizes_untrusted_backend_payload() -> No
 
 @pytest.mark.asyncio
 async def test_source_guide_service_treats_empty_guide_as_empty() -> None:
-    client = SimpleNamespace(
-        sources=SimpleNamespace(get_guide=AsyncMock(return_value=SourceGuide()))
-    )
+    client = ClientStub(sources=SimpleNamespace(get_guide=AsyncMock(return_value=SourceGuide())))
 
     result = await execute_source_guide(
         client,
@@ -228,7 +296,7 @@ async def test_source_add_research_waits_with_started_task_id_and_imports(
     imported = SimpleNamespace(imported=["src_1"], cited_selection=None, sources=[])
     import_research_sources = AsyncMock(return_value=imported)
     monkeypatch.setattr(source_research, "import_research_sources", import_research_sources)
-    client = SimpleNamespace(
+    client = ClientStub(
         research=SimpleNamespace(
             start=AsyncMock(return_value=_start({"task_id": "task_123"})),
             wait_for_completion=AsyncMock(
@@ -288,7 +356,7 @@ async def test_source_add_research_json_import_stays_silent(
     imported = SimpleNamespace(imported=["src_1"], cited_selection=None, sources=[])
     import_research_sources = AsyncMock(return_value=imported)
     monkeypatch.setattr(source_research, "import_research_sources", import_research_sources)
-    client = SimpleNamespace(
+    client = ClientStub(
         research=SimpleNamespace(
             start=AsyncMock(return_value=_start({"task_id": "task_123"})),
             wait_for_completion=AsyncMock(
@@ -315,8 +383,8 @@ async def test_source_add_research_json_import_stays_silent(
             cited_only=True,
             no_wait=False,
             timeout=30,
-            json_output=True,
         ),
+        json_output=True,
     )
 
     assert result.outcome == "completed"
@@ -350,7 +418,6 @@ def test_render_add_research_started_no_wait_json_payload(
                 cited_only=False,
                 no_wait=True,
                 timeout=30,
-                json_output=True,
             ),
             start_task_id="task_123",
             poll_task_id="report_456",
@@ -390,7 +457,6 @@ def test_render_add_research_completed_json_payload(
                 cited_only=True,
                 no_wait=False,
                 timeout=30,
-                json_output=True,
             ),
             start_task_id="task_123",
             poll_task_id="task_123",
@@ -458,7 +524,7 @@ async def test_source_add_research_failed_returns_terminal_outcome() -> None:
     # status maps to the ``failed`` terminal outcome. (The ``timeout`` outcome
     # is reached only via the ``TimeoutError`` branch, not a returned status —
     # the typed return can never carry a "timeout" status string.)
-    client = SimpleNamespace(
+    client = ClientStub(
         research=SimpleNamespace(
             start=AsyncMock(return_value=_start({"task_id": "task_123"})),
             wait_for_completion=AsyncMock(
@@ -489,7 +555,7 @@ async def test_source_add_research_failed_returns_terminal_outcome() -> None:
 @pytest.mark.asyncio
 async def test_source_add_research_start_failed_returns_outcome() -> None:
     """``research.start`` returning falsy maps to ``outcome='start_failed'``."""
-    client = SimpleNamespace(
+    client = ClientStub(
         research=SimpleNamespace(
             start=AsyncMock(return_value=None),
             wait_for_completion=AsyncMock(),
@@ -518,7 +584,7 @@ async def test_source_add_research_start_failed_returns_outcome() -> None:
 @pytest.mark.asyncio
 async def test_source_add_research_timeout_error_maps_to_timeout_outcome() -> None:
     """``wait_for_completion`` raising :class:`TimeoutError` maps to ``timeout``."""
-    client = SimpleNamespace(
+    client = ClientStub(
         research=SimpleNamespace(
             start=AsyncMock(return_value=_start({"task_id": "task_123"})),
             wait_for_completion=AsyncMock(side_effect=TimeoutError("budget exhausted")),
@@ -548,7 +614,7 @@ async def test_source_add_research_unknown_status_returns_unknown_outcome() -> N
     # ``wait_for_completion`` should only ever return a terminal status, but the
     # service keeps a defensive fallback for any non-terminal status it sees
     # (here ``IN_PROGRESS``) -> ``unknown_status``.
-    client = SimpleNamespace(
+    client = ClientStub(
         research=SimpleNamespace(
             start=AsyncMock(return_value=_start({"task_id": "task_123"})),
             wait_for_completion=AsyncMock(
@@ -578,7 +644,7 @@ async def test_source_add_research_unknown_status_returns_unknown_outcome() -> N
 @pytest.mark.asyncio
 async def test_source_add_research_no_wait_returns_early_outcome() -> None:
     """``--no-wait`` skips the wait loop and returns ``started_no_wait``."""
-    client = SimpleNamespace(
+    client = ClientStub(
         research=SimpleNamespace(
             start=AsyncMock(return_value=_start({"task_id": "task_123"})),
             wait_for_completion=AsyncMock(),
@@ -606,7 +672,7 @@ async def test_source_add_research_no_wait_returns_early_outcome() -> None:
 
 @pytest.mark.asyncio
 async def test_source_add_research_delegates_timeout_budget_to_research_api() -> None:
-    client = SimpleNamespace(
+    client = ClientStub(
         research=SimpleNamespace(
             start=AsyncMock(return_value=_start({"task_id": "task_123"})),
             wait_for_completion=AsyncMock(
@@ -652,7 +718,7 @@ async def test_source_wait_timeout_returns_typed_outcome() -> None:
         yield
 
     timeout_exc = SourceTimeoutError("src_1", 10.0, 2)
-    client = SimpleNamespace(
+    client = ClientStub(
         sources=SimpleNamespace(wait_until_ready=AsyncMock(side_effect=timeout_exc))
     )
 

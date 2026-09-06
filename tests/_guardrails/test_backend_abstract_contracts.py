@@ -16,6 +16,10 @@ from pathlib import Path
 
 import pytest
 
+from notebooklm._client_metrics import ClientMetrics
+from notebooklm._runtime.call_supervisor import CallSupervisor
+from notebooklm._runtime.lifecycle import ClientLifecycle
+
 pytestmark = pytest.mark.repo_lint
 
 
@@ -52,18 +56,13 @@ BASE_ABSTRACT_CONTRACTS: tuple[_AbstractContract, ...] = (
                 "_send_create_artifact",
                 "_send_export",
                 "delete",
-                "download_audio",
-                "download_data_table",
-                "download_flashcards",
-                "download_infographic",
-                "download_mind_map",
-                "download_quiz",
-                "download_report",
-                "download_slide_deck",
-                "download_video",
+                "_download_with_legacy_prefetch",
+                "prepare_downloads",
+                "download",
                 "generate_mind_map",
                 "get_prompt",
                 "list",
+                "list_with_status",
                 "rename",
                 "retry_failed",
                 "revise_slide",
@@ -287,6 +286,15 @@ _ANDROID_INHERITED_WORKFLOWS = {
     "ArtifactsAPI": frozenset(
         {
             "copy",
+            "download_audio",
+            "download_video",
+            "download_infographic",
+            "download_slide_deck",
+            "download_report",
+            "download_mind_map",
+            "download_data_table",
+            "download_quiz",
+            "download_flashcards",
             "export",
             "export_data_table",
             "export_report",
@@ -303,6 +311,7 @@ _ANDROID_INHERITED_WORKFLOWS = {
             "get",
             "get_customization_choices",
             "get_or_none",
+            "lookup",
             "list_audio",
             "list_data_tables",
             "list_flashcards",
@@ -381,7 +390,6 @@ _ANDROID_INHERITED_WORKFLOWS = {
     ),
     "NotebooksAPI": frozenset(
         {
-            "_create_with_probe",
             "copy",
             "create",
             "get_metadata",
@@ -411,8 +419,6 @@ _ANDROID_INHERITED_WORKFLOWS = {
 }
 
 _TEMPLATE_HOOKS = frozenset({"_operation_scope"})
-_WEB_SCOPE_OVERRIDES = frozenset({"SourcesAPI"})
-
 _WIRE_HOOK_PREFIXES = ("_send_",)
 _WIRE_HOOK_NAMES = frozenset(
     {
@@ -441,7 +447,7 @@ _ARTIFACT_DOCSTRING_SHA256 = {
     (
         "WebArtifactsAPI",
         "__init__",
-    ): "d1b96af651ebc15337c480fd5d9cdb4efb6948dc326f2e6ecc08406982b2e701",
+    ): "bddc9a6f3522e1f249d351c3caf38e8c071e26ee21471a4b65c8ecfd5acec297",
 }
 
 
@@ -456,9 +462,10 @@ def test_backend_base_abstract_methods_and_wire_hooks_match_manifest() -> None:
             if name.startswith(_WIRE_HOOK_PREFIXES) or name in _WIRE_HOOK_NAMES
         )
 
-        assert actual == contract.abstract_methods, (
+        expected_abstract = contract.abstract_methods | _TEMPLATE_HOOKS
+        assert actual == expected_abstract, (
             f"{contract.class_name} abstract surface changed: "
-            f"expected {sorted(contract.abstract_methods)}, got {sorted(actual)}"
+            f"expected {sorted(expected_abstract)}, got {sorted(actual)}"
         )
         assert actual_wire_hooks == contract.wire_hooks, (
             f"{contract.class_name} wire hooks changed: "
@@ -466,8 +473,9 @@ def test_backend_base_abstract_methods_and_wire_hooks_match_manifest() -> None:
         )
 
 
-def test_namespace_bases_and_backends_preserve_the_scope_template_hook() -> None:
-    """Keep lifecycle policy separate from each workflow's one wire hook."""
+@pytest.mark.asyncio
+async def test_every_backend_scope_delegates_to_its_supervisor_capability() -> None:
+    """Every concrete namespace must acquire a real backend-owned scope."""
     assert (
         {contract.class_name for contract in BASE_ABSTRACT_CONTRACTS}
         == set(_ANDROID_IMPLEMENTATIONS)
@@ -483,14 +491,24 @@ def test_namespace_bases_and_backends_preserve_the_scope_template_hook() -> None
         android_module, android_name = _ANDROID_IMPLEMENTATIONS[contract.class_name]
         android = getattr(importlib.import_module(android_module), android_name)
 
-        actual_hooks = frozenset(name for name in _TEMPLATE_HOOKS if name in base.__dict__)
-        assert actual_hooks == _TEMPLATE_HOOKS
-        assert not getattr(base._operation_scope, "__isabstractmethod__", False)
-        if contract.class_name in _WEB_SCOPE_OVERRIDES:
-            assert web._operation_scope is not base._operation_scope
-        else:
-            assert web._operation_scope is base._operation_scope
-        assert android._operation_scope is not base._operation_scope
+        assert getattr(base._operation_scope, "__isabstractmethod__", False)
+
+        for implementation, owner_attr in ((web, "_supervisor"), (android, "_transport")):
+            supervisor = CallSupervisor(metrics=ClientMetrics(), max_concurrent_rpcs=None)
+            lifecycle = ClientLifecycle(
+                supervisor=supervisor,
+                transports=(),
+                loop_participants=(supervisor,),
+            )
+            await lifecycle.open()
+            instance = object.__new__(implementation)
+            setattr(instance, owner_attr, supervisor)
+            async with instance._operation_scope("contract.scope") as lease:
+                assert lease.epoch == 1
+                generation = supervisor._current
+                assert generation is not None
+                assert generation.in_flight == 1
+            await lifecycle.close(drain=False)
 
 
 def test_android_backends_inherit_manifested_neutral_workflow_bodies() -> None:
@@ -512,6 +530,15 @@ def test_artifact_workflow_ownership_and_docstrings_are_preserved() -> None:
 
     inherited_workflows = {
         "copy",
+        "download_audio",
+        "download_video",
+        "download_infographic",
+        "download_slide_deck",
+        "download_report",
+        "download_mind_map",
+        "download_data_table",
+        "download_quiz",
+        "download_flashcards",
         "export",
         "export_data_table",
         "export_report",
@@ -528,6 +555,7 @@ def test_artifact_workflow_ownership_and_docstrings_are_preserved() -> None:
         "get",
         "get_customization_choices",
         "get_or_none",
+        "lookup",
         "list_audio",
         "list_data_tables",
         "list_flashcards",
@@ -541,6 +569,7 @@ def test_artifact_workflow_ownership_and_docstrings_are_preserved() -> None:
     }
     web_overrides = ArtifactsAPI.__abstractmethods__ - {
         "_list_studio",
+        "_download_with_legacy_prefetch",
         "_send_copy",
         "_send_create_artifact",
         "_send_export",
@@ -591,6 +620,7 @@ def test_artifact_class_constructor_docstrings_and_web_signature_are_pinned() ->
         "mind_maps",
         "note_service",
         "storage_path",
+        "asset_downloads",
     )
     assert all(
         parameter.kind is inspect.Parameter.KEYWORD_ONLY for parameter in web_parameters.values()
@@ -637,9 +667,10 @@ def test_research_neutral_helpers_are_inherited_without_a_web_import_cycle() -> 
     assert "_web_select_cited_sources" not in WebResearchAPI.__dict__
     assert "import_sources" not in WebResearchAPI.__dict__
     assert WebResearchAPI.import_sources is BaseResearchAPI.import_sources
+    assert "_import_sources_with_verification" not in WebResearchAPI.__dict__
     assert (
         WebResearchAPI._import_sources_with_verification
-        is not BaseResearchAPI._import_sources_with_verification
+        is BaseResearchAPI._import_sources_with_verification
     )
     assert (
         AndroidResearchAPI._import_sources_with_verification
@@ -706,7 +737,7 @@ def test_chat_shared_workflows_call_only_their_single_wire_hook() -> None:
     )
     expected = {
         "_count_prior_server_turns": {"_list_turn_roles"},
-        "ask": {"_stream_answer"},
+        "_ask_in_scope": {"_stream_answer"},
         "configure": {"_send_configure"},
         "delete_conversation": {"_send_delete_conversation"},
         "get_settings": {"_read_settings"},
@@ -740,7 +771,7 @@ def test_artifact_shared_workflows_call_only_their_single_wire_hook() -> None:
         node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ArtifactsAPI"
     )
     expected = {
-        "copy": {"_send_copy"},
+        "_copy_in_scope": {"_send_copy"},
         "export": {"_send_export"},
     }
     for method_name, expected_hooks in expected.items():
@@ -763,7 +794,10 @@ def test_artifact_shared_workflows_call_only_their_single_wire_hook() -> None:
 def test_copy_workflows_share_the_neutral_mapping_reconciler() -> None:
     """Sources and artifacts keep one owner for post-decode copy policy."""
     root = Path(__file__).resolve().parents[2] / "src" / "notebooklm"
-    for filename, class_name in (("_sources.py", "SourcesAPI"), ("_artifacts.py", "ArtifactsAPI")):
+    for filename, class_name, method_name in (
+        ("_sources.py", "SourcesAPI", "copy"),
+        ("_artifacts.py", "ArtifactsAPI", "_copy_in_scope"),
+    ):
         tree = ast.parse((root / filename).read_text(encoding="utf-8"))
         owner = next(
             node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name
@@ -771,7 +805,7 @@ def test_copy_workflows_share_the_neutral_mapping_reconciler() -> None:
         method = next(
             node
             for node in owner.body
-            if isinstance(node, ast.AsyncFunctionDef) and node.name == "copy"
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == method_name
         )
         calls = [
             node

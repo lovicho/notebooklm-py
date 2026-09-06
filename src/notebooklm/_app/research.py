@@ -35,13 +35,14 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, NoReturn, Protocol
+from typing import Any, Literal, NoReturn, Protocol, runtime_checkable
 
 from ..exceptions import ValidationError
-from ..types import discovery_mode_to_str
+from ..options import USE_DEFAULT, UseDefault
+from ..types import CitedSourceSelection, ResearchSourceInput, ResearchTask, discovery_mode_to_str
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,65 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 
 ResearchStatusKind = Literal["no_research", "in_progress", "completed", "other"]
+
+ResearchValidationReason = Literal["cited_requires_import", "import_requires_wait"]
+
+
+class ResearchValidationError(ValidationError):
+    """Typed research-option conflict for adapter-owned presentation."""
+
+    def __init__(self, reason: ResearchValidationReason) -> None:
+        self.reason = reason
+        super().__init__(reason.replace("_", " "))
+
+
+@runtime_checkable
+class _ResearchImportReceipt(Protocol):
+    """Verified-import result consumed by the neutral adapter seam."""
+
+    already_present: Sequence[dict[str, str]]
+
+    def __iter__(self) -> Iterator[dict[str, str]]: ...
+
+
+class _ResearchNamespace(Protocol):
+    async def poll(self, notebook_id: str, task_id: str | None = None) -> ResearchTask: ...
+
+    async def discover(
+        self, notebook_id: str, query: str, *, mode: str = "default"
+    ) -> ResearchTask: ...
+
+    async def wait_for_completion(
+        self,
+        notebook_id: str,
+        task_id: str | None = None,
+        *,
+        timeout: float = 1800,
+        initial_interval: float = 2.0,
+    ) -> ResearchTask: ...
+
+    async def import_sources_with_verification(
+        self,
+        notebook_id: str,
+        task_id: str,
+        sources: Sequence[ResearchSourceInput],
+        *,
+        max_elapsed: float = 1800,
+        allow_duplicate: bool = False,
+    ) -> list[dict[str, str]]: ...
+
+    async def cancel(self, notebook_id: str, task_id: str) -> None: ...
+
+
+class ResearchClient(Protocol):
+    """Public client capabilities consumed by research application workflows."""
+
+    def operation(
+        self, timeout: float | None | UseDefault = None
+    ) -> contextlib.AbstractAsyncContextManager[object]: ...
+
+    @property
+    def research(self) -> _ResearchNamespace: ...
 
 
 @dataclass(frozen=True)
@@ -147,7 +207,7 @@ def _classify_status_kind(status_val: str) -> ResearchStatusKind:
 
 
 async def poll_and_classify(
-    client: Any, notebook_id: str, task_id: str | None = None
+    client: ResearchClient, notebook_id: str, task_id: str | None = None
 ) -> ResearchStatusResult:
     """Poll research status once and classify it for the command layer.
 
@@ -170,7 +230,7 @@ async def poll_and_classify(
 
 
 async def discover_and_classify(
-    client: Any, notebook_id: str, query: str, mode: str = "default"
+    client: ResearchClient, notebook_id: str, query: str, mode: str = "default"
 ) -> ResearchStatusResult:
     """Run one synchronous ``research.discover`` and classify it like a poll.
 
@@ -182,7 +242,7 @@ async def discover_and_classify(
     return classify_research_task(task)
 
 
-def classify_research_task(status: Any) -> ResearchStatusResult:
+def classify_research_task(status: ResearchTask) -> ResearchStatusResult:
     """Project one typed ``ResearchTask`` into the command-layer result."""
     # ``ResearchStatus`` is a ``str`` enum; ``.value`` yields the canonical
     # lowercase code the CLI render branches + the original status command keyed
@@ -213,7 +273,7 @@ def classify_research_task(status: Any) -> ResearchStatusResult:
 
 
 async def poll_importable_research(
-    client: Any, notebook_id: str, run_id: str
+    client: ResearchClient, notebook_id: str, run_id: str
 ) -> tuple[list[dict[str, Any]], str]:
     """Poll a research run and return its ``(importable sources, report)``, or raise.
 
@@ -312,7 +372,7 @@ def classify_importable_research(
 
 
 async def poll_sources_for_import(
-    client: Any, notebook_id: str, run_id: str
+    client: ResearchClient, notebook_id: str, run_id: str
 ) -> list[dict[str, Any]]:
     """Poll a research run and return its importable sources, or raise.
 
@@ -354,10 +414,10 @@ class ResearchImportOutcome:
 
 
 async def import_research_sources(
-    client: Any,
+    client: ResearchClient,
     notebook_id: str,
     task_id: str,
-    sources: Sequence[Any],
+    sources: Sequence[ResearchSourceInput],
     *,
     allow_duplicate: bool = False,
     max_elapsed: float | None = None,
@@ -376,10 +436,10 @@ async def import_research_sources(
     ``already_present`` split. The first three arguments are passed positionally
     to match the underlying method's call shape.
 
-    ``max_elapsed`` bounds the underlying **retry** loop (the IMPORT_RESEARCH RPC
-    commonly runs past the client timeout on deep payloads, so it is retried with
-    reconciliation). Forwarded only when given, so an adapter that does not expose
-    a knob keeps the library default rather than having one imposed here.
+    ``max_elapsed`` bounds only the read-only candidate-inspection cadence after
+    an unknown outcome. The IMPORT_RESEARCH mutation is sent once and is never
+    retried. Forwarded only when given, so an adapter that does not expose a knob
+    keeps the library default rather than having one imposed here.
     """
     bound = {} if max_elapsed is None else {"max_elapsed": max_elapsed}
     imported = await client.research.import_sources_with_verification(
@@ -389,10 +449,11 @@ async def import_research_sources(
         allow_duplicate=allow_duplicate,
         **bound,
     )
-    already_present = list(getattr(imported, "already_present", []) or [])
+    already_present: Sequence[dict[str, str]] = []
+    if isinstance(imported, _ResearchImportReceipt):
+        already_present = imported.already_present
     return ResearchImportOutcome(
-        newly_imported=list(imported),
-        already_present=already_present,
+        newly_imported=list(imported), already_present=list(already_present)
     )
 
 
@@ -401,7 +462,7 @@ async def import_research_sources(
 # ===========================================================================
 
 
-async def cancel_research(client: Any, notebook_id: str, run_id: str) -> None:
+async def cancel_research(client: ResearchClient, notebook_id: str, run_id: str) -> None:
     """Cancel an in-flight research run via ``client.research.cancel``.
 
     Transport-neutral thin wrapper mirroring :func:`poll_and_classify`: the CLI
@@ -439,7 +500,7 @@ class ResearchImportLike(Protocol):
     @property
     def sources(self) -> list[dict[str, Any]]: ...
     @property
-    def cited_selection(self) -> Any: ...
+    def cited_selection(self) -> CitedSourceSelection | None: ...
 
 
 @dataclass(frozen=True)
@@ -456,7 +517,6 @@ class ResearchWaitPlan:
     interval: int
     import_all: bool = False
     cited_only: bool = False
-    json_output: bool = False
     task_id: str | None = None
 
 
@@ -484,6 +544,7 @@ class ResearchWaitResult:
     # poll carried no termination reason.
     reason_message: str | None = None
     hint: str | None = None
+    failure: TimeoutError | None = field(default=None, repr=False, compare=False)
 
     @property
     def sources_count(self) -> int:
@@ -523,13 +584,13 @@ def validate_research_wait_flags(*, import_all: bool, cited_only: bool) -> None:
     text-mode ``click.UsageError`` and JSON-mode envelope branches).
     """
     if cited_only and not import_all:
-        raise ValidationError("--cited-only requires --import-all")
+        raise ResearchValidationError("cited_requires_import")
 
 
 async def execute_research_wait(
     plan: ResearchWaitPlan,
     *,
-    client: Any,
+    client: ResearchClient,
     resolve_id: ResolveNotebookIdFn,
     wait_context: WaitContextFactory = _null_wait_context,
     import_sources: ImportResearchSourcesFn = _missing_importer,
@@ -563,97 +624,96 @@ async def execute_research_wait(
           third guard is required because without a task_id the importer has
           nothing to verify against.)
     """
-    nb_id_resolved = await resolve_id(client, plan.notebook_id, json_output=plan.json_output)
+    async with client.operation(timeout=USE_DEFAULT):
+        nb_id_resolved = await resolve_id(client, plan.notebook_id)
 
-    async with wait_context():
-        try:
-            wait_args = (
-                (nb_id_resolved,) if plan.task_id is None else (nb_id_resolved, plan.task_id)
-            )
-            status = await client.research.wait_for_completion(
-                *wait_args,
-                timeout=float(plan.timeout),
-                initial_interval=float(plan.interval),
-            )
-        except TimeoutError:
+        async with wait_context():
+            try:
+                wait_args = (
+                    (nb_id_resolved,) if plan.task_id is None else (nb_id_resolved, plan.task_id)
+                )
+                status = await client.research.wait_for_completion(
+                    *wait_args,
+                    timeout=float(plan.timeout),
+                    initial_interval=float(plan.interval),
+                )
+            except TimeoutError as error:
+                return ResearchWaitResult(
+                    outcome="timeout",
+                    notebook_id=nb_id_resolved,
+                    timeout=plan.timeout,
+                    failure=error,
+                )
+
+        task_id = status.task_id or None
+
+        def _terminal(outcome: ResearchWaitOutcome, **extra: Any) -> ResearchWaitResult:
             return ResearchWaitResult(
-                outcome="timeout",
+                outcome=outcome,
                 notebook_id=nb_id_resolved,
                 timeout=plan.timeout,
+                task_id=task_id,
+                **extra,
             )
 
-    task_id = status.task_id or None
+        status_val = status.status.value
+        query = status.query
+        # ``ResearchWaitResult`` / the importer consume the legacy ``list[dict]``
+        # source shape, so serialize the typed sources here.
+        sources = [src.to_public_dict() for src in status.sources]
+        report = status.report
 
-    def _terminal(outcome: ResearchWaitOutcome, **extra: Any) -> ResearchWaitResult:
-        return ResearchWaitResult(
-            outcome=outcome,
-            notebook_id=nb_id_resolved,
-            timeout=plan.timeout,
-            task_id=task_id,
-            **extra,
-        )
-
-    status_val = status.status.value
-    query = status.query
-    # ``ResearchWaitResult`` / the importer consume the legacy ``list[dict]``
-    # source shape, so serialize the typed sources here.
-    sources = [src.to_public_dict() for src in status.sources]
-    report = status.report
-
-    if status_val == "no_research":
-        return _terminal("no_research")
-    # Both non-success exits carry the differentiated reason (#1964) so the
-    # renderer never has to show a bare "Research failed".
-    failure_detail: dict[str, Any] = {
-        "query": query,
-        "sources": sources,
-        "report": report,
-        "reason_message": status.reason_message,
-        "hint": status.hint,
-    }
-    if status_val == "failed":
-        return _terminal("failed", **failure_detail)
-
-    # wait_for_completion only returns completed/no_research/failed; keep a
-    # narrow fallback so future terminal statuses cannot be rendered as success.
-    if status_val != "completed":
-        return _terminal("failed", **failure_detail)
-
-    import_result: ResearchImportLike | None = None
-    if plan.import_all and sources and task_id:
-        # In text mode the importer renders its own "Importing sources..."
-        # status; in JSON mode it stays silent.
-        import_kwargs: dict[str, Any] = {
+        if status_val == "no_research":
+            return _terminal("no_research")
+        # Both non-success exits carry the differentiated reason (#1964) so the
+        # renderer never has to show a bare "Research failed".
+        failure_detail: dict[str, Any] = {
+            "query": query,
+            "sources": sources,
             "report": report,
-            "cited_only": plan.cited_only,
-            "max_elapsed": plan.timeout,
+            "reason_message": status.reason_message,
+            "hint": status.hint,
         }
-        if plan.json_output:
-            import_kwargs["json_output"] = True
-        else:
-            import_kwargs["status_message"] = "Importing sources..."
-        import_result = await import_sources(
-            client,
-            nb_id_resolved,
-            task_id,
-            sources,
-            **import_kwargs,
-        )
+        if status_val == "failed":
+            return _terminal("failed", **failure_detail)
 
-    return _terminal(
-        "completed",
-        query=query,
-        sources=sources,
-        report=report,
-        import_result=import_result,
-    )
+        # wait_for_completion only returns completed/no_research/failed; keep a
+        # narrow fallback so future terminal statuses cannot be rendered as success.
+        if status_val != "completed":
+            return _terminal("failed", **failure_detail)
+
+        import_result: ResearchImportLike | None = None
+        if plan.import_all and sources and task_id:
+            import_kwargs: dict[str, Any] = {
+                "report": report,
+                "cited_only": plan.cited_only,
+                "max_elapsed": plan.timeout,
+            }
+            import_result = await import_sources(
+                client,
+                nb_id_resolved,
+                task_id,
+                sources,
+                **import_kwargs,
+            )
+
+        return _terminal(
+            "completed",
+            query=query,
+            sources=sources,
+            report=report,
+            import_result=import_result,
+        )
 
 
 __all__ = [
     "ResearchImportLike",
     "ResearchImportOutcome",
+    "ResearchClient",
     "ResearchStatusKind",
     "ResearchStatusResult",
+    "ResearchValidationError",
+    "ResearchValidationReason",
     "ResearchWaitOutcome",
     "ResearchWaitPlan",
     "ResearchWaitResult",

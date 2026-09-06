@@ -361,7 +361,7 @@ jobs:
       # them from the reduced compatibility matrix.
       run: >-
         uv run pytest tests/unit
-        -m "(requires_playwright or requires_chromium) and not reality"
+        -m "(requires_playwright or requires_chromium) and not reality and not refactor_qualification"
         -n 0 --no-cov
 
     - name: Run critical contract guards
@@ -382,6 +382,16 @@ jobs:
         tests/_guardrails/test_playwright_gateway.py::test_raw_sync_playwright_is_confined_to_policy_gateway
         tests/_guardrails/test_wire_contract.py::test_every_adapter_constant_is_declared
         tests/_guardrails/test_builtin_shadowed_annotations.py::test_class_body_annotations_do_not_name_a_shadowed_builtin
+        tests/_guardrails/test_client_composition.py::test_public_client_and_root_selector_import_no_web_namespaces
+        tests/_guardrails/test_client_composition.py::test_features_receive_specific_collaborators_not_whole_client
+        tests/_guardrails/test_client_composition.py::test_android_rpc_call_materializes_sidecar_inside_operation_lease
+        tests/_guardrails/test_backend_boundaries.py::test_backend_direct_import_boundaries
+        tests/_guardrails/test_cookie_persistence_boundary.py::test_client_registration_requires_exact_sequential_constructor_provenance
+        tests/_guardrails/test_cli_boundary.py::test_no_private_module_imports_in_cli
+        tests/_guardrails/test_mcp_boundary.py
+        tests/_guardrails/test_server_boundary.py
+        tests/_guardrails/test_adapter_import_scanner.py
+        tests/_guardrails/test_adapter_support_boundary.py
 
     - name: Run tests without coverage
       # Every required compatibility cell runs the ordinary suite exactly once.
@@ -389,7 +399,7 @@ jobs:
       # run nightly, and real Playwright subprocesses stay outside xdist.
       run: >-
         uv run pytest -n auto --dist loadgroup
-        -m "not repo_lint and not requires_playwright and not requires_chromium"
+        -m "not repo_lint and not refactor_qualification and not requires_playwright and not requires_chromium"
         --no-cov
 
     - name: Run Windows Playwright compatibility smoke serially
@@ -432,5 +442,13 @@ jobs:
       # Manual-only deep audits use the runner's available workers and a wider
       # per-test timeout, but never collect coverage or slow pull requests.
       run: >-
-        uv run pytest -n auto --dist loadgroup -m repo_lint
+        uv run pytest -n auto --dist loadgroup
+        -m "repo_lint and not refactor_qualification"
+        --timeout=180 --no-cov
+
+    - name: Run refactor qualification tests
+      # Exhaustive migration inventories and lifecycle race matrices belong in
+      # an explicit manual/release lane, not every required PR matrix cell.
+      run: >-
+        uv run pytest -n auto --dist loadgroup -m refactor_qualification
         --timeout=180 --no-cov

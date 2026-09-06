@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,12 +26,25 @@ from fastmcp import Client  # noqa: E402 - after importorskip guard
 from fastmcp.exceptions import ToolError  # noqa: E402 - after importorskip guard
 
 from notebooklm import ChatSessionStatus  # noqa: E402 - after importorskip guard
-from notebooklm.exceptions import ChatError  # noqa: E402 - after importorskip guard
+from notebooklm._client_metrics import ClientMetrics  # noqa: E402 - after importorskip guard
+from notebooklm._runtime.call_supervisor import (  # noqa: E402 - after importorskip guard
+    CallSupervisor,
+)
+from notebooklm._runtime.operation_context import (  # noqa: E402 - after importorskip guard
+    adopt_operation_journal_entry,
+    current_operation_context,
+)
+from notebooklm.exceptions import (  # noqa: E402 - after importorskip guard
+    ChatError,
+    OperationTimeoutError,
+)
 from notebooklm.mcp._chattasks import (  # noqa: E402 - after importorskip guard
     ChatTaskCapacityError,
     ChatTaskRegistry,
     compute_chat_task_key,
 )
+from notebooklm.mcp.tools.chat import _entry_status_payload  # noqa: E402
+from notebooklm.outcomes import CommitState  # noqa: E402 - after importorskip guard
 
 from .conftest import AsyncMock  # noqa: E402 - after importorskip guard
 
@@ -174,6 +188,116 @@ async def test_registry_queues_past_concurrency_and_autostarts() -> None:
     assert second.started_at is not None and second.started_at >= first.created_at
 
 
+def _supervised_client() -> tuple[Any, CallSupervisor]:
+    supervisor = CallSupervisor(metrics=ClientMetrics(), max_concurrent_rpcs=None)
+    supervisor.prepare_generation(1)
+    supervisor.start_accepting(1)
+    client = SimpleNamespace(_collaborators=SimpleNamespace(call_supervisor=supervisor))
+    return client, supervisor
+
+
+async def test_registry_job_timeout_includes_queue_and_prevents_dispatch() -> None:
+    registry = ChatTaskRegistry(concurrency=1, job_timeout=0.1)
+    client, _supervisor = _supervised_client()
+    calls = 0
+
+    async def _work() -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {}
+
+    # Hold the slot independently of another job's deadline. Two jobs accepted
+    # in succession have different deadlines, so the first may legitimately
+    # time out and release its slot before the second's deadline expires.
+    registry.set_bound_loop(asyncio.get_running_loop())
+    async with registry._gate:
+        entry, _ = registry.start("queued-deadline", _work, client=client)
+        assert entry.task is not None
+        await asyncio.wait_for(entry.task, timeout=5.0)
+    assert isinstance(entry.error, OperationTimeoutError)
+    assert entry.started_at is None
+    assert calls == 0
+
+
+async def test_registry_preserves_metadata_timeout_from_fresh_client_operation() -> None:
+    # Allow instrumentation/setup to enter the operation before its real timer
+    # expires: this test checks dispatched-mutation metadata, not queue expiry.
+    registry = ChatTaskRegistry(concurrency=1, job_timeout=1.0)
+    client, supervisor = _supervised_client()
+    observed_deadlines: list[float | None] = []
+    mutation_entered = asyncio.Event()
+
+    async def _mutation() -> dict[str, Any]:
+        context = current_operation_context(supervisor)
+        assert context is not None
+        observed_deadlines.append(context.absolute_deadline)
+        journal_entry = adopt_operation_journal_entry(
+            supervisor,
+            method="CHAT_MESSAGE",
+            operation="chat.ask",
+        )
+        assert journal_entry is not None
+        journal_entry.mark_dispatched()
+        mutation_entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    entry, _ = registry.start("metadata-timeout", _mutation, client=client)
+    assert entry.task is not None
+    try:
+        await asyncio.wait_for(mutation_entered.wait(), timeout=5.0)
+        await asyncio.wait_for(entry.task, timeout=5.0)
+    finally:
+        if not entry.task.done():
+            entry.task.cancel()
+        await asyncio.gather(entry.task, return_exceptions=True)
+
+    assert isinstance(entry.error, OperationTimeoutError)
+    assert observed_deadlines == [entry.absolute_deadline]
+    assert entry.error.operation_metadata is not None
+    assert entry.error.operation_metadata.commit_state is CommitState.UNKNOWN
+    payload = _entry_status_payload(entry)
+    assert payload["status"] == "failed"
+    assert payload["error"]["code"] == "RPC"
+    assert payload["error"]["retriable"] is False
+    assert payload["error"]["unconfirmed"] is True
+    assert payload["error"]["commit_state"] == "unknown"
+    assert payload["error"]["operation"] == "chat.ask"
+
+
+async def test_registry_fences_queued_job_from_reopened_client_epoch() -> None:
+    from notebooklm import NotebookLMClient
+    from notebooklm.auth import AuthTokens
+
+    registry = ChatTaskRegistry(concurrency=1)
+    client = NotebookLMClient(
+        AuthTokens(cookies={"SID": "test"}, csrf_token="csrf", session_id="sid")
+    )
+    calls = 0
+
+    async def work() -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {}
+
+    await client.__aenter__()
+    try:
+        registry.set_bound_loop(asyncio.get_running_loop())
+        # Keep the job queued across a real close/reopen; it cannot race into
+        # either generation's operation scope before the registry checks it.
+        async with registry._gate:
+            entry, _ = registry.start("old-epoch", work, client=client)
+            await client.close()
+            await client.__aenter__()
+        assert entry.task is not None
+        await entry.task
+        assert isinstance(entry.error, RuntimeError)
+        assert "retired client generation" in str(entry.error)
+        assert calls == 0
+    finally:
+        await client.close()
+
+
 async def test_registry_capacity_fuse_when_all_slots_unfinished() -> None:
     registry = ChatTaskRegistry(max_tasks=1, concurrency=1)
     gate = asyncio.Event()
@@ -246,13 +370,14 @@ async def test_registry_evicts_oldest_done_at_cap() -> None:
 async def test_registry_aclose_cancels_running() -> None:
     """The real path: the ask is mid-flight, so ``_guard``'s CancelledError
     branch records the outcome."""
-    registry = ChatTaskRegistry()
+    registry = ChatTaskRegistry(job_timeout=1.0)
+    client, _supervisor = _supervised_client()
 
     async def _work() -> dict[str, Any]:
         await asyncio.sleep(3600)
         return {}
 
-    entry, _ = registry.start("k1", _work)
+    entry, _ = registry.start("k1", _work, client=client)
     await asyncio.sleep(0)  # let _guard acquire the slot and await the ask
     assert entry.started_at is not None
     await registry.aclose()
@@ -261,7 +386,8 @@ async def test_registry_aclose_cancels_running() -> None:
 
 
 async def test_registry_cancel_stops_one_task_and_preserves_metadata() -> None:
-    registry = ChatTaskRegistry()
+    registry = ChatTaskRegistry(job_timeout=1.0)
+    client, _supervisor = _supervised_client()
 
     async def _work() -> dict[str, Any]:
         await asyncio.sleep(3600)
@@ -272,6 +398,7 @@ async def test_registry_cancel_stops_one_task_and_preserves_metadata() -> None:
         _work,
         notebook_id=NB_ID,
         conversation_id=CONV_ID,
+        client=client,
     )
     await asyncio.sleep(0)
 
@@ -476,7 +603,7 @@ async def test_chat_start_failure_surfaces_via_status(server_factory, mock_clien
         # The stored exception is projected through the shared MCP error
         # vocabulary: {code, message, retriable} — agents branch on these.
         assert set(status["error"]) >= {"code", "message", "retriable"}
-        assert "retry" in status["hint"]
+        assert "hint" not in status
 
 
 async def test_chat_status_batch_shape_and_timings(server_factory, mock_client) -> None:

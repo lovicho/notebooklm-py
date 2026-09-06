@@ -12,9 +12,12 @@ studio-artifact RPCs (``CREATE_ARTIFACT`` type-4/variant-4 /
 from __future__ import annotations
 
 import builtins
+import contextlib
 import json
 from typing import TYPE_CHECKING, Any
 
+from .._artifact.creation import InteractiveMindMapCreationRequest
+from .._artifact.creation_policy import WEB_CREATION_POLICY, normalize_creation
 from .._idempotency import call_unconfirmed_on_transport_loss
 from .._mind_maps_api import MindMapsAPI
 from .._types.mind_maps import MindMap, MindMapKind
@@ -32,6 +35,7 @@ if TYPE_CHECKING:
     from .._artifacts import ArtifactsAPI
     from .._notebooks import NotebooksAPI
     from .._notes import NotesAPI
+    from .._runtime.call_supervisor import CallSupervisor, OperationLease
     from .contracts import RpcCaller
 
 
@@ -162,6 +166,12 @@ class NoteBackedMindMapService:
 class WebMindMapsAPI(MindMapsAPI):
     """``client.mind_maps`` — one surface over both mind-map backends."""
 
+    def _operation_scope(
+        self, label: str
+    ) -> contextlib.AbstractAsyncContextManager[OperationLease]:
+        """Keep neutral mind-map workflows under the Web supervisor."""
+        return self._supervisor.operation_scope(label)
+
     def __init__(
         self,
         *,
@@ -170,11 +180,13 @@ class WebMindMapsAPI(MindMapsAPI):
         artifacts: ArtifactsAPI,
         notebooks: NotebooksAPI,
         notes: NotesAPI,
+        supervisor: CallSupervisor,
     ) -> None:
         super().__init__(artifacts=artifacts, notes=notes)
         self._rpc = rpc
         self._mind_maps = mind_maps
         self._notebooks = notebooks
+        self._supervisor = supervisor
 
     async def list_note_backed(self, notebook_id: str) -> builtins.list[MindMap]:
         """List only the **note-backed** mind maps in a notebook.
@@ -226,12 +238,22 @@ class WebMindMapsAPI(MindMapsAPI):
         instructions: str | None,
     ) -> str:
         """Start the web ``CREATE_ARTIFACT`` interactive-map operation."""
-        del language  # Interactive web payloads have no language slot.
         if source_ids is None:
             source_ids = await self._notebooks.get_source_ids(notebook_id)
+        # The typed boundary retains the public language input even though the
+        # Web protocol deliberately has no language field for this family.
+        request = normalize_creation(
+            InteractiveMindMapCreationRequest(
+                notebook_id,
+                tuple(source_ids),
+                "" if language is None else language,
+                instructions,
+            ),
+            WEB_CREATION_POLICY,
+        )
         # Imported lazily to keep the web mind-map facade import-safe while
         # ``_artifact`` re-exports its injected note-backed service identity.
-        from .params.artifacts import build_interactive_mind_map_artifact_params
+        from .params.creation import encode_creation
 
         # CREATE_ARTIFACT is classified in ``_web.policy``. ``operation_variant=None``
         # is passed explicitly to match the other CREATE_ARTIFACT / GENERATE_MIND_MAP
@@ -240,9 +262,7 @@ class WebMindMapsAPI(MindMapsAPI):
         create_response = await call_unconfirmed_on_transport_loss(
             lambda: self._rpc.rpc_call(
                 RPCMethod.CREATE_ARTIFACT,
-                build_interactive_mind_map_artifact_params(
-                    notebook_id, source_ids, instructions=instructions
-                ),
+                encode_creation(request)[0],
                 source_path=f"/notebook/{notebook_id}",
                 allow_null=True,
                 operation_variant=None,

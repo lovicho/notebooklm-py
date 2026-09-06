@@ -98,6 +98,7 @@ from .exceptions import (
     NoteNotFoundError,
     # Cross-domain umbrellas
     NotFoundError,
+    OperationTimeoutError,
     # Domain: Sources
     PlayBookNotExportableError,
     RateLimitError,
@@ -125,8 +126,14 @@ from .exceptions import (
 from .types import (
     AccountLimits,
     Artifact,
+    ArtifactCreationCapability,
     ArtifactCustomizationChoices,
     ArtifactInfographic,
+    ArtifactListing,
+    ArtifactListingComponent,
+    ArtifactListingFailure,
+    ArtifactLookup,
+    ArtifactLookupStatus,
     ArtifactMedia,
     ArtifactMediaType,
     ArtifactSlide,
@@ -202,6 +209,7 @@ from .types import (
     SlideDeckFormat,
     SlideDeckLength,
     Source,
+    SourceDeleteOutcome,
     SourceFulltext,
     SourceGuide,
     SourceStatus,
@@ -232,6 +240,8 @@ from .types import (
 from .utils import resolve_chat_reference_passage
 
 __all__ = [
+    "SourceDeleteOutcome",
+    "ArtifactCreationCapability",
     "__version__",
     # Client (main entry point)
     "NotebookLMClient",
@@ -264,6 +274,11 @@ __all__ = [
     "SourceGuide",
     "SourceSummary",
     "Artifact",
+    "ArtifactListing",
+    "ArtifactListingComponent",
+    "ArtifactListingFailure",
+    "ArtifactLookup",
+    "ArtifactLookupStatus",
     "ArtifactInfographic",
     "ArtifactMedia",
     "ArtifactMediaType",
@@ -372,6 +387,7 @@ __all__ = [
     "CollectionNotFoundError",
     # Cross-domain umbrella: wait/poll timeouts
     "WaitTimeoutError",
+    "OperationTimeoutError",
     # Warnings
     "UnknownTypeWarning",
     # User-facing type enums (str enums for .kind property)

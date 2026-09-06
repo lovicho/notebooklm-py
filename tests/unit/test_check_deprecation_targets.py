@@ -157,6 +157,11 @@ def _install_registered_tree(
     immutable: bool = True,
 ) -> None:
     entries = entries or [
+        _spec_entry("artifact_raw_download_prefetch", replacement='"notebooklm.NotebookLMClient"'),
+        _spec_entry(
+            "artifact_ambiguous_absence",
+            replacement='"notebooklm.NotebookLMClient"',
+        ),
         _spec_entry("auth_tokens_flat_cookies"),
         _spec_entry("auth_tokens_from_storage"),
         _spec_entry(
@@ -173,6 +178,14 @@ def _install_registered_tree(
             replacement='"notebooklm.NotebookLMClient.artifacts"',
         ),
         _spec_entry(
+            "artifact_poll_follower_callback",
+            replacement='"notebooklm.NotebookLMClient"',
+        ),
+        _spec_entry(
+            "artifact_poll_follower_options",
+            replacement='"notebooklm.NotebookLMClient"',
+        ),
+        _spec_entry(
             "client_rpc_call_web",
             replacement='"notebooklm.raw.WebRawAPI.call"',
         ),
@@ -181,12 +194,24 @@ def _install_registered_tree(
             replacement='"notebooklm.raw.AndroidRawAPI.unary"',
         ),
         _spec_entry(
+            "client_legacy_constructor_options",
+            replacement='"notebooklm.options.ClientConfig"',
+        ),
+        _spec_entry(
+            "client_legacy_from_storage_options",
+            replacement='"notebooklm.options.ClientConfig"',
+        ),
+        _spec_entry(
             "collection_from_api_response",
             replacement='"notebooklm.NotebookLMClient.collections"',
         ),
         _spec_entry(
             "label_from_api_response",
             replacement='"notebooklm.NotebookLMClient.labels"',
+        ),
+        _spec_entry(
+            "mcp_confirmed_name_references",
+            replacement='"notebooklm.NotebookLMClient"',
         ),
         _spec_entry(
             "notebook_from_api_response",
@@ -209,17 +234,31 @@ def _install_registered_tree(
             replacement='"notebooklm.NotebookLMClient.sources"',
         ),
     ]
+    entries.append(
+        _spec_entry(
+            "mind_map_legacy_terminal_hydration",
+            replacement='"notebooklm.NotebookLMClient.mind_maps"',
+        )
+    )
     calls = calls or [
+        'warn_registered_deprecation("artifact_raw_download_prefetch")',
+        'warn_registered_deprecation("artifact_ambiguous_absence")',
+        'warn_registered_deprecation("mind_map_legacy_terminal_hydration")',
         'warn_registered_deprecation("auth_tokens_flat_cookies")',
         'warn_registered_deprecation("auth_tokens_from_storage")',
         'warn_registered_deprecation("auth_tokens_replace_cookie_jar")',
         'warn_registered_deprecation("auth_tokens_sync_storage_construction")',
         'warn_registered_deprecation("artifact_from_api_response")',
         'warn_registered_deprecation("artifact_from_mind_map")',
+        'warn_registered_deprecation("artifact_poll_follower_callback")',
+        'warn_registered_deprecation("artifact_poll_follower_options", detail="timeout")',
         'warn_registered_deprecation("client_rpc_call_web")',
         'warn_registered_deprecation("client_rpc_call_android")',
+        'warn_registered_deprecation("client_legacy_constructor_options", detail="timeout")',
+        'warn_registered_deprecation("client_legacy_from_storage_options", detail="timeout")',
         'warn_registered_deprecation("collection_from_api_response")',
         'warn_registered_deprecation("label_from_api_response")',
+        'warn_registered_deprecation("mcp_confirmed_name_references")',
         'warn_registered_deprecation("notebook_from_api_response")',
         'warn_registered_deprecation("share_status_from_api_response")',
         'warn_registered_deprecation("shared_user_from_api_response")',
@@ -233,6 +272,7 @@ def _install_registered_tree(
             class NotebookLMClient:
                 auth: object
                 artifacts: object
+                mind_maps: object
                 collections: object
                 labels: object
                 notebooks: object
@@ -260,6 +300,7 @@ def _install_registered_tree(
         ),
         encoding="utf-8",
     )
+    (src / "options.py").write_text("class ClientConfig:\n    pass\n", encoding="utf-8")
     wrapper = "MappingProxyType({" if immutable else "{"
     close = "})" if immutable else "}"
     registry = (

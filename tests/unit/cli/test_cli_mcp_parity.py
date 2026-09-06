@@ -41,8 +41,12 @@ from notebooklm.mcp.server import create_server  # noqa: E402
 from notebooklm.mcp.tools.studio import _passthrough_sources  # noqa: E402
 from notebooklm.notebooklm_cli import cli  # noqa: E402
 from notebooklm.types import Artifact, GenerationState  # noqa: E402
+from tests._helpers.downloads import configure_prepared_artifact_downloads  # noqa: E402
 
-from .conftest import create_mock_client, inject_client  # noqa: E402
+from .conftest import (  # noqa: E402
+    create_mock_client,
+    inject_client,
+)
 
 # UUID-shaped ids so BOTH adapters treat them as already-full (the MCP
 # resolve_notebook skips the name lookup; the CLI resolve_source_ids skips the
@@ -155,7 +159,13 @@ def _drive_mcp(
     client = MagicMock()
     for ns in _NAMESPACES:
         setattr(client, ns, MagicMock())
-    client.artifacts._list_for_download = None
+    configure_prepared_artifact_downloads(client)
+
+    @contextlib.asynccontextmanager
+    async def operation(*_args: Any, **_kwargs: Any) -> Any:
+        yield object()
+
+    client.operation = operation
     if setup is not None:
         setup(client)
 
@@ -184,7 +194,6 @@ def _drive_cli(argv: list[str], setup: Any = None) -> tuple[Any, Any]:
     sentinel abort surfaces as a non-zero exit rather than propagating).
     """
     client = create_mock_client()
-    client.artifacts._list_for_download = None
     if setup is not None:
         setup(client)
     with (
@@ -548,7 +557,6 @@ def test_download_audio_parity(tmp_path: Any) -> None:
     out = str(tmp_path / "out.mp3")
 
     def setup(client: Any) -> None:
-        client.artifacts._list_for_download = None
         client.artifacts.list = AsyncMock(return_value=[_AUDIO_ARTIFACT])
 
     mcp = _mcp_capture(
@@ -611,8 +619,8 @@ def test_quiz_option_choices_match_core_and_mcp(subcommand: str, flag: str, axis
     MCP tuples are still hand-written, so this pins the two surfaces together
     rather than comparing the map with itself.
     """
-    from notebooklm._app import generate_plans as gp
-    from notebooklm.mcp.tools.studio import _KIND_OPTIONS
+    from notebooklm._app.generation_requests import generation_option_choices
+    from notebooklm.cli import generate_cmd as gp
 
     core_map = gp._QUIZ_QUANTITY_MAP if axis == "quantity" else gp._QUIZ_DIFFICULTY_MAP
     choices = _cli_choices(subcommand, flag)
@@ -620,7 +628,7 @@ def test_quiz_option_choices_match_core_and_mcp(subcommand: str, flag: str, axis
         f"generate {subcommand} {flag} offers {choices} but the core map declares "
         f"{tuple(core_map)} — derive the click.Choice from the map instead of hardcoding it."
     )
-    assert choices == _KIND_OPTIONS[subcommand][axis]
+    assert choices == generation_option_choices(subcommand)[axis]
 
 
 @pytest.mark.parametrize(
@@ -646,8 +654,8 @@ def test_quiz_option_flag_default_matches_the_wire_default(
     hardcode-plus-parity-test shape the MCP and REST option tuples already use.
     A test is allowed to import across layers precisely so it can check one.
     """
-    from notebooklm._app import generate_plans as gp
     from notebooklm._web.params.artifacts import DEFAULT_QUIZ_DIFFICULTY, DEFAULT_QUIZ_QUANTITY
+    from notebooklm.cli import generate_cmd as gp
 
     generate = cli.commands["generate"]
     command = generate.commands[subcommand]  # type: ignore[attr-defined]
