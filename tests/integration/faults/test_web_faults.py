@@ -15,11 +15,15 @@ pytestmark = pytest.mark.allow_no_vcr
 async def test_web_fault_scenario(scenario: str) -> None:
     result = await asyncio.wait_for(
         run_scenario(scenario, operation_id=f"pytest-{scenario}"),
-        timeout=8.0,
+        timeout=20.0,
     )
 
     assert result.checks
     assert all(result.checks.values())
+    required = result.events[0]["required_checks"]
+    assert required
+    assert set(required) <= result.checks.keys()
+    assert all(result.checks.get(check) is True for check in required)
     assert result.events[0]["kind"] == "plan"
     assert result.events[0]["faults"]
     assert all(

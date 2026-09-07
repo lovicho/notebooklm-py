@@ -1,9 +1,9 @@
-"""Shared test fixtures."""
-
+import functools
 import importlib.util
 import json
 import os
 import re
+from pathlib import Path
 from urllib.parse import parse_qs
 
 import pytest
@@ -297,6 +297,15 @@ def pytest_addoption(parser):
             "pass exactly once; intended for the explicit browser CI lane."
         ),
     )
+    parser.addoption(
+        "--run-historical",
+        action="store_true",
+        default=False,
+        help=(
+            "Explicit opt-in to collect and run historical qualification tests. "
+            "Without this flag, tests in tests/qualification/historical/ are ignored."
+        ),
+    )
 
 
 @pytest.fixture
@@ -368,12 +377,66 @@ def pytest_configure(config):
         "code path via ``patch.dict('sys.modules', {'playwright': None})``. "
         "CI always installs the browser extra so marked tests run there.",
     )
+    config.addinivalue_line(
+        "markers",
+        "historical: historical qualification tests; explicit opt-in only via --run-historical",
+    )
+    config.addinivalue_line(
+        "markers",
+        "pr_contract: PR-critical contract and boundary checks required on PR lanes",
+    )
+    config.addinivalue_line(
+        "markers",
+        "compat_smoke: secondary-OS and platform compatibility smoke tests",
+    )
     # Disable Rich/Click formatting in tests to avoid ANSI escape codes in output
     # This ensures consistent test assertions regardless of -s flag
     # NO_COLOR disables colors, TERM=dumb disables all formatting (bold, etc.)
     # Force these values to ensure consistent behavior across all environments
     os.environ["NO_COLOR"] = "1"
     os.environ["TERM"] = "dumb"
+
+
+def pytest_ignore_collect(collection_path, config) -> bool | None:
+    """Ignore collection of historical qualification tests unless --run-historical is passed."""
+    if not config.getoption("--run-historical", default=False):
+        normalized = Path(collection_path).resolve().as_posix()
+        if "tests/qualification/historical" in normalized:
+            return True
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def _load_platform_manifest(rootpath: str) -> frozenset[str]:
+    manifest_path = Path(rootpath) / "tests" / "fixtures" / "ci-platform-selection.json"
+    if not manifest_path.is_file():
+        return frozenset()
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return frozenset(data.get("paths", []))
+    except Exception:
+        return frozenset()
+
+
+@functools.lru_cache(maxsize=1)
+def _load_pr_contract_nodes(rootpath: str) -> frozenset[str]:
+    """Return ledger nodes that must enter the canonical PR contract lane.
+
+    The relevance ledger is the reviewed source of routing decisions.  Tests
+    may retain broad ``repo_lint`` module marks, so applying the effective
+    marker here prevents a ledger-only PR contract from disappearing from both
+    the routine selector and the explicit contract selector.
+    """
+    ledger_path = Path(rootpath) / "tests" / "fixtures" / "test_relevance_ledger.json"
+    try:
+        data = json.loads(ledger_path.read_text(encoding="utf-8"))
+        return frozenset(
+            entry["nodeid"]
+            for entry in data["entries"]
+            if entry.get("decision") == "pr_contract" and isinstance(entry.get("nodeid"), str)
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return frozenset()
 
 
 def pytest_collection_modifyitems(config, items):
@@ -384,6 +447,33 @@ def pytest_collection_modifyitems(config, items):
     raising ``ImportError`` at runtime. CI installs the extra, so this is a
     no-op there.
     """
+    if not config.getoption("--run-historical", default=False):
+        remaining = []
+        deselected = []
+        for item in items:
+            if item.get_closest_marker("historical"):
+                deselected.append(item)
+            else:
+                remaining.append(item)
+        if deselected:
+            config.hook.pytest_deselected(items=deselected)
+            items[:] = remaining
+
+    pr_contract_nodes = _load_pr_contract_nodes(str(config.rootpath))
+    for item in items:
+        nodeid = item.nodeid.split("[", 1)[0]
+        if nodeid in pr_contract_nodes and not item.get_closest_marker("pr_contract"):
+            item.add_marker(pytest.mark.pr_contract)
+        if item.get_closest_marker("pr_contract") and not item.get_closest_marker("repo_lint"):
+            item.add_marker(pytest.mark.repo_lint)
+
+    platform_paths = _load_platform_manifest(str(config.rootpath))
+    if platform_paths:
+        for item in items:
+            node_rel = item.nodeid.split("::")[0].replace("\\", "/")
+            if any(node_rel == p or node_rel.startswith(f"{p}/") for p in platform_paths):
+                item.add_marker(pytest.mark.compat_smoke)
+
     if _PLAYWRIGHT_INSTALLED:
         chromium_available = None
         for item in items:

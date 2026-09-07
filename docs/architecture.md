@@ -775,7 +775,7 @@ The implementation and its most direct tests were re-audited at revision
 | Detached shared polling | [`_artifact/polling.py`](../src/notebooklm/_artifact/polling.py), [`_polling_registry.py`](../src/notebooklm/_polling_registry.py) | [`test_artifact_polling_paths.py`](../tests/unit/test_artifact_polling_paths.py), [`test_artifacts_polling_retries.py`](../tests/unit/test_artifacts_polling_retries.py) |
 | Journal and recovery vocabulary | [`_idempotency.py`](../src/notebooklm/_idempotency.py), [`outcomes.py`](../src/notebooklm/outcomes.py) | [`test_operation_journal.py`](../tests/unit/test_operation_journal.py) |
 | Complete source-batch settlement | [`_source/batch.py`](../src/notebooklm/_source/batch.py), [`_web/sources/batch.py`](../src/notebooklm/_web/sources/batch.py), [`_android/source_batch.py`](../src/notebooklm/_android/source_batch.py) | [`test_source_batch_outcomes.py`](../tests/unit/test_source_batch_outcomes.py), [`test_source_batch_parity.py`](../tests/server/test_source_batch_parity.py) |
-| Structural ownership inventory | [`test_client_operation_contract_inventory.py`](../tests/_guardrails/test_client_operation_contract_inventory.py) | The inventory is executable and rejects unowned migration rows |
+| Structural ownership inventory | [`test_client_operation_contract_inventory.py`](../tests/qualification/historical/test_client_operation_contract_inventory.py) | The inventory is executable and rejects unowned migration rows |
 | Adapter surface inventory | [`test_manifest.py`](../tests/unit/mcp/test_manifest.py), [`test_tool_eval.py`](../tests/unit/mcp/test_tool_eval.py), [`test_route_manifest.py`](../tests/server/test_route_manifest.py) | MCP names/count/schema budgets and REST method/path pairs stay explicit |
 | Typed facade boundary | [`test_no_raw_positional_rpc_indexing.py`](../tests/_guardrails/test_no_raw_positional_rpc_indexing.py) | Raw payload ingress above the facade and unbaselined positional decoding fail CI |
 
@@ -1608,10 +1608,17 @@ migrate. See [ADR-0007](./adr/0007-test-monkeypatch-policy.md).
 
 ### Test suite taxonomy
 
-- **Unit tests** (`tests/unit/`): No network, decode/encode only.
-- **Integration tests** (`tests/integration/`): Mock HTTP responses or
-  use VCR cassettes scrubbed per
-  [ADR-0006](./adr/0006-vcr-scrubber-strategy.md).
+- **Unit tests** (`tests/unit/`): No network; offline unit logic and mocks. Includes
+  `_app/` transport-neutral core tests, CLI command tests, MCP unit tests,
+  Android unit tests, and payload drift canaries.
+- **REST server tests** (`tests/server/`): FastAPI route and adapter suite.
+- **Integration tests** (`tests/integration/`): Mock HTTP responses,
+  VCR cassettes scrubbed per [ADR-0006](./adr/0006-vcr-scrubber-strategy.md),
+  and local socket fault injection scenarios (`tests/integration/faults/`)
+  backed by the local test fault server (`tests/_fault_server/`).
+- **Architecture and invariant gates** (`tests/_guardrails/`): Meta-lint and AST
+  assertions enforcing architectural boundaries, shrink-only allowlists, and
+  ADR compliance.
 - **E2E tests** (`tests/e2e/`): Real API; require auth; marked
   `@pytest.mark.e2e` and excluded from the default run.
 
@@ -1626,12 +1633,13 @@ A fuller taxonomy can be generated with
 ## Implementation surface convention (ADR-0012)
 
 `notebooklm-py` keeps a small set of public-named modules (`artifacts.py`,
-`auth.py`, `client.py`, `config.py`, `exceptions.py`, `io.py`, `log.py`,
-`migration.py`, `notebooklm_cli.py`, `paths.py`, `research.py`,
-`types.py`, `urls.py`, `utils.py`) and routes everything else through
-underscore-prefixed seam modules. Anything underscored is *not* a
-supported import surface; it can be moved, renamed, or deleted without a
-deprecation cycle. See [ADR-0012](./adr/0012-implementation-surface-convention.md).
+`auth.py`, `client.py`, `config.py`, `downloads.py`, `exceptions.py`, `io.py`,
+`log.py`, `migration.py`, `notebooklm_cli.py`, `options.py`, `outcomes.py`,
+`paths.py`, `raw.py`, `research.py`, `types.py`, `urls.py`, `utils.py`)
+and routes everything else through underscore-prefixed seam modules. Anything
+underscored is *not* a supported import surface; it can be moved, renamed,
+or deleted without a deprecation cycle. See
+[ADR-0012](./adr/0012-implementation-surface-convention.md).
 
 The corollary for contributors: if you find yourself reaching into
 `notebooklm._foo`, prefer a capability Protocol or a public function in
@@ -2086,6 +2094,7 @@ src/notebooklm/
 ├── _callbacks.py                # Sync/async callback invocation helper
 ├── _adapter_support.py          # Small transport-neutral adapter support leaf
 ├── _client_assembly.py          # Typed graph composition + sole client installer
+├── _http_client_factory.py      # Captured private HTTPX/curl transfer constructors
 ├── _client_compat.py            # Pure 0.x Android-to-Web sidecar factory/proxy
 ├── _client_contracts.py         # Frozen assembly graphs + private P4 carriers
 ├── _client_options.py           # Legacy-flat to owner-grouped option normalization
@@ -2136,7 +2145,7 @@ src/notebooklm/
 │   ├── notes.py                 # Click-free note core: create/get/save/rename/delete (typed-facade only — notes.create returns a Note) + content-preserving rename (resolve_note_content); found-flag results map to the CLI NOT_FOUND/exit-1 path (injected notebook/note resolvers)
 │   ├── pagination.py            # Transport-neutral bounded-slice paginate(items, limit, offset) -> (page, {total,offset,has_more}) with bound validation; the shared slice under both the MCP *_list tools and the REST list-route envelope (Option B-lite)
 │   ├── profile.py               # Click-free profile core: gather_profile_list -> ProfileEntry rows (injected list_profiles/resolve_profile/get_storage_path/read_account_metadata), is_protected_profile delete-guard decision, set_default/retarget_default config.json mutators (CLI keeps the locked _atomic_write_config + click.confirm + Rich render)
-│   ├── research.py              # Click-free `research` status/wait core: poll_and_classify -> ResearchStatusResult, ResearchWaitPlan/Result + execute_research_wait (resolver/importer/wait-context injected), validate_research_wait_flags (-> ValidationError); returns typed results only (CLI owns the --json envelope)
+│   ├── research.py              # Click-free `research` status/wait/import core: poll_and_classify -> ResearchStatusResult, ResearchWaitPlan/Result + execute_research_wait (resolver/importer/wait-context injected), execute_research_import (poll → optional cited/max filter → oneshot or verified import under one client.operation), validate_research_wait_flags (-> ValidationError); returns typed results only (CLI owns the --json envelope)
 │   ├── resolve.py               # Click-free validate_id + resolve_ref (AmbiguousIdError/Resolution)
 │   ├── serialize.py             # to_jsonable(obj) recursive JSON-able conversion (enum-before-primitive) + source_summary, the narrow {id,title,type,url} shape the add envelopes publish (kept narrow on purpose: adapter-specific per-source fields are composed on top in the adapter, not added here)
 │   ├── session.py               # Click-free session-context core: `use` verify_and_set_notebook (injected resolve_notebook_id) + `status` read_status(StatusInputs) read+project -> StatusReport + `auth logout` execute_logout(LogoutInputs) filesystem-teardown -> typed LogoutOutcome (path/context/clear_context helpers injected via bundles; CLI owns Rich render + exit codes)
@@ -2325,6 +2334,7 @@ src/notebooklm/
 ├── _runtime/                    # Client-runtime subpackage (promoted from flat _runtime_*.py, #1328)
 │   ├── __init__.py              # Re-exports only transport-neutral runtime names
 │   ├── auth_refresh_retry.py    # Shared refresh budget + retry body
+│   ├── retry_budget.py          # Independent retry counters retained across decoded auth recursion
 │   ├── call_supervisor.py       # Shared call admission, metrics, semaphore, and generation leases
 │   ├── config.py                # DEFAULT_* knobs + module-level constants
 │   ├── contracts.py             # Transport-neutral LoopGuard Protocol
@@ -2500,6 +2510,7 @@ src/notebooklm/
 │   ├── _auth.py                 # Remote-transport bearer auth: McpBearerAuthProvider(TokenVerifier) with constant-time hmac.compare_digest over NOTEBOOKLM_MCP_TOKEN (env-only, never logged/repr'd); build_auth_provider/get_configured_token; build_auth(token, oauth) composes bearer | OAuth | MultiAuth | None (IdP-agnostic) — mirrors server/_auth.py, NOT fastmcp StaticTokenVerifier
 │   ├── _oauth.py                # Optional self-hosted OAuth 2.1 AS for claude.ai (OAuth-only connector UI): SelfHostedOAuthProvider(InMemoryOAuthProvider) + a password-gated /login (override authorize()→stash SDK-validated (client,params) under a single-use sid→/login→InMemoryOAuthProvider.authorize); scrypt password digest + per-IP throttle, capped DCR + evict-oldest pending stash, atomic 0600 persistence of clients+tokens; get_oauth_config/build_oauth_provider (env NOTEBOOKLM_MCP_OAUTH_PASSWORD + _BASE_URL). Composed with the bearer via MultiAuth
 │   ├── _host_guard.py           # LoopbackHostGuardMiddleware: ASGI guard that rejects HTTP requests with a non-loopback Host header (403; DNS-rebinding guard, #1869) on the loopback-bound HTTP transport via _serving.host_header_is_loopback; skipped when allow_external (REST-parity bearer/OAuth auth is mandatory there) — mirrors server/_auth
+│   ├── _hostupload.py           # Stdio host-upload boundary: no-follow directory/descriptor opens on POSIX and pinned non-reparse Win32 handles, followed by a private temporary copy before client awaits; cleanup on success, failure, or cancellation
 │   ├── _urlcheck.py             # _validate_bare_https_origin(url, env) — shared "bare public https origin" check (https scheme, host, no path/query/fragment); guards the OAuth base URL AND the file-transfer public URL so a /mcp-suffixed/non-https value can't mint broken links
 │   ├── _filelink.py             # HMAC-signed self-describing file-transfer tokens (ADR-0024): FileLinkSigner.sign(payload, ttl→injects exp)/verify(token, op) (stdlib hmac/base64/json; pre-decode length cap, base64url re-pad, compare_digest, exp+op check) + FileTransferConfig(signer, base_url).upload_url(ttl=UPLOAD_TTL 15m; WIDGET_UPLOAD_TTL 1h for the ADR-0027 widget pool)/download_url (DOWNLOAD_TTL 30m); FileLinkError
 │   ├── _fileroutes.py           # register_file_routes(mcp, config): the /files/{dl,ul} custom routes mounted on the FastMCP http app (ADR-0024). GET /files/dl streams the artifact (download core → FileResponse, meaningful filename, inside-tempdir assert, BackgroundTask cleanup); GET /files/ul = minimal upload page (file picker + raw-body fetch POST); POST|PUT /files/ul streams request.stream() into a 0600 temp under a running byte cap (real DoS guard) + Content-Length early 413 → neutral source_add core. Signed token is the sole auth (custom routes bypass the bearer gate); HTML pages set no-referrer/no-store/DENY; local _safe_upload_name (no server/ import)
@@ -2530,7 +2541,7 @@ src/notebooklm/
 │       ├── chat.py              # chat_ask (client.chat.ask + get_history recall + suggest_followups) + chat_configure (_app.chat.execute_configure) + suggest_prompts (client.notebooks.suggest_prompts surface selector)
 │       ├── notes.py             # note_save (create-or-update upsert) over _app.notes; note reading/renaming/deleting fold into the cross-type Studio tools
 │       ├── studio.py            # hosts the Studio tools: studio_list (merges notes+artifacts via _studio_items.studio_items; surfaces each artifact's generation_prompt in the summary listing / the item= single-fetch — folded studio_get_prompt in #1896) / generate / status / download (via _studio_download) / rename / retry / studio_delete — both rename and delete are cross-type via _studio_items.resolve_studio_item (note→_app.notes.execute_note_rename/execute_note_delete, artifact→_app.artifacts kind-aware core); enum dispatch over _app.generate + _app.download; stateless poll via _app.artifacts.poll_artifact
-│       ├── research.py          # research_start (client.research.start) + research_status (_app.research.poll_and_classify) + research_import
+│       ├── research.py          # research_start (client.research.start) + research_status (_app.research.poll_and_classify) + research_import (_app.research.execute_research_import) + research_cancel
 │       ├── sharing.py           # share_status/set_access/set_user/remove_user (thin adapters over client.sharing; set_access folds public+view_level, set_user upserts add/update; string-labeled enums; view_level surfaced only when set)
 │       └── meta.py              # server_info — package version + auth-health over _app.auth_check (no notebook arg)
 ├── rpc/                         # Public RPC compatibility path
@@ -2634,7 +2645,7 @@ src/notebooklm/
         ├── notes.py             # /v1/notebooks/{id}/notes list/get/create/update(PUT)/delete — thin adapter over client.notes
         ├── chat.py              # POST /v1/notebooks/{id}/chat — blocking ask (no SSE) + POST /chat/configure over _app.chat.execute_configure
         ├── artifacts.py         # /v1/notebooks/{id}/artifacts list/generate/poll/download/rename(PATCH)/retry/delete + GET /{id}/prompt (per-kind generate-option validation pinned to core maps; registry-projected poll; server-generated temp download path)
-        ├── research.py          # /v1/notebooks/{id}/research start(202)/status/cancel/import — split-tool shape over client.research + _app.research.poll_and_classify (poll_id = report_id or task_id)
+        ├── research.py          # /v1/notebooks/{id}/research start(202)/status/cancel/import — split-tool shape over client.research + _app.research.poll_and_classify / execute_research_import (poll_id = report_id or task_id)
         ├── share.py             # /v1/notebooks/{id}/share status/public/users/view-level over _app.sharing
         └── meta.py              # GET /v1/server/info — version + local auth-health probe (run_auth_check) + opt-in account block; scrubs the on-disk storage path (mirrors MCP server_info)
 ```
@@ -2677,6 +2688,9 @@ src/notebooklm/
 - [ADR-0034](./adr/0034-auth-storage-object-model.md) — Current auth storage object model and owner extraction (Accepted; Phase 12C complete).
 - [ADR-0035](./adr/0035-mobile-resilience-transport.md) — Explicit Android backend as a resilience transport (Accepted; all eleven namespaces now close their former Web compatibility seams).
 - [ADR-0036](./adr/0036-browser-acquisition-package.md) — Browser acquisition package and neutral login orchestration (Accepted; browser implementation isolated behind lazy auth capabilities).
+- [ADR-0037](./adr/0037-live-usage-and-quota-api.md) — Live usage and quota API (`client.settings.get_usage()`, `docs/quota-limits.md`).
+- [ADR-0038](./adr/0038-local-fault-injection-harness.md) — Local fault-injection services and concurrent resilience scenarios (`tests/_fault_server/`, `docs/fault-injection.md`, `tests/integration/faults/`).
+- [ADR-0039](./adr/0039-backend-specific-credential-surfaces.md) — Backend-specific credential surfaces (`WebCredentials`, `AndroidCredentials`, `_client_contracts.py`).
 
 ## See also
 
@@ -2684,6 +2698,7 @@ src/notebooklm/
 - [`docs/development.md`](./development.md) — how to add a new feature API.
 - [`docs/refactor-history.md`](./refactor-history.md) — historical narrative of the multi-phase refactor + downstream migration tables.
 - [`docs/python-api.md`](./python-api.md) — public Python API surface.
+- [`docs/web-android-public-behavior.md`](./web-android-public-behavior.md) — classified remaining public Web vs Android behavior splits.
 - [`docs/auth-cookie-lifecycle.md`](./auth-cookie-lifecycle.md) — cookie keepalive, rotation, and PSIDTS recovery.
 - [`docs/rpc-development.md`](./rpc-development.md) — capturing and debugging new RPCs.
 - [`docs/rpc-reference.md`](./rpc-reference.md) — RPC payload structures.

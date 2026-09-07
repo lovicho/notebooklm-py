@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Web vs Android public-behavior inventory.**
+  [`docs/web-android-public-behavior.md`](docs/web-android-public-behavior.md)
+  classifies remaining public backend splits (notes tombstone projection, raw
+  escape-hatch types, deliberate research-import policy, tracked default flips
+  gated by C3-02/C5A-01, and the [#2384](https://github.com/teng-lin/notebooklm-py/issues/2384)
+  `get_history` contract fix) so callers
+  do not treat every difference as a defect.
 - **Owner-grouped client configuration.** `notebooklm.options` adds frozen
   `ClientConfig` groups for runtime capacity, retries, selected backend,
   transfer phases, feature read windows, and Web session hooks. Both direct
@@ -45,6 +52,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP stdio `source_add` host-path file-add is default-deny.**
+  `source_add(source_type="file", path=...)` over stdio now requires
+  `NOTEBOOKLM_MCP_ALLOWED_ROOTS` (OS-pathsep directories; `$HOME` and
+  `~/.notebooklm` are rejected as roots). Known credential filenames
+  (`storage_state.json`, `master_token.json`) and Playwright profile dirs
+  are refused even inside an allowed root. Remote HTTP still never opens a
+  server-host `path`.
+- **Fuzzy artifact resolution refuses incomplete listings.** CLI
+  `resolve_artifact_id` and MCP `resolve_artifact` now require
+  `list_with_status().is_complete` before title/prefix matching. A notes
+  outage (or other secondary backing failure) no longer turns an ambiguous
+  title/prefix into a unique hit or a partial miss into not-found; both
+  surfaces raise the existing `artifacts.lookup` incomplete-read `RPCError`.
+  Canonical UUID refs still fast-path without listing ([#2380](https://github.com/teng-lin/notebooklm-py/issues/2380)).
+- **REST/MCP research import shares one operation budget.** Poll, optional
+  cited/max filtering, and import now run under one `client.operation` so a
+  configured aggregate deadline cannot restart between the read and the
+  mutation (`Fixes #2382`).
+- **CLI `ask --save-as-note --json` keeps save-failure commit evidence.** Optional
+  note-save remains non-fatal, but JSON now projects `SaveNoteOutcome.failure`
+  through the same commit-state / recovery-action / known-id fields as other CLI
+  errors instead of dropping them on a redacted `note_save_error` string (#2383).
 - **Retry-unsafe writes no longer replay after transmission.** Notebook and
   source creates, file registration, research imports, collection creates, and
   chat POSTs now require explicit commit evidence before any outer replay.
@@ -91,6 +120,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`chat.get_history` raises on turn-fetch failures.** Web previously logged
+  `ChatError`/`NetworkError` from the conversation-turns RPC and returned `[]`,
+  so a failed fetch looked like an empty conversation. Android already raised.
+  Both backends now raise; for a positive `limit`, `[]` means no conversation
+  or no turns. Android also returns `[]` for non-positive limits
+  ([#2384](https://github.com/teng-lin/notebooklm-py/issues/2384)).
 - **Legacy client tuning has a v1 runway.** A construction using non-default
   flat tuning keywords now emits one caller-attributed `DeprecationWarning`
   naming all arguments to migrate to `config=ClientConfig(...)`. Explicit old
@@ -130,6 +165,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   3.10–3.14 on Ubuntu plus Python 3.12 on macOS and Windows). The full 15-cell
   Ubuntu/macOS/Windows × Python 3.10–3.14 matrix now runs only in the nightly
   workflow, and manual nightly dispatches include it by default.
+
+### Documentation
+
+- **MCP/REST hosting threat model (`SECURITY.md`).** Operator-facing security
+  docs no longer claim the CLI has "no long-lived API keys or OAuth tokens".
+  They now document that `master_token.json` is account-equivalent, MCP OAuth
+  refresh tokens are long-lived (rotating `NOTEBOOKLM_MCP_OAUTH_PASSWORD` does
+  not revoke them), stdio `source_add(path)` reads server-host files, `/files/dl`
+  and `/files/ul` are HMAC-URL auth only, open OAuth DCR does not bypass the
+  login password, MCP loopback HTTP may be tokenless while REST always requires
+  `NOTEBOOKLM_SERVER_TOKEN`, `GET /healthz` is liveness not readiness, and
+  `pip-audit` in CI still exports `browser+dev+markdown` by default.
+  ([#2387](https://github.com/teng-lin/notebooklm-py/issues/2387))
 
 ### Removed
 

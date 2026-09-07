@@ -418,7 +418,11 @@ DISPLAY_NAME_FALSE_POSITIVES: frozenset[str] = frozenset(
 # Pattern construction helpers
 # =============================================================================
 
-_EMAIL_PATTERN_BASE = r"[A-Za-z0-9._%+\-]+@(?:" + "|".join(EMAIL_PROVIDERS) + r")\.com"
+_EMAIL_PATTERN_BASE = (
+    r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@(?:"
+    + "|".join(EMAIL_PROVIDERS)
+    + r")\.com(?![A-Za-z0-9_%+\-]|\.(?=[A-Za-z0-9._%+\-]))"
+)
 
 # Single-encoded ``authuser=<local>%40<provider>`` query-param shape and its
 # double-encoded ``authuser%3D<local>%40<provider>`` sibling. The double-encoded
@@ -1138,9 +1142,7 @@ _DETECT_TOKEN_FIELDS: list[tuple[str, re.Pattern[str]]] = [
 #   2. URL-encoded ``authuser=<email>`` query-param form for *any* domain.
 #   3. Double-encoded ``authuser%3D<email>`` redirect-param form (issue #1368).
 _DETECT_EMAIL = re.compile(
-    r"[A-Za-z0-9._%+\-]+@(?:"
-    + "|".join(EMAIL_PROVIDERS)
-    + r")\.com"
+    _EMAIL_PATTERN_BASE
     + r"|"
     + _AUTHUSER_EMAIL_PATTERN
     + r"|"

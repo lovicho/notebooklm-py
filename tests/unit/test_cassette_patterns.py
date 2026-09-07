@@ -159,6 +159,28 @@ def test_email_is_scrubbed_unquoted(provider: str) -> None:
     assert "SCRUBBED_EMAIL@example.com" in scrubbed
 
 
+@pytest.mark.parametrize("suffix", ["x", "_other"])
+def test_email_provider_prefix_is_not_scrubbed_or_reported_as_a_leak(suffix: str) -> None:
+    """Provider-domain prefixes within a larger identifier are not email addresses."""
+    from tests.cassette_patterns import _DETECT_EMAIL, is_clean
+
+    text = f"alice@gmail.com{suffix}"
+    assert scrub_string(text) == text
+    assert not list(_DETECT_EMAIL.finditer(text))
+    assert is_clean(text) == (True, [])
+
+
+@pytest.mark.parametrize("suffix", [".", ". Next"])
+def test_email_with_sentence_punctuation_is_scrubbed_and_reported_as_a_leak(suffix: str) -> None:
+    """A period ending a sentence is not part of the provider-domain identifier."""
+    from tests.cassette_patterns import _DETECT_EMAIL, is_clean
+
+    text = f"alice@gmail.com{suffix}"
+    assert scrub_string(text) == f"SCRUBBED_EMAIL@example.com{suffix}"
+    assert list(_DETECT_EMAIL.finditer(text))
+    assert is_clean(text) == (False, ["Leak (email): 'alice@gmail.com'"])
+
+
 # ---------------------------------------------------------------------------
 # scrub_string — negative: legitimate content survives unchanged
 # ---------------------------------------------------------------------------
@@ -1195,3 +1217,29 @@ def test_display_name_false_positives_mirror_shape_lint() -> None:
         "update BOTH tests/cassette_patterns.py and "
         "tests/_guardrails/_cassette_shape_lint.py"
     )
+
+
+def test_detect_email_is_linear_on_long_pathological_input() -> None:
+    """_DETECT_EMAIL anchored lookbehind prevents polynomial backtracking."""
+    import time
+
+    from tests.cassette_patterns import _DETECT_EMAIL, is_clean
+
+    def scan_duration(length: int) -> float:
+        t0 = time.perf_counter()
+        matches = list(_DETECT_EMAIL.finditer("a" * length))
+        assert not matches
+        return time.perf_counter() - t0
+
+    small_duration = scan_duration(25_000)
+    long_path = "a" * 100_000
+    long_duration = scan_duration(len(long_path))
+    # A fourfold input must not grow superlinearly. The fixed allowance avoids
+    # making this regression test depend on CI scheduling noise for tiny runs.
+    assert long_duration <= small_duration * 8 + 0.5, (
+        f"_DETECT_EMAIL scaling regressed: {small_duration:.3f}s for 25k vs "
+        f"{long_duration:.3f}s for 100k"
+    )
+
+    ok, leaks = is_clean(f"https://example.com/{long_path}")
+    assert ok
