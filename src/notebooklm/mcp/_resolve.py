@@ -409,22 +409,25 @@ def partition_source_refs(
     validated = [validate_id(ref, "source") for ref in refs]
     for ref in validated:
         reject_non_canonical_id(ref, "source")
-    id_set = {item.id for item in items}
+    canonical_ids = {item.id.casefold(): item.id for item in items}
     resolved: list[str] = []
     not_found: list[dict[str, str]] = []
     seen: set[str] = set()
+    seen_missing: set[str] = set()
     for ref in validated:
         try:
             if FULL_ID_PATTERN.fullmatch(ref):
-                if ref not in id_set:
+                if ref.casefold() not in canonical_ids:
                     raise SourceNotFoundError(ref)
-                sid = ref
+                sid = canonical_ids[ref.casefold()]
             elif _HEX_ISH.match(ref):
                 sid = _resolve_hex(ref, items, not_found=SourceNotFoundError)
             else:
                 sid = _resolve_by_title(ref, items, not_found=SourceNotFoundError)
         except SourceNotFoundError as exc:
-            not_found.append({"source_id": ref, "error": str(exc)})
+            if ref.casefold() not in seen_missing:
+                seen_missing.add(ref.casefold())
+                not_found.append({"source_id": ref, "error": str(exc)})
             continue
         if sid not in seen:
             seen.add(sid)

@@ -396,6 +396,7 @@ def _visible(note_id: str = "note-1") -> notes_pb2.GetNotesResponse:
 
 
 def test_backend_contracts_are_split_and_android_adapters_are_concrete() -> None:
+    """Pin concrete Android adapters to the transport-neutral public signatures."""
     import inspect
 
     assert NotesAPI.__abstractmethods__ == frozenset(
@@ -451,7 +452,7 @@ def test_backend_contracts_are_split_and_android_adapters_are_concrete() -> None
         "update": (
             "(self, notebook_id: 'str', note_id: 'str', content: 'str', title: 'str') -> 'None'"
         ),
-        "delete": "(self, notebook_id: 'str', note_id: 'str') -> 'None'",
+        "delete": "(self, notebook_id: 'str', note_id: 'str | builtins.list[str]') -> 'None'",
         "list_mind_maps": "(self, notebook_id: 'str') -> 'builtins.list[Any]'",
         "delete_mind_map": ("(self, notebook_id: 'str', mind_map_id: 'str') -> 'None'"),
     }
@@ -752,6 +753,59 @@ async def test_exact_id_get_update_and_delete_preserve_web_map_row_semantics() -
 
     await notes.delete("project-1", "mind-map")
     assert await notes.get_or_none("project-1", "mind-map") is None
+
+
+@pytest.mark.asyncio
+async def test_batch_note_delete_uses_one_write_and_preserves_unselected_maps() -> None:
+    """Delete only present selected notes in one epoch-bound, non-replayed request."""
+    server = FakeNotesSharingServer()
+    server.notes["note-second"] = notes_pb2.ProjectNote(id="note-second", content="Second")
+    notes = AndroidNotesAPI(_session(server), deletion_poll_delays=(0.0, 0.0))
+
+    await notes.delete("project-1", ["note-existing", "missing", "note-second", "note-existing"])
+
+    assert "note-existing" not in server.notes
+    assert "note-second" not in server.notes
+    assert "mind-map" in server.notes
+    writes = [call for call in server.calls if call[0] == DELETE_NOTES_METHOD]
+    assert len(writes) == 1
+    assert list(writes[0][1].note_ids) == ["note-existing", "note-second"]
+    assert writes[0][2]["expected_epoch"] == 7
+    assert writes[0][2]["replay_safe"] is False
+    assert sum(method == GET_NOTES_METHOD for method, _, _ in server.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_batch_note_delete_empty_or_invalid_never_opens_transport() -> None:
+    """Empty and malformed selections never admit an Android operation."""
+    server = FakeNotesSharingServer()
+    notes = AndroidNotesAPI(_session(server))
+    await notes.delete("project-1", [])
+    with pytest.raises(ValueError, match="non-empty"):
+        await notes.delete("project-1", ["note-existing", ""])
+    assert not server.calls
+    assert not server.operation_scopes
+
+
+@pytest.mark.asyncio
+async def test_batch_note_delete_missing_member_does_not_imply_batch_success() -> None:
+    """A batch status-5 response requires read-back evidence for every selected note."""
+    visible = notes_pb2.GetNotesResponse(
+        notes=[
+            notes_pb2.NoteOrStatus(note=notes_pb2.ProjectNote(id=note_id, content="body"))
+            for note_id in ("note-1", "note-2")
+        ]
+    )
+    session = SequencedSession(
+        {
+            GET_NOTES_METHOD: [visible, visible],
+            DELETE_NOTES_METHOD: [RPCError("one member absent", rpc_code=5)],
+        }
+    )
+    notes = AndroidNotesAPI(_session(session), deletion_poll_delays=(0.0,))
+    with pytest.raises(RPCError, match="remained visible"):
+        await notes.delete("project-1", ["note-1", "note-2"])
+    assert sum(method == DELETE_NOTES_METHOD for method, _, _ in session.calls) == 1
 
 
 @pytest.mark.asyncio

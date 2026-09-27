@@ -64,6 +64,7 @@ from .._resolve import (
     resolve_sources,
 )
 from ._passthrough import passthrough_child_id, passthrough_notebook_id
+from ._studio_delete import delete_studio_items, validate_delete_refs
 from ._studio_download import (
     _DOWNLOAD_SPECS,
     _INLINE_TEXT_TYPES,
@@ -795,26 +796,33 @@ def register(mcp: Any) -> None:
 
     @mcp.tool(annotations=DESTRUCTIVE)
     async def studio_delete(
-        ctx: Context, notebook: str, item: str, confirm: bool = False
+        ctx: Context,
+        notebook: str,
+        item: str | None = None,
+        confirm: bool = False,
+        items: list[str] | str | None = None,
     ) -> dict[str, Any]:
-        """Delete a Studio item (irreversible) — a text note OR an artifact.
+        """Delete notes/artifacts irreversibly: ``item`` XOR ``items`` (1–100 refs).
 
-        Accepts a notebook name or ID plus an ``item`` name-or-id ref resolved over
-        the merged notes+artifacts list. Routing is by resolved type: a ``note`` is
-        deleted via the note system; an artifact via the artifact delete RPC (which
-        itself *clears* a note-backed mind map through the note system rather than
-        hard-removing it — Google may garbage collect it later).
-
-        Two-step confirmation: with ``confirm=False`` (default) it returns a
-        ``needs_confirmation`` preview without deleting; re-submit its canonical
-        ``notebook_id``/``item_id`` with ``confirm=True``. Deleting an already-absent
-        full id is idempotent (no error) — it routes down the artifact path (a
-        present note would have been found in the list).
+        Names/IDs resolve over Studio. Preview first; confirm with canonical
+        ``notebook_id`` and item ID(s). Batch confirmation requires full IDs.
+        Text notes batch into one write; artifacts (including mind maps) route
+        individually by kind. Batch returns ``deleted`` / ``not_found`` arrays.
+        An absent single full ID is an idempotent success.
         """
         with mcp_errors():
-            item = item.strip()
+            refs = validate_delete_refs(item, items, confirm=confirm)
             client = await get_client(ctx)
             nb_id = await resolve_notebook(client, notebook)
+            if refs is not None:
+                payload = await delete_studio_items(client, nb_id, refs, confirm=confirm)
+                return with_confirmation_deprecation(
+                    payload,
+                    confirmed_name_deprecation(notebook) if confirm else None,
+                )
+            if item is None:  # pragma: no cover - validated above
+                raise ValidationError("Provide 'item' or 'items'")
+            item = item.strip()
             try:
                 resolved = await resolve_studio_item(client, nb_id, item)
             except NotFoundError:

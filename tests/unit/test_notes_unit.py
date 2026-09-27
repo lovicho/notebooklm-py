@@ -596,6 +596,40 @@ class TestDeleteNote:
         assert params[1] is None
         assert params[2] == ["note_456"]
 
+    async def test_delete_batch_sends_one_flat_request(self, notes_api, mock_core):
+        """Deduplicate note IDs in one wire payload without mutating the caller's list."""
+        from notebooklm.rpc import RPCMethod
+
+        ids = ["note_1", "note_2", "note_1", "note_3"]
+        assert await notes_api.delete("nb_123", ids) is None
+        mock_core.rpc_executor.rpc_call.assert_awaited_once_with(
+            RPCMethod.DELETE_NOTE,
+            ["nb_123", None, ["note_1", "note_2", "note_3"]],
+            source_path="/notebook/nb_123",
+            allow_null=True,
+            raise_on_null_status=True,
+        )
+        assert ids == ["note_1", "note_2", "note_1", "note_3"]
+
+    async def test_delete_empty_batch_does_not_send(self, notes_api, mock_core):
+        """An empty selection returns successfully without an RPC."""
+        assert await notes_api.delete("nb_123", []) is None
+        mock_core.rpc_executor.rpc_call.assert_not_awaited()
+
+    @pytest.mark.parametrize("ids", [["note_1", ""], ["note_1", "  "], ["note_1", None]])
+    async def test_delete_invalid_batch_fails_before_any_write(self, notes_api, mock_core, ids):
+        """One invalid member prevents every deletion in the batch."""
+        with pytest.raises(ValueError, match="non-empty"):
+            await notes_api.delete("nb_123", ids)
+        mock_core.rpc_executor.rpc_call.assert_not_awaited()
+
+    async def test_delete_batch_propagates_failure(self, notes_api, mock_core):
+        """The single batch request propagates its backend failure without retrying here."""
+        mock_core.rpc_executor.rpc_call.side_effect = RPCError("denied")
+        with pytest.raises(RPCError, match="denied"):
+            await notes_api.delete("nb_123", ["note_1", "note_2"])
+        assert mock_core.rpc_executor.rpc_call.await_count == 1
+
 
 # =============================================================================
 # list_mind_maps() tests

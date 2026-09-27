@@ -28,9 +28,10 @@ This module imports NO ``click`` / ``rich`` / ``cli``.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastmcp import Context
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..._app.views import VIEW_LEVEL_LABELS as _VIEW_LEVEL_LABELS
 from ..._app.views import label as _label
@@ -58,6 +59,17 @@ from .._resolve import resolve_notebook
 #: Wire input → enum. OWNER is intentionally absent (cannot be assigned via share).
 _PERMISSION_INPUT = {"editor": SharePermission.EDITOR, "viewer": SharePermission.VIEWER}
 _VIEW_LEVEL_INPUT = {"full": ShareViewLevel.FULL_NOTEBOOK, "chat": ShareViewLevel.CHAT_ONLY}
+
+#: Keep each confirmed sharing invocation within an explicitly reviewable subset.
+MAX_SHARE_GRANTS = 100
+
+
+class UserGrant(BaseModel):
+    """One notebook permission grant."""
+
+    model_config = ConfigDict(extra="forbid")
+    email: str
+    permission: Literal["editor", "viewer"] = "viewer"
 
 
 def register(mcp: Any) -> None:
@@ -155,21 +167,37 @@ def register(mcp: Any) -> None:
     async def share_set_user(
         ctx: Context,
         notebook: str,
-        email: str,
+        email: str | None = None,
         permission: Literal["editor", "viewer"] = "viewer",
         notify: bool = False,
         message: str = "",
         confirm: bool = False,
+        grants: Annotated[list[UserGrant], Field(min_length=1, max_length=MAX_SHARE_GRANTS)]
+        | None = None,
     ) -> dict[str, Any]:
-        """Grant or change a user's access to a notebook. Accepts a notebook name or ID.
+        """Upsert access: ``email`` + ``permission`` OR 1–100 ``grants`` [{email, permission}].
 
-        Confirm-gated: every grant/regrade returns a ``needs_confirmation`` preview
-        unless confirmed with its canonical ``notebook_id``. Upsert by email (one backend op for an add or a
-        permission change). ``permission``: ``editor`` or ``viewer`` (not OWNER).
-        ``notify`` (default ``False``) emails the user on grant/re-grade; ``message``
-        is an optional welcome note. Returns the updated status (or a preview).
+        Preview lists every grant; confirm with its canonical ``notebook_id``.
+        Batches allow mixed editor/viewer permissions in one write. ``notify``
+        and ``message`` apply to all grantees. Returns updated sharing status.
         """
         with mcp_errors():
+            if (email is None) == (grants is None):
+                raise ValidationError("Provide either 'email' or 'grants', not both")
+            if grants is not None:
+                if permission != "viewer":
+                    raise ValidationError("Set each grant's permission inside 'grants'")
+                seen: set[str] = set()
+                for grant in grants:
+                    if not grant.email.strip() or grant.email != grant.email.strip():
+                        raise ValidationError(
+                            "Grant emails must be non-empty without outer whitespace"
+                        )
+                    if grant.email in seen:
+                        raise ValidationError(f"Duplicate email in grants: {grant.email!r}")
+                    seen.add(grant.email)
+            elif email is not None and not email.strip():
+                raise ValidationError("'email' must be non-empty")
             client = await get_client(ctx)
             nb_id = await resolve_notebook(client, notebook)
             if not confirm:
@@ -177,19 +205,32 @@ def register(mcp: Any) -> None:
                     {
                         "action": "share_set_user",
                         "notebook_id": nb_id,
-                        "email": email,
-                        "permission": permission,
+                        **(
+                            {"grants": [grant.model_dump() for grant in grants]}
+                            if grants is not None
+                            else {"email": email, "permission": permission}
+                        ),
                         "notify": notify,
                         "has_message": bool(message),
                     }
                 )
-            status = await client.sharing.add_user(
-                nb_id,
-                email,
-                permission=_PERMISSION_INPUT[permission],
-                notify=notify,
-                welcome_message=message,
-            )
+            if grants is not None:
+                status = await client.sharing.set_users(
+                    nb_id,
+                    [(grant.email, _PERMISSION_INPUT[grant.permission]) for grant in grants],
+                    notify=notify,
+                    welcome_message=message,
+                )
+            else:
+                if email is None:  # pragma: no cover - validated above
+                    raise ValidationError("Provide 'email' or 'grants'")
+                status = await client.sharing.add_user(
+                    nb_id,
+                    email,
+                    permission=_PERMISSION_INPUT[permission],
+                    notify=notify,
+                    welcome_message=message,
+                )
             return with_confirmation_deprecation(
                 {"status": "updated", **_status_payload(status)},
                 confirmed_name_deprecation(notebook),

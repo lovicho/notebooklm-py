@@ -717,3 +717,13 @@ def test_partition_source_refs_missing_title_does_not_abort_siblings() -> None:
     assert resolved == [FULL_A]
     assert len(missing) == 1
     assert missing[0]["source_id"] == "Nope"
+
+
+def test_partition_source_refs_canonicalizes_ids_and_deduplicates_misses() -> None:
+    """Case variants select one canonical source and report each missing reference once."""
+    resolved, missing = partition_source_refs(
+        [FULL_A.upper(), FULL_A, FULL_B.upper(), FULL_B, "Missing", "MISSING"],
+        [_Src(FULL_A, "Alpha")],
+    )
+    assert resolved == [FULL_A]
+    assert [item["source_id"] for item in missing] == [FULL_B.upper(), "Missing"]

@@ -233,6 +233,12 @@ def unconfirmed_hint(exc: BaseException) -> str:
     """Return operation-aware recovery guidance for an uncertain write."""
     metadata = getattr(exc, "operation_metadata", None)
     operation = None if metadata is None else metadata.operation
+    if operation is not None and operation.startswith("sharing."):
+        return (
+            "Inspect the notebook's current sharing permissions before retrying. "
+            "Some changes or invitation emails may already have been applied; "
+            "do not blindly repeat the sharing request."
+        )
     if (
         operation == "chat"
         and metadata is not None

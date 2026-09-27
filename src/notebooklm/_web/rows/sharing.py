@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from ..._env import get_base_url
 from ..._types.enums import ShareAccess, SharePermission, ShareViewLevel
+from ...exceptions import RPCError
 from ...rpc import RPCMethod, safe_index
 
 if TYPE_CHECKING:
@@ -225,9 +226,32 @@ def decode_shared_user(cls: type[SharedUser], data: list[Any]) -> SharedUser:
 
 
 def decode_share_status(
-    cls: type[ShareStatus], data: list[Any], notebook_id: str, *, base_url: str | None = None
+    cls: type[ShareStatus],
+    data: list[Any],
+    notebook_id: str,
+    *,
+    base_url: str | None = None,
+    require_user_permissions: bool = False,
 ) -> ShareStatus:
     """Decode a web share-status row into the requested public model class."""
+    if require_user_permissions:
+        # Permissive display defaults (missing/unknown permission -> VIEWER)
+        # are not evidence that a requested viewer grant actually took effect.
+        users = data[0] if isinstance(data, list) and data else None
+        if not isinstance(users, list) or any(
+            not isinstance(user, list)
+            or len(user) < 2
+            or not isinstance(user[0], str)
+            or not user[0]
+            or type(user[1]) is not int
+            or user[1]
+            not in (SharePermission.OWNER, SharePermission.EDITOR, SharePermission.VIEWER)
+            for user in users
+        ):
+            raise RPCError(
+                "Sharing readback has incomplete user permissions; requested grants could not be confirmed.",
+                method_id=_SHARE_METHOD_ID,
+            )
     return ShareStatusRow(data).decode(cls, notebook_id, base_url=base_url)
 
 

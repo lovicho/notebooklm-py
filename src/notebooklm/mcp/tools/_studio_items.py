@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..._app.artifacts import require_complete_artifact_listing
 from ..._app.resolve import (
     FULL_ID_PATTERN,
     AmbiguousIdError,
@@ -39,6 +40,7 @@ __all__ = [
     "StudioResolvedItem",
     "compact_studio_item",
     "hyphenated_type",
+    "partition_studio_refs",
     "resolve_studio_item",
     "studio_items",
     "summarize_studio_item",
@@ -106,6 +108,7 @@ async def studio_items(
     *,
     include_created_at: bool = False,
     include_artifact_meta: bool = False,
+    require_complete: bool = False,
 ) -> list[dict[str, Any]]:
     """Fetch + merge a notebook's text notes and studio artifacts into one list.
 
@@ -128,11 +131,19 @@ async def studio_items(
     projection notes get. Notes are untouched by this flag. It defaults off so the
     by-ref resolver and the default list paths stay byte-identical.
 
+    When ``require_complete`` is set, incomplete artifact reads raise before
+    resolution can mistake an unavailable backing for a missing item.
+
     Items are keyed by id (notes first) so a hypothetical future note∩artifact
     overlap can't double-list — this never fires today (``notes.list`` excludes
     mind maps, the only rows both listings could share).
     """
-    notes, artifacts = await asyncio.gather(client.notes.list(nb_id), client.artifacts.list(nb_id))
+    artifact_listing = (
+        require_complete_artifact_listing(client, nb_id)
+        if require_complete
+        else client.artifacts.list(nb_id)
+    )
+    notes, artifacts = await asyncio.gather(client.notes.list(nb_id), artifact_listing)
     items: dict[str, dict[str, Any]] = {}
     for note in notes:
         item: dict[str, Any] = {
@@ -277,6 +288,34 @@ def _match_studio_ref(
         lines.append("\nUse a more specific title or the id.")
         raise AmbiguousIdError(ref, candidate_ids, "\n".join(lines))
     return None
+
+
+def partition_studio_refs(
+    refs: list[str], items: list[dict[str, Any]]
+) -> tuple[list[StudioResolvedItem], list[dict[str, str]]]:
+    """Resolve an explicit subset against one snapshot, retaining genuine misses.
+
+    Ambiguity aborts the whole plan before any deletion. UUIDs must be present
+    in the snapshot, and aliases of the same item resolve to one deletion.
+    """
+    resolved: list[StudioResolvedItem] = []
+    not_found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    seen_missing: set[str] = set()
+    for ref in refs:
+        match = _match_studio_ref(items, ref, None)
+        if match is None:
+            if ref.casefold() not in seen_missing:
+                seen_missing.add(ref.casefold())
+                not_found.append({"item_id": ref, "error": f"Studio item not found: {ref}"})
+        elif match["id"] not in seen:
+            seen.add(match["id"])
+            resolved.append(
+                StudioResolvedItem(
+                    item_id=match["id"], type=match["type"], title=match.get("title")
+                )
+            )
+    return resolved, not_found
 
 
 async def resolve_studio_item(

@@ -78,7 +78,12 @@ class SharingAPI(ABC):
         notify: bool = True,
         welcome_message: str = "",
     ) -> ShareStatus:
-        """Upsert several user permissions in one request."""
+        """Upsert several user permissions in one request.
+
+        Each grant is an ``(email, permission)`` pair with EDITOR or VIEWER
+        permission. Empty batches and duplicate emails are rejected. ``notify``
+        and ``welcome_message`` apply to every grant in the call.
+        """
 
     async def update_user(
         self,

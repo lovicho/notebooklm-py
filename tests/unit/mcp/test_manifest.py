@@ -207,6 +207,14 @@ async def test_share_set_user_notify_defaults_false(tools_by_name) -> None:
     assert notify.get("default") is False, "share_set_user 'notify' must default to False"
 
 
+async def test_share_set_user_advertises_bounded_grants(tools_by_name) -> None:
+    """Schema consumers can discover the supported recipient subset before invoking it."""
+    grants = tools_by_name["share_set_user"].inputSchema["properties"]["grants"]
+    array = next(option for option in grants["anyOf"] if option.get("type") == "array")
+    assert array["minItems"] == 1
+    assert array["maxItems"] == 100
+
+
 async def test_confirm_gated_tools_disjoint_from_read_only_and_destructive() -> None:
     """The confirm-gated widening tools are their own category — not read-only, not
     delete-destructive — and all belong to the pinned surface."""

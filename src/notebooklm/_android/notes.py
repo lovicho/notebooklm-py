@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Any, cast
 
 from .._idempotency import call_unconfirmed_on_transport_loss, mark_unconfirmed
-from .._notes import NotesAPI
+from .._notes import NotesAPI, _normalize_note_ids
 from .._runtime.call_supervisor import OperationLease
 from ..exceptions import (
     AuthError,
@@ -372,20 +372,32 @@ class AndroidNotesAPI(NotesAPI):
                 method_id=MUTATE_NOTE_METHOD,
             )
 
-    async def delete(self, notebook_id: str, note_id: str) -> None:
-        """Delete once, then poll bounded reads until eventual absence is visible."""
+    async def delete(self, notebook_id: str, note_id: str | builtins.list[str]) -> None:
+        """Delete the explicit IDs once, then poll until all are absent."""
+        from .codecs.notes import decode_note_by_id
+
+        note_ids = _normalize_note_ids(note_id)
+        if not note_ids:
+            return
+
+        def present_ids(response: Any, candidates: builtins.list[str]) -> builtins.list[str]:
+            """Return only requested IDs whose exact note rows remain visible."""
+            # Exact-ID lookup preserves the singular API's note-backed map
+            # support. Never expand the request to other rows in the notebook.
+            return [
+                value
+                for value in candidates
+                if decode_note_by_id(response, notebook_id, value, method_id=GET_NOTES_METHOD)
+                is not None
+            ]
+
         proto = _proto()
         async with self._transport.operation_scope("notes.delete") as lease:
-            if (
-                await self._get_note_or_none(
-                    notebook_id,
-                    note_id,
-                    expected_epoch=lease.epoch,
-                )
-                is None
-            ):
+            response = await self._get_notes_response(notebook_id, expected_epoch=lease.epoch)
+            note_ids = present_ids(response, note_ids)
+            if not note_ids:
                 return
-            request = proto.DeleteNotesRequest(project_id=notebook_id, note_ids=[note_id])
+            request = proto.DeleteNotesRequest(project_id=notebook_id, note_ids=note_ids)
             try:
                 await self._transport.unary(
                     DELETE_NOTES_METHOD,
@@ -397,21 +409,18 @@ class AndroidNotesAPI(NotesAPI):
             except RPCError as exc:
                 # The preflight proved the notebook and note existed. A
                 # concurrent status-5 miss is the idempotent delete outcome.
-                if exc.rpc_code == 5:
+                if exc.rpc_code != 5:
+                    raise
+                if len(note_ids) == 1:
                     return
-                raise
+                # A missing member does not prove the rest of a batch vanished.
+                # Verify the whole batch without replaying the write.
 
             for delay in self._deletion_poll_delays:
                 if delay > 0:
                     await self._sleep(delay)
-                if (
-                    await self._get_note_or_none(
-                        notebook_id,
-                        note_id,
-                        expected_epoch=lease.epoch,
-                    )
-                    is None
-                ):
+                response = await self._get_notes_response(notebook_id, expected_epoch=lease.epoch)
+                if not present_ids(response, note_ids):
                     return
             raise RPCError(
                 "Android DeleteNotes succeeded but the note remained visible after bounded polling",

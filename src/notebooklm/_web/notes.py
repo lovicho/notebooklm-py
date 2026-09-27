@@ -31,7 +31,8 @@ from typing import TYPE_CHECKING, Any
 
 from .._idempotency import call_unconfirmed_on_transport_loss
 from .._lookup import unwrap_or_raise
-from .._notes import NotesAPI
+from .._notes import NotesAPI, _normalize_note_ids
+from .._types.enums import GrpcStatusCode
 from ..exceptions import DecodingError, NoteNotFoundError, RPCError
 from ..rpc import safe_index
 from ..rpc.types import RPCMethod
@@ -89,12 +90,13 @@ class NoteService:
     # Row fetch + classification
     # ------------------------------------------------------------------
 
-    async def fetch_note_rows(self, notebook_id: str) -> list[Any]:
+    async def fetch_note_rows(self, notebook_id: str, *, strict: bool = False) -> list[Any]:
         """Fetch all note + mind-map rows for a notebook.
 
         Returns the raw row list (each row is itself a list whose first
         element is the row ID). Soft-deleted rows are included — callers
         decide whether to filter via :meth:`classify_row`.
+        ``strict`` rejects discarded rows when the inventory must prove absence.
         """
         params = [notebook_id]
         result = await self._rpc.rpc_call(
@@ -102,25 +104,38 @@ class NoteService:
             params,
             source_path=f"/notebook/{notebook_id}",
             allow_null=True,
+            raise_on_null_status=True,
         )
-        rows = self._extract_note_row_container(result)
+        rows = self._extract_note_row_container(result, strict=strict)
         if not rows:
             return []
 
         normalized: list[Any] = []
         for item in rows:
             row = self._normalize_note_row(item)
+            if strict and (
+                row is None or not NoteRow(row).id or self.classify_row(row) is NoteRowKind.UNKNOWN
+            ):
+                raise DecodingError(
+                    "Incomplete note inventory: unrecognized note row",
+                    method_id=RPCMethod.GET_NOTES_AND_MIND_MAPS.value,
+                )
             if row is not None:
                 normalized.append(row)
         return normalized
 
-    def _extract_note_row_container(self, result: Any) -> list[Any]:
+    def _extract_note_row_container(self, result: Any, *, strict: bool = False) -> list[Any]:
         """Return the list that contains raw note rows.
 
         Historical responses wrap rows as ``[[row, ...]]``. Newer web
         responses use the same first response field for rows and a second
         timestamp field, so this helper also accepts a flat row list.
         """
+        if strict and not isinstance(result, list):
+            raise DecodingError(
+                "Incomplete note inventory: unrecognized container",
+                method_id=RPCMethod.GET_NOTES_AND_MIND_MAPS.value,
+            )
         if not result:
             return []
         if not isinstance(result, list):
@@ -145,8 +160,35 @@ class NoteService:
         )
         if self._is_note_row_like(first):
             return result
+        if strict and (len(result) > 1 or first is None):
+            timestamp = (
+                safe_index(
+                    result,
+                    1,
+                    method_id=RPCMethod.GET_NOTES_AND_MIND_MAPS.value,
+                    source="NoteService._extract_note_row_container",
+                )
+                if len(result) == 2
+                else None
+            )
+            if (
+                not isinstance(timestamp, list)
+                or len(timestamp) != 2
+                or any(type(part) is not int for part in timestamp)
+            ):
+                raise DecodingError(
+                    "Incomplete note inventory: unrecognized container",
+                    method_id=RPCMethod.GET_NOTES_AND_MIND_MAPS.value,
+                )
+            # Recorded empty notebooks omit the row list but still return the
+            # timestamp. Only that complete envelope can make None prove absence.
         if isinstance(first, list):
             return first
+        if strict and first is not None:
+            raise DecodingError(
+                "Incomplete note inventory: unrecognized container",
+                method_id=RPCMethod.GET_NOTES_AND_MIND_MAPS.value,
+            )
         return []
 
     def _normalize_note_row(self, item: Any) -> list[Any] | None:
@@ -477,22 +519,42 @@ class NoteService:
             raise_on_null_status=True,
         )
 
-    async def delete_note(self, notebook_id: str, note_id: str) -> None:
-        """Soft-delete a note row.
+    async def delete_note(self, notebook_id: str, note_id: str | list[str]) -> None:
+        """Soft-delete one or several note rows in a single request.
 
-        Returns ``None``. Idempotent: a missing note still succeeds
-        (``DELETE_NOTE`` is ``allow_null=True`` with no missing-signal). The
+        Returns ``None``. A missing single note still succeeds; a not-found
+        batch requires a fresh inventory proving every selected note absent. The
         public facade (``client.notes.delete`` /
         ``NoteBackedMindMapService.delete_mind_map``) returns ``None`` as of
         v0.7.0 (issue #1211).
         """
-        params = [notebook_id, None, [note_id]]
-        await self._rpc.rpc_call(
-            RPCMethod.DELETE_NOTE,
-            params,
-            source_path=f"/notebook/{notebook_id}",
-            allow_null=True,
-        )
+        note_ids = _normalize_note_ids(note_id)
+        if not note_ids:
+            return
+        async with self._supervisor.operation_scope("notes.delete"):
+            params = [notebook_id, None, note_ids]
+            try:
+                await self._rpc.rpc_call(
+                    RPCMethod.DELETE_NOTE,
+                    params,
+                    source_path=f"/notebook/{notebook_id}",
+                    allow_null=True,
+                    raise_on_null_status=True,
+                )
+            except RPCError as exc:
+                if exc.rpc_code != GrpcStatusCode.NOT_FOUND:
+                    raise
+                # A missing single target is an idempotent success. A batch refusal
+                # does not prove that every sibling was deleted: verify the whole
+                # subset against a fresh, authoritative note/mind-map inventory.
+                if len(note_ids) > 1:
+                    rows = await self.fetch_note_rows(notebook_id, strict=True)
+                    if any(
+                        NoteRow(row).id in note_ids
+                        and self.classify_row(row) is not NoteRowKind.DELETED
+                        for row in rows
+                    ):
+                        raise
 
 
 class WebNotesAPI(NotesAPI):
@@ -661,8 +723,8 @@ class WebNotesAPI(NotesAPI):
                 raise NoteNotFoundError(note_id)
             await self._notes.update_note(notebook_id, note_id, content, title)
 
-    async def delete(self, notebook_id: str, note_id: str) -> None:
-        """Delete a note from the notebook.
+    async def delete(self, notebook_id: str, note_id: str | builtins.list[str]) -> None:
+        """Delete one or several notes with one delete request.
 
         Note: This clears the note content/title rather than removing it
         from the list entirely. Google may garbage collect cleared notes later.
@@ -673,7 +735,9 @@ class WebNotesAPI(NotesAPI):
 
         Args:
             notebook_id: The notebook ID.
-            note_id: The note ID.
+            note_id: One ID or a list of IDs. Duplicates are removed; an empty
+                list is a no-op. Explicit note-backed mind-map IDs are accepted,
+                just as in the single-ID path; interactive maps use artifacts.delete.
 
         .. versionchanged:: 0.7.0
             **Breaking change:** previously returned a hardcoded ``True``;

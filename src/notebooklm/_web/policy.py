@@ -747,7 +747,10 @@ def register_default_policies(registry: IdempotencyRegistry) -> None:
         RPCMethod.UPDATE_NOTE: (
             "set note content/title to caller-supplied values; replay leaves the same state"
         ),
-        RPCMethod.DELETE_NOTE: "server-side note delete is idempotent (set-op semantics)",
+        RPCMethod.DELETE_NOTE: (
+            "server-side note delete is idempotent (set-op semantics); "
+            "batch multi-id uses the same method"
+        ),
         RPCMethod.GET_LAST_CONVERSATION_ID: (
             "read-only conversation id fetch; replay does not mutate chat state"
         ),

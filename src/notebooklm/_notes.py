@@ -11,6 +11,16 @@ from ._runtime.call_supervisor import OperationLease
 from .types import Note
 
 
+def _normalize_note_ids(note_id: str | list[str]) -> list[str]:
+    """Validate a complete delete request and deduplicate it before any I/O."""
+    ids = [note_id] if isinstance(note_id, str) else note_id
+    if not isinstance(ids, list) or any(
+        not isinstance(value, str) or not value.strip() for value in ids
+    ):
+        raise ValueError("note_id must be a non-empty ID or a list of non-empty IDs")
+    return list(dict.fromkeys(value.strip() for value in ids))
+
+
 class NotesAPI(ABC):
     """Operations on NotebookLM notes.
 
@@ -134,8 +144,8 @@ class NotesAPI(ABC):
         """
 
     @abstractmethod
-    async def delete(self, notebook_id: str, note_id: str) -> None:
-        """Delete a note from the notebook.
+    async def delete(self, notebook_id: str, note_id: str | builtins.list[str]) -> None:
+        """Delete one or several notes with one delete request.
 
         Note: This clears the note content/title rather than removing it
         from the list entirely. Google may garbage collect cleared notes later.
@@ -146,7 +156,9 @@ class NotesAPI(ABC):
 
         Args:
             notebook_id: The notebook ID.
-            note_id: The note ID.
+            note_id: One ID or a list of IDs. Duplicates are removed; an empty
+                list is a no-op. Explicit note-backed mind-map IDs are accepted,
+                just as in the single-ID path; interactive maps use artifacts.delete.
 
         .. versionchanged:: 0.7.0
             **Breaking change:** previously returned a hardcoded ``True``;

@@ -16,7 +16,7 @@ from .._idempotency import (
 )
 from .._sharing import SharingAPI
 from .._types.enums import ShareAccess, SharePermission, ShareViewLevel
-from ..exceptions import NotebookLMError
+from ..exceptions import NotebookLMError, RPCError
 from ..outcomes import CommitState, RecoveryAction
 from ..rpc import RPCMethod
 from ..types import ShareStatus
@@ -93,6 +93,7 @@ class WebSharingAPI(SharingAPI):
         params: list,
         *,
         what: str,
+        grants: list[tuple[str, SharePermission]] | None = None,
     ) -> ShareStatus:
         """Apply one share mutation and include its status readback in the outcome boundary."""
         async with self._operation_scope("sharing.mutate_and_readback"):
@@ -115,6 +116,7 @@ class WebSharingAPI(SharingAPI):
                         params,
                         source_path=f"/notebook/{notebook_id}",
                         allow_null=True,
+                        raise_on_null_status=grants is not None,
                     )
             except asyncio.CancelledError as exc:
                 attach_operation_journal(
@@ -140,9 +142,15 @@ class WebSharingAPI(SharingAPI):
                         source_path=f"/notebook/{notebook_id}",
                     )
                 status = decode_share_status(
-                    ShareStatus, result, notebook_id, base_url=self._base_url
+                    ShareStatus,
+                    result,
+                    notebook_id,
+                    base_url=self._base_url,
+                    require_user_permissions=grants is not None,
                 )
                 readback_entry.record(CommitState.CONFIRMED, "decoded sharing readback")
+                if grants is not None:
+                    self._verify_grants(status, grants)
                 return status
             except asyncio.CancelledError as exc:
                 attach_operation_journal(
@@ -160,6 +168,29 @@ class WebSharingAPI(SharingAPI):
                     recovery_action=RecoveryAction.INSPECT_AND_RECONCILE,
                 )
                 raise
+
+    @staticmethod
+    def _verify_grants(status: ShareStatus, grants: list[tuple[str, SharePermission]]) -> None:
+        """Require readback evidence for each requested permission before reporting success."""
+
+        def email_key(email: str) -> tuple[str, str]:
+            """Normalize the domain while preserving the case-sensitive local part."""
+            local, _, domain = email.rpartition("@")
+            return local, domain.lower()
+
+        observed: dict[tuple[str, str], set[SharePermission]] = {}
+        for user in status.shared_users:
+            observed.setdefault(email_key(user.email), set()).add(user.permission)
+        unmatched = sum(
+            observed.get(email_key(email)) != {permission} for email, permission in grants
+        )
+        if unmatched:
+            raise RPCError(
+                f"Sharing readback did not confirm {unmatched} requested grant(s). "
+                "Inspect current sharing permissions before retrying; invitation emails "
+                "may already have been sent.",
+                method_id=RPCMethod.GET_SHARE_STATUS.value,
+            )
 
     async def set_public(
         self,
@@ -354,6 +385,7 @@ class WebSharingAPI(SharingAPI):
                 message_block=[0 if welcome_message else 1, welcome_message],
             ),
             what="ShareNotebook user grant and status readback",
+            grants=list(grants),
         )
 
     async def remove_user(

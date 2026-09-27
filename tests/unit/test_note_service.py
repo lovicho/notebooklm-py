@@ -74,6 +74,7 @@ class TestFetchNoteRows:
             ["nb_123"],
             source_path="/notebook/nb_123",
             allow_null=True,
+            raise_on_null_status=True,
         )
 
     @pytest.mark.asyncio
@@ -266,6 +267,7 @@ class TestCrud:
             ["nb_123", None, ["note_123"]],
             source_path="/notebook/nb_123",
             allow_null=True,
+            raise_on_null_status=True,
         )
 
 

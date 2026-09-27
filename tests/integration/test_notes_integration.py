@@ -6,11 +6,15 @@ integration-tree VCR enforcement hook in ``tests/integration/conftest.py``.
 Cassette-backed coverage lives in ``tests/integration/test_vcr_comprehensive.py``.
 """
 
+import asyncio
+
+import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
 from notebooklm import NotebookLMClient
-from notebooklm.exceptions import NoteNotFoundError, RPCError
+from notebooklm.exceptions import NetworkError, NoteNotFoundError, OperationTimeoutError, RPCError
+from notebooklm.options import ClientConfig, RetryOptions, WebBackendConfig
 from notebooklm.rpc import RPCMethod
 
 pytestmark = pytest.mark.allow_no_vcr
@@ -343,6 +347,79 @@ class TestNotesAPI:
         assert result is None
         request = httpx_mock.get_request()
         assert RPCMethod.DELETE_NOTE in str(request.url)
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    @pytest.mark.parametrize("failure", ["read_error", "operation_deadline"])
+    async def test_bulk_delete_lost_response_requires_fresh_note_inventory(
+        self,
+        auth_tokens,
+        httpx_mock: HTTPXMock,
+        build_rpc_response,
+        rpc_request_params,
+        failure: str,
+    ):
+        """An interrupted batch has no per-note result; recover from a fresh list."""
+        note_ids = ["note_001", "note_002"]
+        rows = [
+            [note_id, [note_id, "Content", None, None, "Title"]]
+            for note_id in [*note_ids, "note_unselected"]
+        ]
+        response_never_arrives = asyncio.Event()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            method = request.url.params["rpcids"]
+            if method == RPCMethod.DELETE_NOTE.value:
+                assert rpc_request_params(request) == ["nb_123", None, note_ids]
+                # The response is lost after an upstream state change. The
+                # surviving member prevents treating the entire batch as erased.
+                rows[0] = ["note_001", None, 2]
+                if failure == "read_error":
+                    raise httpx.ReadError("delete response lost", request=request)
+                await response_never_arrives.wait()
+                raise AssertionError("the operation deadline must interrupt this request")
+            assert method == RPCMethod.GET_NOTES_AND_MIND_MAPS.value
+            return httpx.Response(200, text=build_rpc_response(method, [rows]))
+
+        httpx_mock.add_callback(handler, is_reusable=True)
+        expected_error = NetworkError if failure == "read_error" else OperationTimeoutError
+        timeout = None if failure == "read_error" else 1.0
+        # Disable transport retries so the lost response reaches the caller on
+        # the first attempt, without replaying this idempotent delete in the test.
+        async with NotebookLMClient(
+            auth_tokens,
+            config=ClientConfig(
+                backend=WebBackendConfig(),
+                retry=RetryOptions(server_error_max_retries=0),
+            ),
+        ) as client:
+            with pytest.raises(expected_error) as caught:
+                async with client.operation(timeout=timeout):
+                    await client.notes.delete("nb_123", note_ids)
+
+            error = caught.value
+            assert error.commit_state is None
+            metadata = error.operation_metadata
+            if failure == "read_error":
+                assert error.method_id == RPCMethod.DELETE_NOTE.value
+                assert metadata is None
+            else:
+                assert metadata is not None
+                assert metadata.operation == "client.operation"
+                assert metadata.commit_state is None
+                assert metadata.method is None
+                assert metadata.entries == ()
+                assert metadata.known_resource_ids == ()
+                assert metadata.batch_outcome is None
+
+            visible_ids = {note.id for note in await client.notes.list("nb_123")}
+
+        assert set(note_ids) & visible_ids == {"note_002"}
+        assert visible_ids == {"note_002", "note_unselected"}
+        assert [request.url.params["rpcids"] for request in httpx_mock.get_requests()] == [
+            RPCMethod.DELETE_NOTE.value,
+            RPCMethod.GET_NOTES_AND_MIND_MAPS.value,
+        ]
 
     @pytest.mark.asyncio
     async def test_list_mind_maps(

@@ -173,7 +173,7 @@ _STATUS_MESSAGE_POS = 1
 _MAX_STATUS_MESSAGE_CHARS = 300
 
 #: RPCs observed answering a null result with a non-OK ``google.rpc.Status`` on
-#: a flow this client currently treats as SUCCESSFUL. A sweep of all 141
+#: a flow this client historically treated as SUCCESSFUL. A sweep of all 141
 #: cassettes finds 397 ``wrb.fr`` frames, 5 of them null-result. FOUR of those
 #: five reach this decoder, across three RPCs:
 #:
@@ -188,10 +188,11 @@ _MAX_STATUS_MESSAGE_CHARS = 300
 #: and is not part of this list.
 #:
 #: Recorded here as a *finding*, not a blessing: only the first has ever been
-#: reasoned about (a cosmetic no-op), and whether the two share rejections are
-#: benign or a silently-dropped refusal is an open question this change does not
-#: answer. That unresolved-ness is exactly why the swallow below logs at DEBUG
-#: rather than WARNING — warning would fire on ordinary ``share add`` traffic and
+#: reasoned about here (a cosmetic no-op). User grants now reject non-OK statuses
+#: and verify accepted writes against GET_SHARE_STATUS. Other sharing operations
+#: still need their own evidence.
+#: That remaining uncertainty is why the swallow below logs at DEBUG
+#: rather than WARNING — warning would fire on remaining sharing traffic and
 #: assert a judgement the evidence does not support (#2188).
 _RPCS_OBSERVED_SWALLOWING_A_STATUS = (
     RPCMethod.REMOVE_RECENTLY_VIEWED.value,

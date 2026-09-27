@@ -918,7 +918,10 @@ class TestSetUsers:
         """
         httpx_mock.add_response(content=build_rpc_response(RPCMethod.SHARE_NOTEBOOK, []).encode())
         httpx_mock.add_response(
-            content=build_rpc_response(RPCMethod.GET_SHARE_STATUS, [[], [False], 1000]).encode()
+            content=build_rpc_response(
+                RPCMethod.GET_SHARE_STATUS,
+                [[["Dup@example.com", 3], ["dup@example.com", 2]], [False], 1000],
+            ).encode()
         )
 
         async with NotebookLMClient(auth_tokens) as client:
@@ -951,7 +954,9 @@ class TestSetUsers:
         """
         httpx_mock.add_response(content=build_rpc_response(RPCMethod.SHARE_NOTEBOOK, []).encode())
         httpx_mock.add_response(
-            content=build_rpc_response(RPCMethod.GET_SHARE_STATUS, [[], [False], 1000]).encode()
+            content=build_rpc_response(
+                RPCMethod.GET_SHARE_STATUS, [[["u@example.com", 3]], [False], 1000]
+            ).encode()
         )
 
         async with NotebookLMClient(auth_tokens) as client:
@@ -974,7 +979,9 @@ class TestSetUsers:
         """
         httpx_mock.add_response(content=build_rpc_response(RPCMethod.SHARE_NOTEBOOK, []).encode())
         httpx_mock.add_response(
-            content=build_rpc_response(RPCMethod.GET_SHARE_STATUS, [[], [False], 1000]).encode()
+            content=build_rpc_response(
+                RPCMethod.GET_SHARE_STATUS, [[["u@example.com", 3]], [False], 1000]
+            ).encode()
         )
 
         async with NotebookLMClient(auth_tokens) as client:
@@ -1052,7 +1059,9 @@ class TestSetUsers:
                 content=build_rpc_response(RPCMethod.SHARE_NOTEBOOK, []).encode()
             )
             httpx_mock.add_response(
-                content=build_rpc_response(RPCMethod.GET_SHARE_STATUS, [[], [False], 1000]).encode()
+                content=build_rpc_response(
+                    RPCMethod.GET_SHARE_STATUS, [[["u@example.com", 2]], [False], 1000]
+                ).encode()
             )
 
         async with NotebookLMClient(auth_tokens) as client:
@@ -1087,7 +1096,9 @@ class TestSetUsers:
                 content=build_rpc_response(RPCMethod.SHARE_NOTEBOOK, []).encode()
             )
             httpx_mock.add_response(
-                content=build_rpc_response(RPCMethod.GET_SHARE_STATUS, [[], [False], 1000]).encode()
+                content=build_rpc_response(
+                    RPCMethod.GET_SHARE_STATUS, [[["u@example.com", 3]], [False], 1000]
+                ).encode()
             )
 
         async with NotebookLMClient(auth_tokens) as client:

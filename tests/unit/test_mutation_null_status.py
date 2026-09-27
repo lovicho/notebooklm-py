@@ -59,6 +59,7 @@ STRICT_WRITE_RPCS = frozenset(
         RPCMethod.UPDATE_SOURCE,
         RPCMethod.RENAME_NOTEBOOK,
         RPCMethod.UPDATE_NOTE,
+        RPCMethod.DELETE_NOTE,
         RPCMethod.UPDATE_LABEL,
         RPCMethod.CREATE_LABEL,
         RPCMethod.RENAME_ARTIFACT,
@@ -413,11 +414,13 @@ def _is_true(expr: ast.expr | None) -> bool:
 def test_write_rpcs_do_not_swallow_a_status() -> None:
     """Every ``allow_null=True`` call on a :data:`STRICT_WRITE_RPCS` member is strict.
 
-    Deletes (idempotent by contract — an absent target may legitimately come
-    back as a tagged null), ``SHARE_NOTEBOOK`` / ``SHARE_ARTIFACT`` /
+    Other deletes (an absent target may legitimately come back as a tagged
+    null), ``SHARE_NOTEBOOK`` / ``SHARE_ARTIFACT`` /
     ``REMOVE_RECENTLY_VIEWED`` (recorded returning a tagged null on flows the
     client reports as successful, see ``_RPCS_OBSERVED_SWALLOWING_A_STATUS``)
-    and the derived reads are deliberately NOT in the set.
+    and the derived reads are deliberately NOT in the set. DELETE_NOTE is
+    strict, with a targeted NOT_FOUND exception and batch absence verification.
+    User grants opt into strict SHARE_NOTEBOOK statuses and verify the readback.
     """
     strict_names = {method.name for method in STRICT_WRITE_RPCS}
     offenders: list[str] = []

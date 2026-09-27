@@ -1,7 +1,7 @@
 """CLI integration tests for the ``share`` command group.
 
 These tests exercise the full CLI -> Client -> RPC path using VCR cassettes,
-covering the sharing happy paths flagged by issue #1316. The issue names them
+covering the sharing paths flagged by issue #1316. The issue names them
 ``add`` / ``list`` / ``revoke``; the real CLI surface (``cli/share_cmd.py``)
 exposes them as:
 
@@ -33,9 +33,8 @@ the display name to ``SCRUBBED_NAME`` via the email/display-name scrubbers in
 ``add`` / ``remove`` is an ``@example.com`` address (a reserved,
 non-routable domain), recorded with ``--no-notify`` so no real email is sent.
 
-Because the email/name scrubbers rewrite the recorded user list, replay
-assertions deliberately stay structural (exit code + JSON shape) rather than
-asserting on a specific scrubbed email value.
+The add cassette records a rejected synthetic grant: its status readback lacks
+the requested recipient. Replay must report this as unconfirmed, not successful.
 
 Recording (maintainer, with a valid profile)::
 
@@ -96,7 +95,7 @@ class TestShareAddCommand:
 
     @notebooklm_vcr.use_cassette("cli_share_add.yaml")
     def test_share_add(self, runner, mock_auth_for_vcr):
-        """``share add --no-notify`` runs SHARE_NOTEBOOK + GET_SHARE_STATUS."""
+        """The recorded refusal must not print a successful share confirmation."""
         result = runner.invoke(
             cli,
             [
@@ -110,11 +109,13 @@ class TestShareAddCommand:
                 "--no-notify",
             ],
         )
-        assert_command_success(result, allow_no_context=False)
+        assert result.exit_code == 1
+        assert "invalid argument" in result.output
+        assert "invitation emails" in result.output
 
     @notebooklm_vcr.use_cassette("cli_share_add.yaml")
     def test_share_add_json(self, runner, mock_auth_for_vcr):
-        """``share add --json`` reports the added user + permission."""
+        """JSON preserves unconfirmed status instead of echoing a fabricated added user."""
         result = runner.invoke(
             cli,
             [
@@ -129,13 +130,14 @@ class TestShareAddCommand:
                 "--json",
             ],
         )
-        assert_command_success(result, allow_no_context=False)
+        assert result.exit_code == 1
 
         data = parse_json_output(result.output)
         assert isinstance(data, dict), f"Expected JSON object, got: {result.output!r}"
-        assert data.get("added_user") == VCR_SHARE_EMAIL
-        assert data.get("permission") == "viewer"
-        assert data.get("notified") is False
+        assert data["unconfirmed"] is True
+        assert data["code"] == "UNCONFIRMED_WRITE"
+        assert data["recovery_action"] == "inspect_and_reconcile"
+        assert "added_user" not in data
 
 
 class TestShareRemoveCommand:
