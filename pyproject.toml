@@ -28,9 +28,10 @@ classifiers = [
 # bounds" for the policy.
 dependencies = [
     "httpx>=0.27.0,<0.29",
+    "idna>=3.6,<4",
     "click>=8.0.0,<9",
     "rich>=13.0.0,<16",
-    "filelock>=3.13,<4",
+    "filelock>=3.13,<5",
 ]
 
 [project.urls]
@@ -61,7 +62,7 @@ android = ["grpcio==1.76.0", "protobuf==6.33.5", "gpsoauth>=1.1.0"]
 # route (/.well-known/oauth-protected-resource/mcp → 404), which dead-ends
 # claude.ai's remote-connector OAuth discovery ("Couldn't connect to the
 # server"). 3.4.2 is the last-good; lift the pin once a fixed release ships.
-mcp = ["fastmcp==3.4.2"]
+mcp = ["fastmcp==4.0.9"]
 # Optional single-tenant REST server (the third _app adapter, after cli/ and
 # mcp/). EXPERIMENTAL: the /v1 surface may change in a minor release; it is
 # excluded from the public-API compatibility gate. python-multipart is REQUIRED
@@ -84,7 +85,7 @@ dev = [
     "python-dotenv>=1.0.0,<2",
     "mypy>=1.0.0,<3",
     "pre-commit>=4.5.1,<5",
-    "ruff==0.16.8",
+    "ruff==0.16.9",
     "tomli>=2.0.0,<3; python_version < '3.11'",  # for tests/unit/test_install_docs.py on Python 3.10 (tomllib is 3.11+)
     "vcrpy>=6.0.0,<9",
     "packaging>=23.0,<27",  # for tests/unit/test_version_gate.py (PEP 440 version parsing)
