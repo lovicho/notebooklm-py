@@ -31,6 +31,10 @@ HEADERS = {"Authorization": f"Bearer {TEST_TOKEN}", "Host": "127.0.0.1"}
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
     monkeypatch.delenv("NOTEBOOKLM_BACKEND", raising=False)
+    # Web multi-profile refuses these process-wide settings; keep the developer's
+    # shell from deciding test outcomes.
+    monkeypatch.delenv("NOTEBOOKLM_AUTH_JSON", raising=False)
+    monkeypatch.delenv("NOTEBOOKLM_HEADLESS_REAUTH_CDP_URL", raising=False)
 
 
 def profile_app(**kwargs: Any) -> Any:
@@ -565,9 +569,12 @@ def test_case_only_symlink_target_aliases_are_rejected(tmp_path: Path) -> None:
         create_app(profiles=["first", "second"], backend="android")
 
 
-def test_web_multi_profile_is_refused_and_single_entry_retains_behavior() -> None:
+def test_web_multi_profile_is_accepted_and_single_entry_retains_behavior() -> None:
+    # Web multi-profile is served (see test_web_profiles.py); only unknown
+    # backends are refused before startup.
+    create_app(profiles=["work", "personal"])
     with pytest.raises(ValueError, match="requires backend"):
-        create_app(profiles=["work", "personal"])
+        create_app(profiles=["work", "personal"], backend="auto")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="mutually exclusive"):
         create_app(profile="work", profiles=["personal"], backend="android")
     app = create_app(profiles=["work"], client_factory=lambda: fake_factory("work"))
@@ -597,7 +604,6 @@ def test_real_clients_allow_copied_tokens_without_web_bootstrap(
     pytest.importorskip("gpsoauth")
     from notebooklm._android.proto.google.internal.labs.tailwind.orchestration.v1 import read_pb2
     from notebooklm._android.session import AndroidSession
-    from notebooklm._auth import tokens
     from notebooklm._auth.mint_service import MintedOAuthToken, MintService
 
     record = MasterToken(
@@ -607,14 +613,14 @@ def test_real_clients_allow_copied_tokens_without_web_bootstrap(
         path = paths.get_storage_path(name)
         ProfileStore(path).write_master_token(record)
         path.write_text("not valid Web auth JSON")
+    # Web-auth tripwires without patching ``notebooklm._auth``: any Web load of
+    # the profile file or of inline env auth would fail on invalid JSON and
+    # leave that profile unavailable, and the files must stay untouched.
     monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", "also not valid Web auth")
     mints: list[MasterToken] = []
     wire_bearers: list[str] = []
     initial_bearers: dict[str, str] = {}
     reject_work = False
-
-    async def no_web(*args: Any, **kwargs: Any) -> Any:
-        pytest.fail("Android multi-profile must not bootstrap Web auth")
 
     async def mint(self: Any, token: MasterToken, spec: Any) -> MintedOAuthToken:
         mints.append(token)
@@ -632,7 +638,6 @@ def test_real_clients_allow_copied_tokens_without_web_bootstrap(
 
         return send
 
-    monkeypatch.setattr(tokens, "_load_stored_auth", no_web)
     monkeypatch.setattr(MintService, "mint_oauth", mint)
     monkeypatch.setattr(AndroidSession, "_unary_callable", callable_)
     app = profile_app()

@@ -28,6 +28,7 @@ from ._pending import PendingRegistry
 from ._profiles import PROFILE_HEADER
 
 if TYPE_CHECKING:
+    from .._app.web_profiles import WebProfileSet
     from ..client import NotebookLMClient
 
 __all__ = [
@@ -57,18 +58,25 @@ class AppState:
     ``client_loader`` is installed only by the application lifespan. It binds
     at most one client and lets a stale-auth startup recover after another
     process refreshes the selected profile.
+
+    ``web_profiles`` is set only for Web multi-profile states; it serves the
+    selected profile's file-only diagnostics. ``client_error_code`` records why
+    the last open failed (``"session_conflict"`` for a refused copied session),
+    so diagnostics report the recorded failure rather than today's files.
     """
 
     client: NotebookLMClient | None
     pending: PendingRegistry
     limiters: ServerLimiters
     client_error: BaseException | None = None
+    client_error_code: str | None = None
     client_loader: Callable[[int], Awaitable[NotebookLMClient]] | None = None
     client_generation: int = 0
     profile: str | None = None
     backend: str = "web"
     isolated: bool = False
     storage_path: Path | None = None
+    web_profiles: WebProfileSet | None = None
 
 
 @dataclass
@@ -102,12 +110,18 @@ async def get_client(request: Request) -> NotebookLMClient:
         except Exception:
             if state.isolated:
                 raise ProfileHTTPError(
-                    503, "profile_unavailable", "Selected Android profile is unavailable"
+                    503, "profile_unavailable", _unavailable_message(state)
                 ) from None
             raise
     if state.client_error is not None:
         raise _fresh_exception(state.client_error)
     raise RuntimeError("no client bound to the server")  # pragma: no cover
+
+
+def _unavailable_message(state: AppState) -> str:
+    if state.backend == "web":
+        return "Selected Web profile is unavailable"
+    return "Selected Android profile is unavailable"
 
 
 def get_client_error(request: Request) -> BaseException | None:

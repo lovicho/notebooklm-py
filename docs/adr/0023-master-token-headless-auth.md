@@ -185,3 +185,24 @@ master-token bootstrap. That adapter calls the coarse
 crosses the facade. Both wrapper frames delete the browser choice, CDP endpoint,
 and timeout locals on failure so a retained traceback cannot retain an
 account-equivalent endpoint. See ADR-0036.
+
+## Amendment (2026-09-29): re-minted sessions are independent
+
+The original Consequences section called master-token re-minting
+"single-consumer per account", on the reasoning that concurrent re-mints could
+invalidate each other's `SID`. That was a design-time caution, not a measured
+result. Live testing for
+[#1901](https://github.com/teng-lin/notebooklm-py/issues/1901) ran two
+processes, each holding a copy of one `master_token.json` and minting its own
+Web session, with production keepalive enabled. Neither process invalidated the
+other's session, including when extra mints were made during the run.
+
+What must not happen is two consumers actively using one cookie session at the
+same time: copies of one `storage_state.json` in concurrent use can sign each
+other out, so each concurrent consumer needs its own minted or logged-in
+session. Moving a profile's `storage_state.json` to another machine remains
+fine once the original copy is no longer used. A re-mint replaces its profile's
+stored session, so direct or manual re-mints against one profile path should
+still be serialized. Workers on one account continue to share that account's
+usage limits. This amendment supersedes the "Single-consumer per account"
+consequence above, which is kept as originally accepted.

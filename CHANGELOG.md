@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Web multi-profile REST and MCP serving (#1901).** `notebooklm-server --profiles
+  work,personal` and `notebooklm-mcp --profiles work,personal` now serve several
+  profiles on the default Web backend, with the same `X-NotebookLM-Profile` /
+  per-tool `profile` routing, per-profile isolation, `503 profile_unavailable`
+  degradation, and recovery cooldown as Android multi-profile mode. Each profile
+  opens its own `storage_state.json` by explicit path; a profile with only a
+  `master_token.json` mints its own session first. A profile that shares either
+  session cookie (`__Secure-1PSID` or `SID`) with another configured profile, such
+  as a copied `storage_state.json`, is refused while siblings keep serving;
+  diagnostics report `session_conflict`. Web profile opens
+  take turns, and waiting for a turn does not count against the startup timeout. Web
+  multi-profile mode refuses `NOTEBOOKLM_AUTH_JSON` and a non-blank
+  `NOTEBOOKLM_HEADLESS_REAUTH_CDP_URL`. Copies made after both profiles are serving
+  are detected only when one reopens. Single-profile and Android behavior are
+  unchanged.
 - **MCP inspection and retry metadata (#1925).** Studio summary and single-item
   responses include decoded media duration, slide count, and source count;
   unavailable metadata stays `null`. MCP errors preserve known retry delays as
@@ -33,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings apply to the whole batch. Together with the existing
   `sources.add_urls_batch()` / `source_add(urls=...)` support (#1998), these expose
   the verified batch-capable operations without adding MCP tools.
+
+### Documentation
+
+- **Master-token re-mint guidance (#1901).** The auth cookie lifecycle guide no
+  longer calls Web re-minting "single-consumer per account", and ADR-0023 gains
+  an amendment recording why. Live testing found that sessions minted from copies
+  of one master token stay independent. The guidance now warns against two
+  consumers actively using the same cookie session at once instead.
 
 ## [0.8.3] - 2026-09-25
 
