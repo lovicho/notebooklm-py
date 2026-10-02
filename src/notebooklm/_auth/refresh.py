@@ -769,7 +769,7 @@ async def _fetch_tokens_with_exact_baseline(
         pair = await asyncio.to_thread(_auth_cookies._build_cookie_pair_from_storage, path)
         return pair.live, snapshot_cookie_jar(pair.live), pair.baseline
 
-    result = await _fetch_tokens_with_refresh_core(
+    csrf, session_id, _, _, baseline = await _fetch_tokens_with_refresh_core(
         cookie_jar,
         storage_path,
         profile,
@@ -779,10 +779,9 @@ async def _fetch_tokens_with_exact_baseline(
         env_auth=env_auth,
         allow_headless=allow_headless,
     )
-    baseline = result[4]
     if baseline is None:  # pragma: no cover - typed initial baseline is always retained
         raise AssertionError("typed token load lost its persistence baseline")
-    return result[0], result[1], baseline
+    return csrf, session_id, baseline
 
 
 async def _fetch_tokens_with_refresh_core(
@@ -813,18 +812,19 @@ async def _fetch_tokens_with_refresh_core(
         )
         return csrf, session_id, False, None, initial_baseline
     except ValueError as err:
-        return await _cold_fallbacks(
-            err,
-            cookie_jar,
-            storage_path,
-            profile,
-            env_auth=env_auth,
-            allow_headless=allow_headless,
-            resolve_route=resolve_route,
-            load_replacement=load_replacement,
-            baseline=initial_baseline,
-            deps=deps,
-        )
+        with _auth_extraction._auth_error_boundary():
+            return await _cold_fallbacks(
+                err,
+                cookie_jar,
+                storage_path,
+                profile,
+                env_auth=env_auth,
+                allow_headless=allow_headless,
+                resolve_route=resolve_route,
+                load_replacement=load_replacement,
+                baseline=initial_baseline,
+                deps=deps,
+            )
 
 
 async def _cold_fallbacks(
@@ -1054,6 +1054,7 @@ async def fetch_tokens(
 
     Raises:
         httpx.HTTPError: If request fails
+        AuthError: If authentication is expired and recovery is exhausted
         ValueError: If tokens cannot be extracted from response
         RuntimeError: If ``NOTEBOOKLM_REFRESH_CMD`` is set but fails
     """
@@ -1067,8 +1068,7 @@ async def fetch_tokens(
         force_authuser_query=authuser is not None,
     )
     if refreshed:
-        fresh = _cookie_map_from_jar(jar)
-        _update_cookie_input(cookies, fresh)
+        _update_cookie_input(cookies, _cookie_map_from_jar(jar))
     return csrf, session_id
 
 
@@ -1094,7 +1094,7 @@ async def fetch_tokens_with_domains(
     account_email: str | None = None,
     allow_headless: bool = False,
 ) -> tuple[str, str]:
-    """Fetch tokens with domain-preserving cookies and persist their observation."""
+    """Fetch and persist domain-preserving tokens; exhausted login recovery raises AuthError."""
     storage_path = _auth_cookies.resolve_auth_storage_path(path, profile)
     pair = await asyncio.to_thread(_auth_cookies._build_cookie_pair_from_storage, storage_path)
     live = pair.live

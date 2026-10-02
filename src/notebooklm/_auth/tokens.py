@@ -14,6 +14,7 @@ import httpx
 from .._deprecation import warn_registered_deprecation
 from . import account as _auth_account
 from . import cookies as _auth_cookies
+from . import extraction as _auth_extraction
 from . import psidts_recovery as _auth_psidts_recovery
 from . import refresh as _auth_refresh
 from . import storage as _auth_storage
@@ -477,6 +478,7 @@ class AuthTokens:
 
         Raises:
             FileNotFoundError: If storage file doesn't exist
+            AuthError: If authentication is expired and recovery is exhausted
             ValueError: If required cookies are missing or tokens can't be extracted
             httpx.HTTPError: If token fetch request fails
 
@@ -683,12 +685,13 @@ class _ProductionTokenAcquirer:
             # recovery, or cookie-store merge.  Set-Cookie observations remain
             # in ``seed.live`` and become persistable only if the Web sidecar is
             # later materialised and assumes lifecycle ownership.
-            csrf, session_id = await _auth_refresh._fetch_tokens_with_jar(
-                seed.live,
-                storage_path,
-                poke=False,
-                **await resolve_route(storage_path),
-            )
+            with _auth_extraction._auth_error_boundary():
+                csrf, session_id = await _auth_refresh._fetch_tokens_with_jar(
+                    seed.live,
+                    storage_path,
+                    poke=False,
+                    **await resolve_route(storage_path),
+                )
             return TokenAcquisition(
                 csrf,
                 session_id,
