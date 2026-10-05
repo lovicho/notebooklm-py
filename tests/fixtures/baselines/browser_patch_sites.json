@@ -21,6 +21,10 @@
       "path": "tests/unit/test_auth_session_refresh_cmd.py"
     },
     {
+      "count": 16,
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
       "count": 13,
       "path": "tests/unit/test_browser_oauth_token.py"
     }
@@ -37,6 +41,156 @@
       "path": "tests/unit/test_auth_browser_facade.py"
     },
     {
+      "attribute": "heal_captured_state",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "helper",
+      "owner_qualname": "_install_browser",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_browser_close_during_courtesy_observation_retains_abort_routing",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_browser_closed_during_post_heal_guard_preserves_storage",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_courtesy_observation_consuming_deadline_never_schedules_a_redirect",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_final_routing_reobservation_still_refuses_invalid_or_unstable_state",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_invalid_final_export_is_refused_before_heal_or_write",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_late_invalid_session_after_heal_does_not_replace_storage",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_nid_only_app_landing_preserves_existing_storage",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_owned_sign_in_continuation_does_not_hide_non_race_errors",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_page_only_close_after_heal_refuses_cached_url_and_context_sid",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_post_heal_reobservation_refuses_an_invalid_or_unstable_candidate",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_recovered_on_app_page_without_a_commit_reports_navigation_failure",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_restored_sid_after_every_goto_aborts_is_not_commit_evidence",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_sid_only_capture_survives_post_heal_app_navigation",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_url_read_target_closed_retains_browser_abort_classification",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
       "attribute": "run_browser_capture",
       "count": 1,
       "idiom": "monkeypatch.setattr",
@@ -45,6 +199,16 @@
       "owner_qualname": "test_capture_delegates_plan_and_projects_page_html",
       "package": "notebooklm._browser",
       "path": "tests/unit/test_auth_browser_facade.py"
+    },
+    {
+      "attribute": "sync_playwright_context",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "helper",
+      "owner_qualname": "_install_browser",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
     {
       "attribute": "attempt_headless_reauth",
@@ -383,6 +547,96 @@
       "path": "tests/unit/test_auth_session_refresh_cmd.py"
     },
     {
+      "count": 2,
+      "owner_kind": "helper",
+      "owner_qualname": "_install_browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_browser_close_during_courtesy_observation_retains_abort_routing",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_browser_closed_during_post_heal_guard_preserves_storage",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_courtesy_observation_consuming_deadline_never_schedules_a_redirect",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_final_routing_reobservation_still_refuses_invalid_or_unstable_state",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_invalid_final_export_is_refused_before_heal_or_write",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_late_invalid_session_after_heal_does_not_replace_storage",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_nid_only_app_landing_preserves_existing_storage",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_owned_sign_in_continuation_does_not_hide_non_race_errors",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_page_only_close_after_heal_refuses_cached_url_and_context_sid",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_post_heal_reobservation_refuses_an_invalid_or_unstable_candidate",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_recovered_on_app_page_without_a_commit_reports_navigation_failure",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_restored_sid_after_every_goto_aborts_is_not_commit_evidence",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_sid_only_capture_survives_post_heal_app_navigation",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_url_read_target_closed_retains_browser_abort_classification",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
       "count": 1,
       "owner_kind": "test",
       "owner_qualname": "test_capture_cdp_preserves_external_ownership_and_closes_created_resources",
@@ -458,7 +712,25 @@
       "module": "browser_capture"
     },
     {
+      "attribute": "heal_captured_state",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 14,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture"
+    },
+    {
       "attribute": "run_browser_capture",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture"
+    },
+    {
+      "attribute": "sync_playwright_context",
       "count": 1,
       "idiom": "monkeypatch.setattr",
       "module": "browser_capture"
@@ -497,13 +769,13 @@
   "summary": {
     "TOTAL": {
       "private": 0,
-      "public": 27,
-      "total": 27
+      "public": 43,
+      "total": 43
     },
     "browser_capture": {
       "private": 0,
-      "public": 2,
-      "total": 2
+      "public": 18,
+      "total": 18
     },
     "headless_reauth": {
       "private": 0,

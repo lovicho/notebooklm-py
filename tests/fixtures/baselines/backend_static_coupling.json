@@ -2255,7 +2255,16 @@
     },
     {
       "kind": "from",
-      "lineno": 168,
+      "lineno": 171,
+      "scope": "read_doctor_auth_state",
+      "scope_kind": "function",
+      "source": "notebooklm._app.doctor",
+      "target": "notebooklm.auth",
+      "type_only": false
+    },
+    {
+      "kind": "from",
+      "lineno": 191,
       "scope": "_check_auth",
       "scope_kind": "function",
       "source": "notebooklm._app.doctor",
@@ -2264,7 +2273,16 @@
     },
     {
       "kind": "from",
-      "lineno": 327,
+      "lineno": 196,
+      "scope": "_check_auth",
+      "scope_kind": "function",
+      "source": "notebooklm._app.doctor",
+      "target": "notebooklm.exceptions",
+      "type_only": false
+    },
+    {
+      "kind": "from",
+      "lineno": 390,
       "scope": "run_checks",
       "scope_kind": "function",
       "source": "notebooklm._app.doctor",
@@ -3366,6 +3384,24 @@
       "scope": null,
       "scope_kind": "module",
       "source": "notebooklm._auth.cookies",
+      "target": "notebooklm._env",
+      "type_only": false
+    },
+    {
+      "kind": "from",
+      "lineno": 20,
+      "scope": null,
+      "scope_kind": "module",
+      "source": "notebooklm._auth.cookies",
+      "target": "notebooklm.exceptions",
+      "type_only": false
+    },
+    {
+      "kind": "from",
+      "lineno": 21,
+      "scope": null,
+      "scope_kind": "module",
+      "source": "notebooklm._auth.cookies",
       "target": "notebooklm.paths",
       "type_only": false
     },
@@ -3578,7 +3614,7 @@
     },
     {
       "kind": "from",
-      "lineno": 39,
+      "lineno": 35,
       "scope": null,
       "scope_kind": "module",
       "source": "notebooklm._browser.browser_capture",
@@ -3587,7 +3623,7 @@
     },
     {
       "kind": "from",
-      "lineno": 40,
+      "lineno": 36,
       "scope": null,
       "scope_kind": "module",
       "source": "notebooklm._browser.browser_capture",
@@ -3596,7 +3632,7 @@
     },
     {
       "kind": "from",
-      "lineno": 47,
+      "lineno": 39,
       "scope": null,
       "scope_kind": "module",
       "source": "notebooklm._browser.browser_capture",
@@ -3605,7 +3641,7 @@
     },
     {
       "kind": "from",
-      "lineno": 48,
+      "lineno": 40,
       "scope": null,
       "scope_kind": "module",
       "source": "notebooklm._browser.browser_capture",
@@ -3614,7 +3650,7 @@
     },
     {
       "kind": "from",
-      "lineno": 49,
+      "lineno": 41,
       "scope": null,
       "scope_kind": "module",
       "source": "notebooklm._browser.browser_capture",
@@ -3623,7 +3659,7 @@
     },
     {
       "kind": "from",
-      "lineno": 50,
+      "lineno": 42,
       "scope": null,
       "scope_kind": "module",
       "source": "notebooklm._browser.browser_capture",
@@ -3632,7 +3668,7 @@
     },
     {
       "kind": "from",
-      "lineno": 54,
+      "lineno": 46,
       "scope": null,
       "scope_kind": "module",
       "source": "notebooklm._browser.browser_capture",
@@ -8573,7 +8609,7 @@
     },
     {
       "kind": "from",
-      "lineno": 17,
+      "lineno": 24,
       "scope": null,
       "scope_kind": "module",
       "source": "notebooklm.cli.doctor_cmd",
@@ -8582,7 +8618,7 @@
     },
     {
       "kind": "from",
-      "lineno": 18,
+      "lineno": 25,
       "scope": null,
       "scope_kind": "module",
       "source": "notebooklm.cli.doctor_cmd",
@@ -8591,7 +8627,7 @@
     },
     {
       "kind": "from",
-      "lineno": 19,
+      "lineno": 26,
       "scope": null,
       "scope_kind": "module",
       "source": "notebooklm.cli.doctor_cmd",
@@ -11791,15 +11827,15 @@
       "modules": 54
     },
     "app": {
-      "lines": 14365,
+      "lines": 14429,
       "modules": 47
     },
     "auth": {
-      "lines": 13767,
+      "lines": 13807,
       "modules": 33
     },
     "cli": {
-      "lines": 22817,
+      "lines": 22953,
       "modules": 76
     },
     "mcp": {
@@ -11807,7 +11843,7 @@
       "modules": 42
     },
     "root": {
-      "lines": 27126,
+      "lines": 27128,
       "modules": 90
     },
     "rpc": {
@@ -11832,13 +11868,13 @@
     }
   },
   "summary": {
-    "authored_lines": 153618,
+    "authored_lines": 153860,
     "authored_modules": 492,
     "class_local_edges": 0,
-    "cross_subsystem_edges": 1298,
+    "cross_subsystem_edges": 1302,
     "dynamic_import_calls": 10,
-    "function_local_edges": 92,
-    "module_level_edges": 1206,
+    "function_local_edges": 94,
+    "module_level_edges": 1208,
     "type_only_edges": 138
   },
   "version": 1
