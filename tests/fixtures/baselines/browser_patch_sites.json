@@ -21,7 +21,7 @@
       "path": "tests/unit/test_auth_session_refresh_cmd.py"
     },
     {
-      "count": 45,
+      "count": 55,
       "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
     {
@@ -76,6 +76,16 @@
       "idiom": "monkeypatch.setattr",
       "module": "browser_capture",
       "owner_kind": "test",
+      "owner_qualname": "test_browser_closed_during_sign_in_check_preserves_storage",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "heal_captured_state",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
       "owner_qualname": "test_courtesy_decision_declines_sid_arrival_and_unstable_app_snapshots",
       "package": "notebooklm._browser",
       "path": "tests/unit/test_browser_capture_session_candidate.py"
@@ -116,6 +126,16 @@
       "idiom": "monkeypatch.setattr",
       "module": "browser_capture",
       "owner_kind": "test",
+      "owner_qualname": "test_failed_response_release_does_not_discard_a_sign_in_redirect",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "heal_captured_state",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
       "owner_qualname": "test_final_routing_reobservation_still_refuses_invalid_or_unstable_state",
       "package": "notebooklm._browser",
       "path": "tests/unit/test_browser_capture_session_candidate.py"
@@ -146,6 +166,16 @@
       "idiom": "monkeypatch.setattr",
       "module": "browser_capture",
       "owner_kind": "test",
+      "owner_qualname": "test_http_error_on_a_sign_in_host_is_not_confirmed_sign_out",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "heal_captured_state",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
       "owner_qualname": "test_initial_settle_and_fallback_share_a_short_deadline",
       "package": "notebooklm._browser",
       "path": "tests/unit/test_browser_capture_session_candidate.py"
@@ -157,6 +187,16 @@
       "module": "browser_capture",
       "owner_kind": "test",
       "owner_qualname": "test_interactive_anonymous_landing_gets_one_encoded_sign_in_fallback",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "heal_captured_state",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_interactive_login_does_not_run_the_sign_in_check",
       "package": "notebooklm._browser",
       "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
@@ -207,6 +247,16 @@
       "module": "browser_capture",
       "owner_kind": "test",
       "owner_qualname": "test_non_navigation_candidate_errors_propagate",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "heal_captured_state",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_non_sign_in_probe_landings_are_not_refused",
       "package": "notebooklm._browser",
       "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
@@ -336,7 +386,37 @@
       "idiom": "monkeypatch.setattr",
       "module": "browser_capture",
       "owner_kind": "test",
+      "owner_qualname": "test_signed_in_browser_session_is_captured",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "heal_captured_state",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_signed_out_browser_session_does_not_replace_storage",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "heal_captured_state",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
       "owner_qualname": "test_superseded_sign_in_continuation_still_waits_for_sid",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "heal_captured_state",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_unanswered_sign_in_check_keeps_the_existing_capture_behaviour",
       "package": "notebooklm._browser",
       "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
@@ -367,6 +447,16 @@
       "module": "browser_capture",
       "owner_kind": "test",
       "owner_qualname": "test_browser_closed_during_post_heal_guard_preserves_storage",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_browser_closed_during_sign_in_check_preserves_storage",
       "package": "notebooklm._browser",
       "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
@@ -477,6 +567,16 @@
       "module": "browser_capture",
       "owner_kind": "test",
       "owner_qualname": "test_sid_only_capture_survives_post_heal_app_navigation",
+      "package": "notebooklm._browser",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "attribute": "replace_captured_profile",
+      "count": 1,
+      "idiom": "monkeypatch.setattr",
+      "module": "browser_capture",
+      "owner_kind": "test",
+      "owner_qualname": "test_signed_out_browser_session_does_not_replace_storage",
       "package": "notebooklm._browser",
       "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
@@ -855,6 +955,12 @@
       "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
     {
+      "count": 2,
+      "owner_kind": "test",
+      "owner_qualname": "test_browser_closed_during_sign_in_check_preserves_storage",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
       "count": 1,
       "owner_kind": "test",
       "owner_qualname": "test_courtesy_decision_declines_sid_arrival_and_unstable_app_snapshots",
@@ -879,6 +985,12 @@
       "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
     {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_failed_response_release_does_not_discard_a_sign_in_redirect",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
       "count": 2,
       "owner_kind": "test",
       "owner_qualname": "test_final_routing_reobservation_still_refuses_invalid_or_unstable_state",
@@ -899,6 +1011,12 @@
     {
       "count": 1,
       "owner_kind": "test",
+      "owner_qualname": "test_http_error_on_a_sign_in_host_is_not_confirmed_sign_out",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
       "owner_qualname": "test_initial_settle_and_fallback_share_a_short_deadline",
       "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
@@ -906,6 +1024,12 @@
       "count": 1,
       "owner_kind": "test",
       "owner_qualname": "test_interactive_anonymous_landing_gets_one_encoded_sign_in_fallback",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_interactive_login_does_not_run_the_sign_in_check",
       "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
     {
@@ -936,6 +1060,12 @@
       "count": 1,
       "owner_kind": "test",
       "owner_qualname": "test_non_navigation_candidate_errors_propagate",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_non_sign_in_probe_landings_are_not_refused",
       "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
     {
@@ -1013,7 +1143,25 @@
     {
       "count": 1,
       "owner_kind": "test",
+      "owner_qualname": "test_signed_in_browser_session_is_captured",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 2,
+      "owner_kind": "test",
+      "owner_qualname": "test_signed_out_browser_session_does_not_replace_storage",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
       "owner_qualname": "test_superseded_sign_in_continuation_still_waits_for_sid",
+      "path": "tests/unit/test_browser_capture_session_candidate.py"
+    },
+    {
+      "count": 1,
+      "owner_kind": "test",
+      "owner_qualname": "test_unanswered_sign_in_check_keeps_the_existing_capture_behaviour",
       "path": "tests/unit/test_browser_capture_session_candidate.py"
     },
     {
@@ -1099,13 +1247,13 @@
     },
     {
       "attribute": "heal_captured_state",
-      "count": 31,
+      "count": 39,
       "idiom": "monkeypatch.setattr",
       "module": "browser_capture"
     },
     {
       "attribute": "replace_captured_profile",
-      "count": 14,
+      "count": 16,
       "idiom": "monkeypatch.setattr",
       "module": "browser_capture"
     },
@@ -1149,13 +1297,13 @@
   "summary": {
     "TOTAL": {
       "private": 0,
-      "public": 72,
-      "total": 72
+      "public": 82,
+      "total": 82
     },
     "browser_capture": {
       "private": 0,
-      "public": 47,
-      "total": 47
+      "public": 57,
+      "total": 57
     },
     "headless_reauth": {
       "private": 0,
